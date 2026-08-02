@@ -740,3 +740,18 @@ vidia-smi observed RTX 3080 Ti activity during the run.
 - production decision: no solver or physical-model source was changed; the filtered source scope is accepted for the requested public GitHub repository
 - cleanup status: pytest and npm build processes exited; generated frontend `dist/` remains ignored; no simulation output was uploaded
 - next usable action: create public `CG-Chaoguoguo/Taichi-Flow`, commit the filtered tree, push `main`, and verify the remote contents
+
+## 2026-08-02T13:50:57+08:00 - GitHub public publication COMPLETE
+
+- phase name: filtered public GitHub repository creation and first upload
+- command:
+  - `gh repo create CG-Chaoguoguo/Taichi-Flow --public --description "Taichi-Flow scientific simulation workbench"`
+  - `git remote add origin https://github.com/CG-Chaoguoguo/Taichi-Flow.git`
+  - `git push -u origin main`
+  - `gh repo view CG-Chaoguoguo/Taichi-Flow --json nameWithOwner,isPrivate,defaultBranchRef,url`
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\agentlog.md`, `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-02_github_publication\test_summary.md`
+- compared case: filtered source tree at `C:\Users\Administrator\Desktop\Taichi-Flow`; no numerical simulation case was executed
+- metric/diff evidence: remote `isPrivate=false`; default branch `main`; remote `refs/heads/main` points to `83d4a2536ff0a279b2df4a981ca6d8c958f44ca8`; committed file count `324`; forbidden committed path count `0`; local branch is clean and tracks `origin/main`
+- production decision: public repository created and filtered Taichi-Flow source uploaded; virtual environments, simulation inputs/outputs, runtime state, build output, parity tools, and comparison scripts remain excluded
+- cleanup status: all task-owned git, gh, pytest, and npm processes exited; no simulation process was started
+- next usable action: clone or open `https://github.com/CG-Chaoguoguo/Taichi-Flow`
