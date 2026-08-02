@@ -1,0 +1,54 @@
+# Python bytecode and local tooling caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Frontend dependencies and generated builds
+**/node_modules/
+**/dist/
+**/.vite/
+*.tsbuildinfo
+
+# Local runtime state and process logs
+.runtime/
+**/.taichi-flow/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.pid
+.env
+.env.*
+!.env.example
+
+# Simulation inputs/outputs and generated result packages
+outputs/
+uploads/
+artifacts/
+*.npz
+*.npy
+
+# Test-only toolchain sandbox and generated intermediates
+tests/_fortran_toolchain_sandbox/
+tests/**/__pycache__/
+tests/**/generated/
+tests/**/work/
+tests/**/logs/
+tests/**/scripts/
+tests/**/patches/
+
+# Test comparison and diagnostic intermediate scripts
+tests/comparison/
+tests/benchmark.py
+tests/run_all_tests.py
+tools/

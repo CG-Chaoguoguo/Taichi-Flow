@@ -1,0 +1,51 @@
+"""Utility functions for EDDA-Taichi."""
+
+from .coordinate_utils import (
+    CoordinateTransformer,
+    detect_crs,
+    validate_crs_match,
+    grid_to_geographic,
+    geographic_to_grid,
+    ensure_consistent_crs,
+    get_utm_zone,
+    calculate_grid_spacing,
+    create_transform,
+    get_bounds_from_transform,
+)
+from .backend_guard_policy import (
+    BACKEND_COMPARISON_CONTEXT,
+    CPU_REFERENCE_VS_KERNEL_CONTEXT,
+    DEFAULT_POLICY_NAME,
+    QMASSNET_POLICY_NAME,
+    DEFAULT_TOLERANCE,
+    QMASSNET_CPU_CUDA_TOLERANCE,
+    GuardTolerance,
+    compare_guarded_arrays,
+    is_cpu_cuda_backend_pair,
+    resolve_guard_tolerance,
+    summarize_guarded_comparisons,
+)
+
+__all__ = [
+    'BACKEND_COMPARISON_CONTEXT',
+    'CPU_REFERENCE_VS_KERNEL_CONTEXT',
+    'DEFAULT_POLICY_NAME',
+    'QMASSNET_POLICY_NAME',
+    'DEFAULT_TOLERANCE',
+    'QMASSNET_CPU_CUDA_TOLERANCE',
+    'GuardTolerance',
+    'compare_guarded_arrays',
+    'CoordinateTransformer',
+    'detect_crs',
+    'is_cpu_cuda_backend_pair',
+    'validate_crs_match',
+    'grid_to_geographic',
+    'geographic_to_grid',
+    'ensure_consistent_crs',
+    'get_utm_zone',
+    'calculate_grid_spacing',
+    'create_transform',
+    'get_bounds_from_transform',
+    'resolve_guard_tolerance',
+    'summarize_guarded_comparisons',
+]

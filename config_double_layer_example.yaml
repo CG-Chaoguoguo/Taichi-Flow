@@ -1,0 +1,129 @@
+boundary_conditions: null
+compute:
+  backend: auto
+  chunk_size: null
+  num_threads: null
+  use_double_precision: false
+dem_file: examples/data/dem.tif
+erosion:
+  k_deposition: 0.1
+  k_erosion: 1.0e-05
+  tau_c: 10.0
+  v_critical: 0.5
+hydrology:
+  K_sat: 1.0e-05
+  psi_f: 0.1
+  theta_i: 0.2
+  theta_s: 0.45
+output_dir: ./output
+output_format: geotiff
+rainfall_file: examples/data/rainfall.csv
+rheology:
+  Cv_max: 0.65
+  Cv_threshold: 0.2
+  alpha1: 0.0765
+  alpha2: 0.0538
+  beta1: 10.11
+  beta2: 17.48
+  n_manning: 0.03
+  rho_sediment: 2650.0
+  rho_water: 1000.0
+save_intermediate: true
+soil:
+  c: 5000.0
+  depth: 2.0
+  double_layer:
+    bottom_layer:
+      K_sat: 5.0e-06
+      alpha: 1.5
+      c: 8000.0
+      diffusivity: 5.0e-07
+      gamma_s: 21000.0
+      phi: 35.0
+      phib: 20.0
+      theta_ini: 0.18
+      theta_res: 0.05
+      theta_sat: 0.4
+    enabled: true
+    nudzb:
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    nudzt:
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    - 0.01
+    nzsb: 26
+    nzst: 26
+    top_layer:
+      K_sat: 1.0e-05
+      alpha: 2.0
+      c: 5000.0
+      diffusivity: 1.0e-06
+      gamma_s: 20000.0
+      phi: 30.0
+      phib: 15.0
+      theta_ini: 0.2
+      theta_res: 0.05
+      theta_sat: 0.45
+    uww: 0.0
+    zmin: 0.01
+  gamma_s: 20000.0
+  gamma_w: 9800.0
+  phi: 30.0
+soil_zones_file: null
+spatial_zones: null
+time:
+  CFL: 0.5
+  dt_initial: 0.1
+  dt_max: 1.0
+  dt_min: 0.0001
+  dt_output: 60.0
+  t_end: 3600.0
+  t_start: 0.0

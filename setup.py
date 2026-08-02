@@ -1,0 +1,67 @@
+"""Taichi Flow: GPU-accelerated debris-flow simulation."""
+from setuptools import setup, find_packages
+from pathlib import Path
+
+# Read README
+readme_file = Path(__file__).parent / "README.md"
+long_description = readme_file.read_text() if readme_file.exists() else ""
+
+setup(
+    name="taichi-flow",
+    version="0.1.0",
+    author="Taichi Flow Development Team",
+    author_email="your.email@example.com",
+    description="Taichi/CUDA debris-flow simulation service",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/yourusername/taichi-flow",
+    packages=find_packages(),
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Physics",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+    ],
+    python_requires=">=3.9,<3.14",  # Taichi 1.7.4 supports Python 3.9-3.13
+    install_requires=[
+        "taichi>=1.6.0",
+        "numpy>=1.24.0",
+        "scipy>=1.10.0",
+        "gdal>=3.6.0",
+        "rasterio>=1.3.0",
+        "geopandas>=0.12.0",
+        "pyproj>=3.4.0",
+        "fastapi>=0.100.0",
+        "httpx>=0.24.0",
+        "uvicorn[standard]>=0.23.0",
+        "websockets>=11.0",
+        "websocket-client>=1.8.0",
+        "python-multipart>=0.0.6",
+        "streamlit>=1.28.0",
+        "plotly>=5.17.0",
+        "pandas>=2.0.0",
+        "pydantic>=2.0.0",
+        "python-dotenv>=1.0.0",
+        "tqdm>=4.65.0",
+        "pyyaml>=6.0",
+    ],
+    extras_require={
+        "dev": [
+            "pytest>=7.4.0",
+            "black>=23.0.0",
+            "mypy>=1.5.0",
+            "flake8>=6.0.0",
+        ],
+    },
+    entry_points={
+        "console_scripts": [
+            "taichi-flow-api=api.app:main",
+        ],
+    },
+)

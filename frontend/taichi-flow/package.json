@@ -1,0 +1,38 @@
+{
+  "name": "taichi-flow-fluent-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:desktop": "node --test desktop/directoryPicker.test.cjs",
+    "preview": "vite preview",
+    "desktop": "npm run build && electron desktop/main.cjs",
+    "desktop:dev": "set TAICHI_FLOW_DESKTOP_URL=http://127.0.0.1:3000&& electron desktop/main.cjs"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.487.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.13.1",
+    "tailwind-merge": "^3.0.1",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^31.7.7",
+    "jsdom": "^29.1.1",
+    "typescript": "~5.7.2",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.10"
+  }
+}

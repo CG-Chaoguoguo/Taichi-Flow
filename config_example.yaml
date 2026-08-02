@@ -1,0 +1,62 @@
+# Example EDDA Simulation Configuration
+
+# Input files
+dem_file: "examples/data/dem.tif"
+rainfall_file: "examples/data/rainfall.csv"
+soil_zones_file: null
+
+# Output settings
+output_dir: "./output"
+output_format: "geotiff"  # Options: geotiff, netcdf, ascii
+save_intermediate: true
+
+# Hydrology parameters (Green-Ampt infiltration model)
+hydrology:
+  K_sat: 1.0e-5          # Saturated hydraulic conductivity (m/s)
+  theta_s: 0.45          # Saturated water content
+  theta_i: 0.20          # Initial water content
+  psi_f: 0.10            # Wetting front suction head (m)
+
+# Soil parameters (slope stability)
+soil:
+  c: 5000.0              # Cohesion (Pa)
+  phi: 30.0              # Internal friction angle (degrees)
+  gamma_s: 20000.0       # Soil unit weight (N/m³)
+  gamma_w: 9800.0        # Water unit weight (N/m³)
+  depth: 2.0             # Soil depth (m)
+
+# Rheology parameters
+rheology:
+  n_manning: 0.03        # Manning roughness coefficient
+  alpha1: 0.0765         # Quadratic model parameter α1
+  beta1: 10.11           # Quadratic model parameter β1
+  alpha2: 0.0538         # Quadratic model parameter α2
+  beta2: 17.48           # Quadratic model parameter β2
+  rho_water: 1000.0      # Water density (kg/m³)
+  rho_sediment: 2650.0   # Sediment density (kg/m³)
+  Cv_threshold: 0.2      # Concentration threshold for flow type
+  Cv_max: 0.65           # Maximum volumetric concentration
+
+# Erosion and deposition parameters
+erosion:
+  tau_c: 10.0            # Critical shear stress for erosion (Pa)
+  k_erosion: 1.0e-5      # Erosion coefficient (m/s/Pa)
+  v_critical: 0.5        # Critical velocity for deposition (m/s)
+  k_deposition: 0.1      # Deposition coefficient
+
+# Time parameters
+time:
+  t_start: 0.0           # Start time (s)
+  t_end: 3600.0          # End time (s) - 1 hour
+  dt_initial: 0.1        # Initial time step (s)
+  dt_min: 1.0e-4         # Minimum time step (s)
+  dt_max: 1.0            # Maximum time step (s)
+  dt_output: 60.0        # Output interval (s) - every minute
+  CFL: 0.5               # CFL number for stability
+
+# Compute parameters
+compute:
+  backend: "auto"        # Options: auto, cuda, cpu, vulkan
+  use_double_precision: false
+  chunk_size: null       # For large grids, set to chunk size (e.g., 10000)
+  num_threads: null      # Number of CPU threads (null = auto)

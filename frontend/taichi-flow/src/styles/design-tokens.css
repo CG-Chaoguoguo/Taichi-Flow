@@ -1,0 +1,150 @@
+:root {
+  /* Linear 风格设计 token —— 深色优先、精确、紫罗兰强调 */
+  --font-sans: "Inter", -apple-system, system-ui, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "Berkeley Mono", "SF Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  /* 8px 间距体系 */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 48px;
+
+  /* 圆角 */
+  --radius-none: 0px;
+  --radius-small: 2px;
+  --radius-medium: 6px;
+  --radius-large: 8px;
+  --radius-xlarge: 12px;
+  --radius-pill: 9999px;
+
+  /* 阴影 —— Linear 多层叠加，强调深度而非模糊 */
+  --shadow-rest: none;
+  --shadow-hover: rgba(0, 0, 0, 0.2) 0px 0px 0px 1px;
+  --shadow-floating: rgba(0, 0, 0, 0.2) 0px 0px 0px 1px, rgba(0, 0, 0, 0.4) 0px 2px 4px 0px;
+  --shadow-dialog: rgba(0, 0, 0, 0) 0px 8px 2px, rgba(0, 0, 0, 0.01) 0px 5px 2px, rgba(0, 0, 0, 0.04) 0px 3px 2px, rgba(0, 0, 0, 0.07) 0px 1px 1px, rgba(0, 0, 0, 0.08) 0px 0px 1px;
+}
+
+/* 浅色主题 */
+html[data-theme="light"],
+:root {
+  --seed-bg: #f7f8f8;
+  --seed-fg: #08090a;
+  --seed-primary: #5e6ad2;
+  --seed-accent: #7170ff;
+  --seed-surface: #ffffff;
+  --seed-radius: 6px;
+
+  /* 语义颜色 */
+  --color-bg-canvas: #f7f8f8;
+  --color-surface: #ffffff;
+  --color-surface-secondary: #f3f4f5;
+  --color-surface-tertiary: #ececee;
+  --color-surface-hover: #f3f4f5;
+  --color-surface-active: #edeefD;
+  --color-surface-selected: #e8eaff;
+  --color-border: #d0d6e0;
+  --color-border-strong: #08090a;
+  --color-foreground: #08090a;
+  --color-foreground-secondary: #3f3f46;
+  --color-foreground-tertiary: #6a6a72;
+  --color-foreground-disabled: #8a8f98;
+  --color-brand: #5e6ad2;
+  --color-brand-hover: #7170ff;
+  --color-brand-active: #828fff;
+  --color-brand-bg-subtle: #e8eaff;
+  --color-success: #27a644;
+  --color-success-bg: #e6f7ec;
+  --color-warning: #c18300;
+  --color-warning-bg: #fff8e5;
+  --color-error: #c13515;
+  --color-error-bg: #fcebe6;
+  --color-info: #5e6ad2;
+  --color-info-bg: #e8eaff;
+  --color-focus: #7170ff;
+
+  color-scheme: light;
+}
+
+/* 深色主题（默认） */
+html[data-theme="dark"] {
+  --seed-bg: #08090a;
+  --seed-fg: #f7f8f8;
+  --seed-primary: #5e6ad2;
+  --seed-accent: #7170ff;
+  --seed-surface: #0f1011;
+  --seed-radius: 6px;
+
+  --color-bg-canvas: #08090a;
+  --color-surface: #0f1011;
+  --color-surface-secondary: #191a1b;
+  --color-surface-tertiary: #23252a;
+  --color-surface-hover: #191a1b;
+  --color-surface-active: #1a1c33;
+  --color-surface-selected: #1f2138;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-strong: rgba(255, 255, 255, 0.14);
+  --color-foreground: #f7f8f8;
+  --color-foreground-secondary: #d0d6e0;
+  --color-foreground-tertiary: #8a8f98;
+  --color-foreground-disabled: #62666d;
+  --color-brand: #7170ff;
+  --color-brand-hover: #828fff;
+  --color-brand-active: #9aa4ff;
+  --color-brand-bg-subtle: rgba(113, 112, 255, 0.12);
+  --color-success: #10b981;
+  --color-success-bg: rgba(16, 185, 129, 0.12);
+  --color-warning: #f59e0b;
+  --color-warning-bg: rgba(245, 158, 11, 0.12);
+  --color-error: #ef4444;
+  --color-error-bg: rgba(239, 68, 68, 0.12);
+  --color-info: #7170ff;
+  --color-info-bg: rgba(113, 112, 255, 0.12);
+  --color-focus: #7170ff;
+
+  color-scheme: dark;
+}
+
+/* 高对比度主题 */
+html[data-theme="high-contrast"] {
+  --seed-bg: #000000;
+  --seed-fg: #ffffff;
+  --seed-primary: #7170ff;
+  --seed-accent: #7170ff;
+  --seed-surface: #000000;
+  --seed-radius: 0px;
+
+  --color-bg-canvas: #000000;
+  --color-surface: #000000;
+  --color-surface-secondary: #000000;
+  --color-surface-tertiary: #000000;
+  --color-surface-hover: #1a1a1a;
+  --color-surface-active: #1a1a1a;
+  --color-surface-selected: #1a1a1a;
+  --color-border: #ffffff;
+  --color-border-strong: #ffffff;
+  --color-foreground: #ffffff;
+  --color-foreground-secondary: #ffffff;
+  --color-foreground-tertiary: #ffffff;
+  --color-foreground-disabled: #a0a0a0;
+  --color-brand: #7170ff;
+  --color-brand-hover: #828fff;
+  --color-brand-active: #9aa4ff;
+  --color-brand-bg-subtle: #000000;
+  --color-success: #00ff00;
+  --color-success-bg: #000000;
+  --color-warning: #ffff00;
+  --color-warning-bg: #000000;
+  --color-error: #ff0000;
+  --color-error-bg: #000000;
+  --color-info: #00ffff;
+  --color-info-bg: #000000;
+  --color-focus: #ffffff;
+
+  color-scheme: dark;
+}
