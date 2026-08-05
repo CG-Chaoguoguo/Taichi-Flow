@@ -1,0 +1,6 @@
+{
+  "serviceId": "taichi-flow-api",
+  "apiContractVersion": 1,
+  "desktopScheme": "app",
+  "desktopHost": "taichi-flow"
+}

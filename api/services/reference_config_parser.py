@@ -76,6 +76,8 @@ class ReferenceConfigParseResult:
     rizero: float
     min_slope_angle_deg: float
     background_flux_offset: bool
+    nper: int
+    rainfall_duration_s: float
     cri_mps: List[float]
     capt_s: List[float]
     rainfall_mode: str
@@ -1232,7 +1234,9 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     vals_nz = parse_floats(lines[idx_nz + 1])
     nzsb = int(vals_nz[0])
     nzst = int(vals_nz[1])
+    nper = int(vals_nz[3])
     uww = vals_nz[5]
+    rainfall_duration_s = vals_nz[6]
 
     idx_lt = find_line_index(lines, "ltstar, lbstar, zmax,   depth")
     vals_lt = parse_floats(lines[idx_lt + 1])
@@ -1740,6 +1744,8 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         rizero=rizero,
         min_slope_angle_deg=min_slope_angle_deg,
         background_flux_offset=background_flux_offset,
+        nper=nper,
+        rainfall_duration_s=rainfall_duration_s,
         cri_mps=cri_mps,
         capt_s=capt_s,
         rainfall_mode=rainfall_mode,

@@ -7,8 +7,8 @@
 - **Not Supported**: Python 3.14+ (Taichi 1.7.4 limitation)
 
 ### Default Web UI
-- **Required for default Presentation Layer**: Node.js 18+ and npm
-- The default UI is the React/Vite app under `frontend/edda-taichi/`.
+- **Required for the default Presentation Layer**: Node.js 20.19+ and npm
+- The default UI is the React/Vite app under `frontend/taichi-flow/`.
 - The Streamlit UI remains available only as a legacy fallback / diagnostic path.
 
 ### Operating System
@@ -89,8 +89,8 @@ pip install pytest black mypy flake8
 After installing the Python environment, install the browser UI dependencies:
 
 ```bash
-cd frontend/edda-taichi
-npm install
+cd frontend/taichi-flow
+npm ci
 ```
 
 Run the full default application with two terminals:
@@ -108,8 +108,8 @@ opens the React UI. Manual startup remains available:
 python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
 
 # Terminal 2: React/Vite default Presentation Layer
-cd frontend/edda-taichi
-npm run dev
+cd frontend/taichi-flow
+npm run dev -- --host 127.0.0.1 --port 3000
 ```
 
 Open the Vite URL, normally `http://127.0.0.1:3000`.
@@ -119,6 +119,12 @@ Stop the managed development stack with:
 ```bash
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop-dev.ps1
 ```
+
+For the pre-release Electron development shell, double-click
+`scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat` (Vite HMR) or run it
+with `preview` (compiled `dist` through `app://taichi-flow`). The launcher owns
+the service lifecycle and never bundles Python, Taichi, GDAL, or the solver in
+ASAR.
 
 Legacy fallback only:
 
@@ -167,8 +173,9 @@ pytest tests/ -v
 python -c "import taichi as ti; ti.init(arch=ti.gpu); print('Taichi GPU initialized successfully')"
 
 # React UI checks
-cd frontend/edda-taichi
-npm run lint
+cd frontend/taichi-flow
+npm test
+npm run test:desktop
 npm run build
 ```
 

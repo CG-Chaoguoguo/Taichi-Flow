@@ -31,7 +31,10 @@ def simulation_output_dir(store: WorkbenchStore, project_id: str, simulation_id:
         output.relative_to(root)
     except ValueError as exc:
         raise WorkbenchError("invalid_output_path", "Simulation output is outside the project root.", status_code=409) from exc
-    if output != root / "outputs" / simulation_id:
+    scenario_id = str(row["scenario_id"])
+    canonical_new = (root / "scenarios" / scenario_id / "outputs" / simulation_id).resolve()
+    canonical_legacy = (root / "outputs" / simulation_id).resolve()
+    if output not in {canonical_new, canonical_legacy}:
         raise WorkbenchError("invalid_output_path", "Simulation output path is not canonical.", status_code=409)
     return output
 

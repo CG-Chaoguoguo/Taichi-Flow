@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Optional, Sequence
 from uuid import uuid4
@@ -32,6 +33,22 @@ from api.services.workbench_store import WorkbenchError, WorkbenchStore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+SERVICE_ID = "taichi-flow-api"
+API_CONTRACT_VERSION = 1
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CHECKOUT_ID = sha256(os.path.normcase(str(PROJECT_ROOT)).encode("utf-8")).hexdigest()[:16]
+
+
+def _allowed_origins() -> list[str]:
+    origins = [
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "app://taichi-flow",
+    ]
+    configured = os.environ.get("TAICHI_FLOW_ALLOWED_ORIGINS", "")
+    origins.extend(item.strip() for item in configured.split(",") if item.strip())
+    return list(dict.fromkeys(origins))
+
 try:
     import psutil
 except ImportError:  # pragma: no cover
@@ -42,6 +59,8 @@ class DirectoryLocationResponse(BaseModel):
     name: str
     path: str
     writable: bool
+    kind: str = "directory"
+    size: Optional[int] = None
 
 
 class DirectoryListingResponse(BaseModel):
@@ -49,6 +68,7 @@ class DirectoryListingResponse(BaseModel):
     parent_path: Optional[str]
     roots: list[DirectoryLocationResponse]
     directories: list[DirectoryLocationResponse]
+    files: list[DirectoryLocationResponse] = []
     can_select: bool
 
 
@@ -213,7 +233,7 @@ def create_app(
 
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+        allow_origins=_allowed_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -243,6 +263,9 @@ def create_app(
     async def health_check():
         return {
             "status": "healthy",
+            "service_id": SERVICE_ID,
+            "api_contract_version": API_CONTRACT_VERSION,
+            "checkout_id": CHECKOUT_ID,
             "active_simulations": coordinator.active_count if scheduler_enabled else 0,
             "state_dir": str(store.state_dir),
             "scheduler_enabled": scheduler_enabled,

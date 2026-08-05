@@ -1,0 +1,130 @@
+/* Fluent 2 material utilities */
+
+.tf-mica {
+  background: var(--mica-base);
+}
+
+.tf-mica-alt {
+  background: var(--mica-alt);
+}
+
+.tf-layer {
+  background: var(--layer-fill-default);
+  border: 1px solid var(--layer-stroke);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-2);
+}
+
+.tf-layer-alt {
+  background: var(--layer-fill-alt);
+}
+
+.tf-layer-selected {
+  background: var(--layer-fill-selected);
+}
+
+.tf-acrylic {
+  background: var(--acrylic-default);
+  backdrop-filter: blur(var(--blur-acrylic));
+  -webkit-backdrop-filter: blur(var(--blur-acrylic));
+  border: 1px solid var(--layer-stroke);
+  box-shadow: var(--shadow-16);
+}
+
+.tf-smoke {
+  background: var(--smoke-overlay);
+}
+
+.tf-elevation-2 {
+  box-shadow: var(--shadow-2);
+}
+
+.tf-elevation-8 {
+  box-shadow: var(--shadow-8);
+}
+
+.tf-elevation-16 {
+  box-shadow: var(--shadow-16);
+}
+
+.tf-nav-pane {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--mica-alt);
+  border-right: 1px solid var(--layer-stroke);
+  transition: width var(--motion-normal) var(--ease-decelerate);
+  overflow: hidden;
+}
+
+.tf-command-bar {
+  height: var(--header-height);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--layer-stroke);
+  background: var(--mica-base);
+}
+
+.tf-segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--layer-on-acrylic);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--layer-stroke);
+}
+
+.tf-segmented button,
+.tf-segmented .tf-segment {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--color-foreground-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.tf-segmented button:hover,
+.tf-segmented .tf-segment:hover {
+  color: var(--color-foreground);
+}
+
+.tf-segmented button.active,
+.tf-segmented .tf-segment.active,
+.tf-segmented button[aria-selected="true"],
+.tf-segmented .tf-segment[aria-selected="true"] {
+  background: var(--layer-fill-alt);
+  color: var(--color-foreground);
+  box-shadow: var(--shadow-2);
+}
+
+/* Glass Depth aliases → Fluent materials */
+.tf-glass {
+  background: var(--layer-fill-default);
+  border: 1px solid var(--layer-stroke);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.tf-elevated {
+  box-shadow: var(--shadow-16);
+}
+
+html[data-theme="high-contrast"] .tf-acrylic,
+html[data-theme="high-contrast"] .tf-glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #000000;
+  border-width: 2px;
+}

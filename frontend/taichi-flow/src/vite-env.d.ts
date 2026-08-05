@@ -5,6 +5,8 @@ interface Window {
     runtime?: string;
     mode?: string;
     apiUrl?: string;
+    version?: string;
+    apiContractVersion?: number;
     selectDirectory?: (options?: { defaultPath?: string }) => Promise<{ canceled: boolean; path: string | null }>;
   };
 }

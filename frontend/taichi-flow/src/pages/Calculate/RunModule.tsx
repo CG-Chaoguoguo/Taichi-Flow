@@ -6,7 +6,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import type { Scenario } from "../../types";
 import { runApi } from "../../api/taichiFlowAdapter";
 
-export function RunModule({ scenario }: { scenario: Scenario }) {
+export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const queue = useTaichiFlowStore((state) => state.queue);
   const metrics = useTaichiFlowStore((state) => state.metrics);
   const enqueueScenario = useTaichiFlowStore((state) => state.enqueueScenario);
@@ -14,13 +14,15 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
   const stopRunningItem = useTaichiFlowStore((state) => state.stopRunningItem);
   const retryQueueItem = useTaichiFlowStore((state) => state.retryQueueItem);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
-  const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
+  const scenarioConfiguration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
+  const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
 
   const item = queue.find((q) => q.scenario_id === scenario.scenario_id);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
 
   useEffect(() => {
+    if (readOnly) return;
     if (scenario.latest_simulation_id && activeProject && ["starting", "running", "stopping", "completed", "failed", "stopped", "interrupted"].includes(scenario.status)) {
       const interval = setInterval(() => {
         void runApi.terminal(activeProject.project_id, scenario.latest_simulation_id as string)
@@ -30,49 +32,80 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
       void runApi.terminal(activeProject.project_id, scenario.latest_simulation_id).then((response) => setLogs(response.entries.slice(-200))).catch(() => undefined);
       return () => clearInterval(interval);
     }
-  }, [activeProject, scenario.latest_simulation_id, scenario.status]);
+  }, [activeProject, readOnly, scenario.latest_simulation_id, scenario.status]);
+
+  useEffect(() => {
+    if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
+  }, [fetchScenarioConfiguration, readOnly, scenario.scenario_id, scenario.version]);
 
   const handleEnqueue = async () => {
+    if (readOnly) return;
     await enqueueScenario(scenario.scenario_id);
   };
 
   const elapsed = item?.started_at ? Math.floor((Date.now() - new Date(item.started_at).getTime()) / 1000) : 0;
   const elapsedText = `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
 
+  if (readOnly) {
+    return (
+      <div className="tf-module-body tf-stack tf-module-scroll">
+        <div className="tf-card">
+          <div className="tf-row tf-justify-between">
+            <span className="tf-body tf-font-semibold">运行控制</span>
+            <StatusBadge variant="neutral">只读</StatusBadge>
+          </div>
+          <div className="tf-caption tf-text-secondary">
+            打开项目并选择方案后，可在此进行预检、入队与运行控制。
+          </div>
+        </div>
+        <div className="tf-stack-md">
+          <h4 className="tf-subtitle">运行预检</h4>
+          <div className="tf-stack-sm">
+            <CheckItem ok={false} text="DEM 输入已就绪" />
+            <CheckItem ok={false} text="运行输入将在开始计算时冻结" />
+            <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
+          </div>
+          <Button icon={<Play size={16} />} disabled>
+            加入模拟队列
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16, overflow: "auto" }}>
+    <div className="tf-module-body tf-stack tf-module-scroll">
       {/* 状态摘要 */}
-      <div
-        style={{
-          padding: 16,
-          borderRadius: "var(--radius-large)",
-          background: "var(--color-surface-tertiary)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span className="tf-body" style={{ fontWeight: 600 }}>
+      <div className="tf-card">
+        <div className="tf-row tf-justify-between">
+          <span className="tf-body tf-font-semibold">
             {scenario.name}
           </span>
           <StatusBadge variant={scenario.status} dot />
         </div>
-        <div className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-          输入修订 {scenario.input_revision_id} · {Object.keys(scenario.parameter_patch || {}).length} 项参数变更
+        <div className="tf-caption tf-text-secondary">
+          {scenario.binding_state === "runtime_snapshot"
+            ? `运行输入快照 ${scenario.input_revision_id || "已冻结"}`
+            : "草稿输入绑定（开始计算时冻结）"}
+          · {Object.keys(scenario.parameter_patch || {}).length} 项参数变更
         </div>
       </div>
 
       {/* 预检 */}
       {scenario.status === "draft" || scenario.status === "ready" ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="tf-stack-md">
           <h4 className="tf-subtitle">运行预检</h4>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <CheckItem ok={inputFiles.some((file) => file.family === "dem" && file.status === "ready")} text="DEM 输入已就绪" />
-            <CheckItem ok={scenario.input_revision_id.length > 0} text="输入修订已固定" />
+          <div className="tf-stack-sm">
+            <CheckItem ok={Boolean(scenarioConfiguration?.validation?.valid)} text="草稿输入已通过预检" />
+            <CheckItem ok={scenario.binding_state !== "runtime_snapshot" || Boolean(scenario.input_revision_id)} text="运行快照将在开始计算时冻结" />
             <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
           </div>
-          <Button icon={<Play size={16} />} onClick={handleEnqueue}>
+          {!scenarioConfiguration?.validation?.valid ? (
+            <div className="tf-caption tf-text-secondary">
+              请补齐草稿输入绑定或参数校验项后再加入队列。
+            </div>
+          ) : null}
+          <Button icon={<Play size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid}>
             加入模拟队列
           </Button>
         </div>
@@ -80,14 +113,15 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
       {/* 等待中 */}
       {scenario.status === "queued" && item && (item.status === "waiting" || item.status === "queued") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="tf-stack-md">
           <h4 className="tf-subtitle">队列位置</h4>
-          <div className="tf-display" style={{ color: "var(--color-brand)" }}>
+          <div className="tf-display tf-text-brand">
             #{item.position}
           </div>
-          <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+          <p className="tf-body tf-text-secondary">
             当前队列并发数限制为 1，前面还有 {item.position - 1} 个任务。
           </p>
+          <p className="tf-caption tf-text-warning">文件仍可修改；修改或删除会自动取消本次等待任务。</p>
           <Button variant="secondary" icon={<Square size={16} />} onClick={() => cancelQueueItem(item.queue_item_id)}>
             取消排队
           </Button>
@@ -96,39 +130,26 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
       {/* 运行中 */}
       {scenario.status === "running" && item && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Timer size={16} color="var(--color-foreground-secondary)" />
+        <div className="tf-stack-md">
+          <div className="tf-caption tf-text-info">运行输入快照已冻结，计算引用中的资产不可删除。</div>
+          <div className="tf-row tf-gap-2">
+            <Timer size={16} className="tf-text-secondary" />
             <span className="tf-body">已运行 {elapsedText}</span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <Cpu size={14} color="var(--color-foreground-tertiary)" />
+          <div className="tf-row tf-gap-4">
+            <div className="tf-row tf-gap-1">
+              <Cpu size={14} className="tf-text-tertiary" />
               <span className="tf-caption">CPU {metrics.cpu_percent ?? 0}%</span>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <Monitor size={14} color="var(--color-foreground-tertiary)" />
+            <div className="tf-row tf-gap-1">
+              <Monitor size={14} className="tf-text-tertiary" />
               <span className="tf-caption">GPU {metrics.gpu_percent ?? 0}%</span>
             </div>
           </div>
-          <div
-            style={{
-              height: 8,
-              borderRadius: 4,
-              background: "var(--color-surface-tertiary)",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                width: `${scenario.progress}%`,
-                height: "100%",
-                background: "var(--color-brand)",
-                transition: "width 500ms ease",
-              }}
-            />
+          <div className="tf-progress">
+            <div className="tf-progress-fill" style={{ width: `${scenario.progress}%` }} />
           </div>
-          <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)", display: "flex", alignItems: "center", gap: 4 }}>
+          <div className="tf-caption tf-text-tertiary tf-row tf-gap-1">
             <Terminal size={12} />
             轮询状态 · simulation_id: {item.simulation_id || "—"}
           </div>
@@ -140,12 +161,12 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
       {/* 已完成 */}
       {scenario.status === "completed" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--color-success)" }}>
+        <div className="tf-stack-md">
+          <div className="tf-status-row is-success">
             <CheckCircle2 size={20} />
             <span className="tf-body">模拟已完成</span>
           </div>
-          <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+          <p className="tf-body tf-text-secondary">
             结果族：{scenario.result_family_count} 个 · 文件：{scenario.file_count} 个
           </p>
           <Button variant="secondary" icon={<List size={16} />} onClick={() => setShowLogs((value) => !value)}>
@@ -156,12 +177,12 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
       {/* 失败/停止 */}
       {(scenario.status === "failed" || scenario.status === "stopped") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--color-error)" }}>
+        <div className="tf-stack-md">
+          <div className="tf-status-row is-error">
             <AlertCircle size={20} />
             <span className="tf-body">{scenario.status === "failed" ? "模拟失败" : "已停止"}</span>
           </div>
-          <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+          <p className="tf-body tf-text-secondary">
             请检查参数或输入文件后重试。
           </p>
           <Button icon={<RefreshCw size={16} />} onClick={() => (item ? retryQueueItem(item.queue_item_id) : handleEnqueue())}>
@@ -172,21 +193,9 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
       {/* 终端日志 */}
       {showLogs && (scenario.status === "running" || scenario.status === "completed" || scenario.status === "failed" || scenario.status === "stopped" || scenario.status === "interrupted") && (
-        <div
-          style={{
-            flex: 1,
-            minHeight: 120,
-            borderRadius: "var(--radius-large)",
-            background: "#0c0c0c",
-            padding: 12,
-            overflow: "auto",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
-            color: "#d4d4d4",
-          }}
-        >
+        <div className="tf-terminal">
           {logs.map((line, idx) => (
-            <div key={idx} style={{ marginBottom: 2 }}>
+            <div key={idx} className="tf-terminal-line">
               {line}
             </div>
           ))}
@@ -198,9 +207,9 @@ export function RunModule({ scenario }: { scenario: Scenario }) {
 
 function CheckItem({ ok, text }: { ok: boolean; text: string }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, color: ok ? "var(--color-success)" : "var(--color-error)" }}>
+    <div className={`tf-check-row${ok ? " is-ok" : " is-fail"}`}>
       {ok ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-      <span className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+      <span className="tf-body tf-text-secondary">
         {text}
       </span>
     </div>

@@ -1,7 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, Database, Play, Settings2, BarChart3, Save } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { isVisualizableInput } from "../../constants/visualizableInputs";
 import { VisualizationCanvas } from "./VisualizationCanvas";
 import { InputModule } from "./InputModule";
 import { ParameterModule } from "./ParameterModule";
@@ -10,128 +11,202 @@ import { ResultModule } from "./ResultModule";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
+import type { Scenario } from "../../types";
 
 export type WorkspaceModule = "input" | "parameter" | "run" | "result";
 
+const PREVIEW_SCENARIO: Scenario = {
+  scenario_id: "",
+  project_id: "",
+  name: "未选择方案",
+  input_revision_id: null,
+  parameter_patch: {},
+  effective_parameters: {},
+  status: "draft",
+  progress: 0,
+  latest_simulation_id: null,
+  result_family_count: 0,
+  file_count: 0,
+  created_at: "",
+  updated_at: "",
+};
+
 export function CalculateWorkspace() {
-  const { projectId, scenarioId } = useParams<{ projectId: string; scenarioId: string }>();
+  const { projectId, scenarioId } = useParams<{ projectId?: string; scenarioId?: string }>();
   const navigate = useNavigate();
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
-  const inputRevisions = useTaichiFlowStore((state) => state.inputRevisions);
+  const layerVisibility = useTaichiFlowStore((state) => state.layerVisibility);
+  const layerOrder = useTaichiFlowStore((state) => state.layerOrder);
   const updateScenario = useTaichiFlowStore((state) => state.updateScenario);
+  const fetchScenarios = useTaichiFlowStore((state) => state.fetchScenarios);
+  const setLayerVisibility = useTaichiFlowStore((state) => state.setLayerVisibility);
   const addToast = useTaichiFlowStore((state) => state.addToast);
   const [activeModule, setActiveModule] = useState<WorkspaceModule>("input");
   const [canvasState, setCanvasState] = useState({ zoom: 1, offsetX: 0, offsetY: 0, selectedLayer: "" });
+  const [draftPatch, setDraftPatch] = useState<Record<string, unknown>>({});
+  const visibleLayers = useMemo(() => {
+    const orderIndex = new Map(layerOrder.map((fileId, index) => [fileId, index]));
+    return inputFiles
+      .filter((file) => isVisualizableInput(file) && layerVisibility[file.file_id] === true)
+      .sort((left, right) => (orderIndex.get(left.file_id) ?? 0) - (orderIndex.get(right.file_id) ?? 0))
+      .map((file) => ({ fileId: file.file_id, name: file.name, family: file.family }));
+  }, [inputFiles, layerVisibility, layerOrder]);
+
+  const scenario = useMemo(
+    () => (scenarioId ? scenarios.find((item) => item.scenario_id === scenarioId) : undefined),
+    [scenarios, scenarioId],
+  );
+  const hasBoundScenario = Boolean(activeProject && scenario);
+  const displayScenario = scenario ?? PREVIEW_SCENARIO;
+  const readOnly = !hasBoundScenario;
+
+  useEffect(() => {
+    setDraftPatch({ ...(scenario?.parameter_patch || {}) });
+  }, [scenario?.scenario_id, scenario?.updated_at]);
+
+  const persistPatch = async () => {
+    if (!scenario) return;
+    await updateScenario(scenario.scenario_id, { parameter_patch: draftPatch });
+    await fetchScenarios();
+  };
 
   const handleSave = async () => {
     if (!scenario) return;
     try {
-      await updateScenario(scenario.scenario_id, { parameter_patch: scenario.parameter_patch });
+      await persistPatch();
       addToast({ type: "success", message: "方案已保存" });
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "保存方案失败" });
     }
   };
 
-  const scenario = useMemo(() => scenarios.find((s) => s.scenario_id === scenarioId), [scenarios, scenarioId]);
-
-  if (!scenario || !activeProject) {
-    return (
-      <div style={{ padding: 48 }}>
-        <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-          方案不存在或项目未选择。
-        </p>
-      </div>
-    );
-  }
+  const bannerText = !activeProject
+    ? "尚未打开项目：可浏览计算工作台布局，输入与参数均为只读。"
+    : !scenario
+      ? "尚未选择方案：可管理项目资产；参数、运行与结果暂为只读。"
+      : null;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      {/* 顶部方案栏 */}
-      <div
-        style={{
-          height: 56,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 20px",
-          borderBottom: "1px solid var(--color-border)",
-          background: "var(--color-surface)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <div className="tf-fill-col tf-animate-in">
+      <div className="tf-workspace-header tf-mica">
+        <div className="tf-row tf-min-w-0">
           <IconButton
             icon={<ArrowLeft size={18} />}
-            label="返回方案管理"
-            onClick={() => navigate(`/projects/${projectId}/scenarios`)}
+            label={activeProject ? "返回方案管理" : "返回项目列表"}
+            onClick={() => navigate(activeProject ? `/projects/${activeProject.project_id}/scenarios` : "/projects")}
             size="small"
           />
-          <div>
-            <div className="tf-subtitle" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {scenario.name}
-              <StatusBadge variant={scenario.status} dot />
+          <div className="tf-min-w-0">
+            <div className="tf-subtitle tf-row tf-gap-2">
+              {displayScenario.name}
+              {hasBoundScenario ? <StatusBadge variant={displayScenario.status} dot /> : <StatusBadge variant="neutral">预览</StatusBadge>}
             </div>
-            <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-              输入版本 {inputRevisions.find((revision) => revision.revision_id === scenario.input_revision_id)?.version_tag || scenario.input_revision_id} · {scenario.scenario_id}
+            <div className="tf-caption tf-text-tertiary">
+              {hasBoundScenario
+                ? `${displayScenario.binding_state === "runtime_snapshot" ? "运行输入快照已冻结" : "草稿输入绑定，开始计算时冻结"} · ${displayScenario.scenario_id}`
+                : activeProject
+                  ? `${activeProject.name} · 等待选择或创建方案`
+                  : "计算工作台预览"}
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)", display: "flex", alignItems: "center", gap: 4 }}>
-            <Check size={14} />
-            已保存
-          </span>
-          <Button variant="secondary" size="small" icon={<Save size={14} />} disabled={scenario.status === "completed" || scenario.status === "archived" || scenario.status === "running" || scenario.status === "queued"} onClick={() => void handleSave()}>
+        <div className="tf-row">
+          {hasBoundScenario ? (
+            <span className="tf-caption tf-saved-hint">
+              <Check size={14} />
+              已保存
+            </span>
+          ) : null}
+          <Button
+            variant="secondary"
+            size="small"
+            icon={<Save size={14} />}
+            disabled={
+              readOnly ||
+              displayScenario.status === "completed" ||
+              displayScenario.status === "archived" ||
+              displayScenario.status === "running" ||
+              displayScenario.status === "queued"
+            }
+            onClick={() => void handleSave()}
+          >
             保存方案
           </Button>
         </div>
       </div>
 
-      {/* 主体 */}
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* 左侧画布：始终保持挂载 */}
-        <div style={{ width: "65%", minWidth: 0, borderRight: "1px solid var(--color-border)", position: "relative" }}>
-          <VisualizationCanvas state={canvasState} setState={setCanvasState} activeModule={activeModule} />
+      {bannerText ? (
+        <div role="status" className="tf-workspace-banner tf-caption">
+          {bannerText}
+          {!activeProject ? (
+            <button type="button" className="tf-link-button" onClick={() => navigate("/projects")}>
+              去打开项目
+            </button>
+          ) : null}
+          {activeProject && !scenario ? (
+            <button type="button" className="tf-link-button" onClick={() => navigate(`/projects/${activeProject.project_id}/scenarios`)}>
+              去方案管理
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="tf-fill-row">
+        <div className="tf-canvas-pane">
+          <VisualizationCanvas projectId={activeProject?.project_id || projectId} state={canvasState} setState={setCanvasState} activeModule={activeModule} visibleLayers={visibleLayers} />
         </div>
 
-        {/* 右侧抽屉 */}
-        <div
-          style={{
-            width: "35%",
-            minWidth: 360,
-            maxWidth: 520,
-            display: "flex",
-            flexDirection: "column",
-            background: "var(--color-surface)",
-            overflow: "hidden",
-          }}
-        >
-          <ModuleAccordion title="输入" icon={<Database size={16} />} summary={`${inputFiles.filter((file) => file.status === "ready").length}/${inputFiles.length} 就绪`} isActive={activeModule === "input"} onClick={() => setActiveModule("input")}>
-            <InputModule onFocusLayer={(id) => setCanvasState((s) => ({ ...s, selectedLayer: id }))} />
+        <div className="tf-module-rail">
+          <ModuleAccordion
+            title="输入"
+            icon={<Database size={16} />}
+            summary={`${inputFiles.filter((file) => file.status === "ready").length}/${inputFiles.length} 就绪`}
+            isActive={activeModule === "input"}
+            onClick={() => setActiveModule("input")}
+          >
+            <InputModule
+              selectedFamily="dem"
+              readOnly={!activeProject}
+               onFocusLayer={(id) => {
+                 setLayerVisibility(id, true);
+                 setCanvasState((current) => ({ ...current, selectedLayer: id }));
+               }}
+            />
           </ModuleAccordion>
           <ModuleAccordion
             title="参数"
             icon={<Settings2 size={16} />}
-            summary={`${Object.keys(scenario.parameter_patch || {}).length} 项变更`}
+            summary={`${Object.keys(draftPatch).length} 项变更`}
             isActive={activeModule === "parameter"}
             onClick={() => setActiveModule("parameter")}
           >
-            <ParameterModule scenario={scenario} />
+            <ParameterModule
+              scenario={displayScenario}
+              readOnly={readOnly}
+              draftPatch={draftPatch}
+              onDraftChange={setDraftPatch}
+              onSave={persistPatch}
+            />
           </ModuleAccordion>
-          <ModuleAccordion title="运行" icon={<Play size={16} />} summary={scenario.status === "running" ? "运行中" : "待模拟"} isActive={activeModule === "run"} onClick={() => setActiveModule("run")}>
-            <RunModule scenario={scenario} />
+          <ModuleAccordion
+            title="运行"
+            icon={<Play size={16} />}
+            summary={displayScenario.status === "running" ? "运行中" : readOnly ? "只读" : "待模拟"}
+            isActive={activeModule === "run"}
+            onClick={() => setActiveModule("run")}
+          >
+            <RunModule scenario={displayScenario} readOnly={readOnly} />
           </ModuleAccordion>
           <ModuleAccordion
             title="结果"
             icon={<BarChart3 size={16} />}
-            summary={`${scenario.result_family_count} 个结果族`}
+            summary={`${displayScenario.result_family_count} 个结果族`}
             isActive={activeModule === "result"}
             onClick={() => setActiveModule("result")}
           >
-            <ResultModule scenario={scenario} />
+            <ResultModule scenario={displayScenario} readOnly={readOnly} />
           </ModuleAccordion>
         </div>
       </div>
@@ -157,50 +232,20 @@ function ModuleAccordion({
   const contentRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div
-      style={{
-        borderBottom: "1px solid var(--color-border)",
-        display: "flex",
-        flexDirection: "column",
-        flex: isActive ? 1 : undefined,
-        minHeight: isActive ? 200 : 48,
-        transition: "flex 200ms ease",
-      }}
-    >
+    <div className={`tf-module-accordion${isActive ? " is-active" : ""}`}>
       <button
         onClick={onClick}
         aria-expanded={isActive}
-        style={{
-          height: 48,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "0 16px",
-          border: "none",
-          background: isActive ? "var(--color-brand-bg-subtle)" : "transparent",
-          color: isActive ? "var(--color-brand)" : "var(--color-foreground)",
-          cursor: "pointer",
-          textAlign: "left",
-          fontSize: 14,
-          fontWeight: 600,
-        }}
+        className={`tf-module-header${isActive ? " active" : ""}`}
       >
-        <span style={{ display: "inline-flex", alignItems: "center" }}>{icon}</span>
+        <span className="tf-button-icon">{icon}</span>
         <span>{title}</span>
-        <span style={{ marginLeft: "auto", fontWeight: 400, color: "var(--color-foreground-secondary)" }}>{summary}</span>
-        <span style={{ transform: isActive ? "rotate(180deg)" : "rotate(0)", transition: "transform 200ms ease" }}>▼</span>
+        <span className="tf-module-summary">{summary}</span>
+        <span className="tf-module-chevron">▼</span>
       </button>
       <div
         ref={contentRef}
-        style={{
-          flex: 1,
-          overflow: isActive ? "auto" : "hidden",
-          height: isActive ? undefined : 0,
-          minHeight: isActive ? 0 : 0,
-          opacity: isActive ? 1 : 0,
-          transition: "opacity 200ms ease, height 200ms ease",
-        }}
+        className={`tf-module-accordion-body${isActive ? " is-open" : ""}`}
       >
         {children}
       </div>

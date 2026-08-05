@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { BarChart3, Download, FileText, Folder, Waves } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
@@ -15,27 +14,35 @@ const familyIcon: Record<string, React.ReactNode> = {
   hydrograph: <BarChart3 size={16} />,
 };
 
-export function ResultModule({ scenario }: { scenario: Scenario }) {
-  const navigate = useNavigate();
+export function ResultModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const resultFamilies = useTaichiFlowStore((state) => state.resultFamilies);
   const fetchResultFamilies = useTaichiFlowStore((state) => state.fetchResultFamilies);
+  const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const [selectedFamily, setSelectedFamily] = useState<string | null>(null);
 
   useEffect(() => {
-    if (scenario.latest_simulation_id) {
+    if (!readOnly && scenario.latest_simulation_id) {
       fetchResultFamilies(scenario.latest_simulation_id);
     }
-  }, [scenario.latest_simulation_id, fetchResultFamilies]);
+  }, [readOnly, scenario.latest_simulation_id, fetchResultFamilies]);
 
   const families = scenario.latest_simulation_id ? resultFamilies[scenario.latest_simulation_id] || [] : [];
 
+  if (readOnly) {
+    return (
+      <div className="tf-empty tf-body tf-text-secondary">
+        打开项目并完成模拟后，可在此查看结果族。
+      </div>
+    );
+  }
+
   if (scenario.status !== "completed") {
     return (
-      <div style={{ padding: 32, textAlign: "center" }}>
-        <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+      <div className="tf-empty">
+        <p className="tf-body tf-text-secondary">
           该方案尚未完成模拟，暂无结果。
         </p>
-        <p className="tf-caption" style={{ color: "var(--color-foreground-tertiary)", marginTop: 8 }}>
+        <p className="tf-caption tf-text-tertiary tf-mt-2">
           当前状态：{scenario.status}
         </p>
       </div>
@@ -43,23 +50,23 @@ export function ResultModule({ scenario }: { scenario: Scenario }) {
   }
 
   return (
-    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16, overflow: "auto" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
+    <div className="tf-module-body tf-stack tf-module-scroll">
+      <div className="tf-row tf-justify-between">
+        <span className="tf-caption tf-text-tertiary">
           模拟 ID: {scenario.latest_simulation_id}
         </span>
         <Button
           size="small"
           icon={<Download size={14} />}
-          onClick={() => navigate(`/projects/${scenario.project_id}/export`)}
+          onClick={() => setDockTab("export")}
         >
           导出此方案
         </Button>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div className="tf-stack-sm">
         {families.length === 0 ? (
-          <p className="tf-body" style={{ color: "var(--color-foreground-secondary)", textAlign: "center", padding: 24 }}>
+          <p className="tf-empty tf-body tf-text-secondary">
             暂无结果族数据
           </p>
         ) : (
@@ -93,66 +100,43 @@ function ResultFamilyItem({
   onClick: () => void;
 }) {
   return (
-    <div
-      style={{
-        borderRadius: "var(--radius-large)",
-        border: `1px solid ${selected ? "var(--color-brand)" : "var(--color-border)"}`,
-        background: selected ? "var(--color-brand-bg-subtle)" : "var(--color-surface)",
-        overflow: "hidden",
-      }}
-    >
-      <button
-        onClick={onClick}
-        style={{
-          width: "100%",
-          padding: 12,
-          border: "none",
-          background: "transparent",
-          cursor: "pointer",
-          textAlign: "left",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-        }}
-      >
-        <span style={{ color: "var(--color-foreground-tertiary)", display: "inline-flex" }}>{familyIcon[family.family_id] || <Folder size={16} />}</span>
-        <div style={{ flex: 1 }}>
-          <div className="tf-body" style={{ fontWeight: 600, color: "var(--color-foreground)" }}>
+    <div className={`tf-card tf-card-flush${selected ? " active" : ""}`}>
+      <button type="button" onClick={onClick} className="tf-card-trigger">
+        <span className="tf-icon-inline">{familyIcon[family.family_id] || <Folder size={16} />}</span>
+        <div className="tf-flex-1">
+          <div className="tf-body tf-font-semibold">
             {family.label}
           </div>
-          <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
+          <div className="tf-caption tf-text-tertiary">
             {family.file_count} 个文件 · {(family.total_size / 1024 / 1024).toFixed(1)} MB
           </div>
         </div>
-        <span style={{ transform: selected ? "rotate(180deg)" : "rotate(0)", transition: "transform 200ms ease", color: "var(--color-foreground-tertiary)" }}>▼</span>
+        <span className={`tf-chevron${selected ? " is-expanded" : ""}`}>▼</span>
       </button>
       {selected && (
-        <div style={{ padding: "0 12px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="tf-card-detail">
           {family.files.slice(0, 5).map((file) => (
-            <div
-              key={file.filename}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: 8,
-                borderRadius: "var(--radius-medium)",
-                background: "var(--color-surface)",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                <FileText size={14} color="var(--color-foreground-tertiary)" />
-                <span className="tf-caption tf-ellipsis" style={{ color: "var(--color-foreground)" }}>
+            <div key={file.filename} className="tf-inset tf-row tf-inset-row">
+              <div className="tf-row tf-gap-2 tf-min-w-0">
+                <FileText size={14} className="tf-text-tertiary" />
+                <span className="tf-caption tf-ellipsis">
                   {file.filename}
                 </span>
               </div>
-              <button style={{ color: "var(--color-brand)", display: "flex", alignItems: "center" }} title="下载" aria-label="下载" disabled={!simulationId} onClick={() => simulationId && window.open(resultApi.downloadUrl(projectId, simulationId, file.source_filename || file.filename), "_blank", "noopener,noreferrer")}>
+              <button
+                type="button"
+                className="tf-icon-link"
+                title="下载"
+                aria-label="下载"
+                disabled={!simulationId}
+                onClick={() => simulationId && window.open(resultApi.downloadUrl(projectId, simulationId, file.source_filename || file.filename), "_blank", "noopener,noreferrer")}
+              >
                 <Download size={14} />
               </button>
             </div>
           ))}
           {family.files.length > 5 && (
-            <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)", textAlign: "center" }}>
+            <div className="tf-caption tf-text-tertiary tf-text-center">
               还有 {family.files.length - 5} 个文件
             </div>
           )}

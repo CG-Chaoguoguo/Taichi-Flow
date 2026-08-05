@@ -1,182 +1,168 @@
-import { useEffect, useRef, useState } from "react";
-import { AlertCircle, FileText, Info, Layers, Map, Monitor, Waves } from "lucide-react";
-import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
-import { StatusBadge } from "../../components/StatusBadge";
-import type { InputFile } from "../../types";
+import { useRef } from "react";
+import { Info } from "lucide-react";
+import { AssetDeleteDialog } from "../../components/AssetDeleteDialog";
+import { AssetListView } from "../../components/AssetListView";
+import { AssetSelectionToolbar } from "../../components/AssetSelectionToolbar";
+import type { InputFamilyFilter } from "../../constants/inputFamilies";
+import { useProjectAssets } from "../../hooks/useProjectAssets";
 
-const familyLabels: Record<string, string> = {
-  dem: "地形栅格",
-  slope: "坡度栅格",
-  zones: "分区栅格",
-  thickness: "上层厚度",
-  manning: "空间曼宁",
-  rainfall: "降雨文件",
-  groundwater: "地下水深",
-  infiltration: "初始入渗",
-  boundary: "边界文件",
-  outflow: "出流边界",
-  inflow: "入流过程",
-  monitoring: "监测点选择",
-  config: "参数配置",
+export type InputModuleProps = {
+  selectedFamily: InputFamilyFilter;
+  onFocusLayer: (id: string) => void;
+  readOnly?: boolean;
+  compact?: boolean;
+  focusedAssetId?: string | null;
 };
 
-const familyIcons: Record<string, React.ReactNode> = {
-  dem: <Map size={16} />,
-  slope: <Map size={16} />,
-  zones: <Layers size={16} />,
-  boundary: <Map size={16} />,
-  rainfall: <Waves size={16} />,
-  inflow: <Waves size={16} />,
-  outflow: <Waves size={16} />,
-  monitoring: <Monitor size={16} />,
-  config: <FileText size={16} />,
-};
-
-function fileStatusBadge(status: InputFile["status"]) {
-  switch (status) {
-    case "ready":
-      return <StatusBadge variant="success">就绪</StatusBadge>;
-    case "warning":
-      return <StatusBadge variant="warning">警告</StatusBadge>;
-    case "invalid":
-      return <StatusBadge variant="error">错误</StatusBadge>;
-    case "unsupported":
-      return <StatusBadge variant="neutral">不支持</StatusBadge>;
-    case "parsing":
-    case "visualizing":
-      return <StatusBadge variant="info">处理中</StatusBadge>;
-    case "metadata_only":
-      return <StatusBadge variant="neutral">仅元数据</StatusBadge>;
-    default:
-      return <StatusBadge variant="neutral">未知</StatusBadge>;
-  }
-}
-
-export function InputModule({ onFocusLayer }: { onFocusLayer: (id: string) => void }) {
-  const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
-  const fetchInputFiles = useTaichiFlowStore((state) => state.fetchInputFiles);
-  const uploadInput = useTaichiFlowStore((state) => state.uploadInput);
-  const createInputRevision = useTaichiFlowStore((state) => state.createInputRevision);
-  const addToast = useTaichiFlowStore((state) => state.addToast);
+export function InputModule({
+  selectedFamily,
+  onFocusLayer,
+  readOnly = false,
+  compact = false,
+  focusedAssetId = null,
+}: InputModuleProps) {
   const fileInput = useRef<HTMLInputElement>(null);
-  const [uploadFamily, setUploadFamily] = useState("dem");
-
-  useEffect(() => {
-    fetchInputFiles();
-  }, [fetchInputFiles]);
-
-  const readyCount = inputFiles.filter((f) => f.status === "ready").length;
+  const assets = useProjectAssets({ selectedFamily, focusedAssetId, readOnly });
+  const {
+    familyFiles,
+    selectableFiles,
+    readyCount,
+    familyLabel,
+    isAll,
+    layerVisibility,
+    selectedFileId,
+    selectedAssetIds,
+    setSelectedAssetIds,
+    selectionMode,
+    setSelectionMode,
+    deletePreview,
+    setDeletePreview,
+    deleting,
+    dragId,
+    setDragId,
+    dropId,
+    setDropId,
+    selectedCount,
+    allSelected,
+    partiallySelected,
+    toggleSelected,
+    handleSelectionClick,
+    exitSelection,
+    reviewDelete,
+    confirmDelete,
+    uploadFiles,
+    selectFile,
+    toggleLayerVisibility,
+    reorderLayer,
+  } = assets;
 
   return (
-    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
-      <div
-        style={{
-          padding: 12,
-          borderRadius: "var(--radius-large)",
-          background: "var(--color-surface-tertiary)",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-        }}
-      >
-        <Info size={16} color="var(--color-info)" />
-        <span className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-          输入文件由项目共享，参数方案只读。修改输入将创建新的输入版本。
-        </span>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-          {readyCount}/{inputFiles.length} 个文件就绪
-        </span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <select value={uploadFamily} onChange={(event) => setUploadFamily(event.target.value)} aria-label="输入文件族">
-            {Object.entries(familyLabels).map(([family, label]) => <option key={family} value={family}>{label}</option>)}
-          </select>
-          <input
-            ref={fileInput}
-            type="file"
-            hidden
-            onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              try {
-                await uploadInput(uploadFamily, file);
-                addToast({ type: "success", message: `${familyLabels[uploadFamily] || "输入文件"}已上传` });
-              } catch (error) {
-                addToast({ type: "error", message: error instanceof Error ? error.message : "输入文件上传失败" });
-              } finally {
-                event.target.value = "";
-              }
-            }}
-          />
-          <button
-          className="tf-caption"
-          style={{ color: "var(--color-brand)", cursor: "pointer", background: "transparent", border: "none" }}
-          onClick={() => fileInput.current?.click()}
-          >
-          管理项目输入
-          </button>
-          <button
-            className="tf-caption"
-            style={{ color: "var(--color-brand)", cursor: inputFiles.length ? "pointer" : "not-allowed", background: "transparent", border: "none" }}
-            disabled={inputFiles.length === 0}
-            onClick={async () => {
-              try {
-                await createInputRevision(inputFiles.map((file) => file.file_id));
-                addToast({ type: "success", message: "输入修订已发布" });
-              } catch (error) {
-                addToast({ type: "error", message: error instanceof Error ? error.message : "输入修订发布失败" });
-              }
-            }}
-          >
-            发布修订
-          </button>
+    <div className={`tf-module-body tf-stack${compact ? " is-compact" : ""}`}>
+      {!compact ? (
+        <div className="tf-info-banner">
+          <Info size={16} color="var(--color-info)" />
+          <span className="tf-caption tf-text-secondary">
+            {readOnly
+              ? "未打开项目时仅可预览资产库；打开项目后可独立上传文件。"
+              : isAll
+                ? "这里是项目资产库，不会隐式改变任何方案。请按类型上传；方案在“输入绑定”页显式引用资产。"
+                : `当前类型：${familyLabel}。上传只会收录为项目资产，不会自动绑定到当前方案。`}
+          </span>
         </div>
+      ) : null}
+
+      <div className="tf-row tf-justify-between">
+        <span className="tf-caption tf-text-secondary">{readyCount}/{familyFiles.length} 个文件就绪</span>
+        {!selectionMode ? (
+          <div className="tf-row tf-gap-2">
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              hidden
+              disabled={readOnly || isAll}
+              onChange={async (event) => {
+                const files = Array.from(event.target.files || []);
+                await uploadFiles(files);
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="tf-caption tf-link-button"
+              disabled={readOnly || isAll}
+              title={isAll ? "请先选择具体输入类型" : undefined}
+              onClick={() => fileInput.current?.click()}
+            >
+              上传资产
+            </button>
+            <button
+              type="button"
+              className="tf-caption tf-link-button"
+              disabled={readOnly || familyFiles.length === 0}
+              onClick={() => setSelectionMode(true)}
+            >
+              删除文件
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {inputFiles.length === 0 ? (
-          <div className="tf-body" style={{ padding: 24, textAlign: "center", color: "var(--color-foreground-tertiary)" }}>暂无输入文件，请先上传。</div>
-        ) : inputFiles.map((file) => (
-          <button
-            key={file.file_id}
-            onClick={() => onFocusLayer(file.file_id)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "10px 12px",
-              borderRadius: "var(--radius-large)",
-              border: "1px solid var(--color-border)",
-              background: "var(--color-surface)",
-              cursor: "pointer",
-              textAlign: "left",
-              width: "100%",
-              transition: "background-color 120ms ease",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--color-surface-hover)")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "var(--color-surface)")}
-          >
-            <span style={{ color: "var(--color-foreground-tertiary)", display: "inline-flex" }}>{familyIcons[file.family] || <FileText size={16} />}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="tf-body tf-ellipsis" style={{ fontWeight: 500 }}>
-                {file.name}
-              </div>
-              <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                {familyLabels[file.family]} · {(file.size / 1024).toFixed(1)} KB
-              </div>
-              {file.warnings && file.warnings.length > 0 && (
-                <div className="tf-caption" style={{ color: "var(--color-warning)", display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                  <AlertCircle size={12} />
-                  {file.warnings[0]}
-                </div>
-              )}
-            </div>
-            {fileStatusBadge(file.status)}
-          </button>
-        ))}
-      </div>
+      {selectionMode ? (
+        <AssetSelectionToolbar
+          selectedCount={selectedCount}
+          selectableCount={selectableFiles.length}
+          allSelected={allSelected}
+          partiallySelected={partiallySelected}
+          onToggleAll={() => setSelectedAssetIds(new Set(allSelected ? [] : selectableFiles.map((file) => file.file_id)))}
+          onDelete={() => void reviewDelete()}
+          onCancel={exitSelection}
+        />
+      ) : null}
+
+      {familyFiles.length > 1 && !selectionMode && !compact ? (
+        <div className="tf-caption tf-text-tertiary">拖拽左侧手柄调整图层顺序</div>
+      ) : null}
+
+      <AssetListView
+        files={familyFiles}
+        emptyMessage={isAll ? "项目资产库为空。" : "该类型暂无资产，请点击“上传资产”。"}
+        selectedFileId={selectedFileId}
+        selectionMode={selectionMode}
+        selectedAssetIds={selectedAssetIds}
+        layerVisibility={layerVisibility}
+        readOnly={readOnly}
+        dragId={dragId}
+        dropId={dropId}
+        compact={compact}
+        onSelect={(file) => selectFile(file, onFocusLayer)}
+        onToggleSelected={toggleSelected}
+        onSelectionClick={(file, index, event) =>
+          handleSelectionClick(
+            file.file_id,
+            index,
+            { shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey },
+            familyFiles,
+          )
+        }
+        onToggleVisibility={toggleLayerVisibility}
+        onReorder={reorderLayer}
+        onDragStart={setDragId}
+        onDragOver={setDropId}
+        onDragLeave={() => setDropId(null)}
+        onDragEnd={() => {
+          setDragId(null);
+          setDropId(null);
+        }}
+      />
+
+      <AssetDeleteDialog
+        open={deletePreview !== null}
+        preview={deletePreview}
+        busy={deleting}
+        onClose={() => !deleting && setDeletePreview(null)}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

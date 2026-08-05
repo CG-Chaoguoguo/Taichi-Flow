@@ -48,6 +48,24 @@ npm run dev -- --host 127.0.0.1 --port 3000
 Electron uses `TAICHI_FLOW_API_URL` for its API origin. The browser client uses
 relative `/api` requests and the Vite proxy during development.
 
+### Electron desktop development
+
+The pre-release desktop entry lives under `scripts\desktop-dev`. Double-click
+`Start-Taichi-Flow-Desktop-Dev.bat` for FastAPI + Vite HMR + Electron, or pass
+`preview` to build `dist` and load it through the restricted
+`app://taichi-flow` protocol:
+
+```powershell
+.\scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat
+.\scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat preview
+```
+
+The launcher requires Node.js 20.19 or newer, selects a compatible Python
+3.9–3.13 interpreter, validates service identity before reuse, and stops only
+processes owned by its current session. See
+[`scripts/desktop-dev/README.md`](scripts/desktop-dev/README.md) for recovery,
+smoke-test, and future packaging boundaries.
+
 ## Public domains
 
 - Projects: `/api/projects`, `/api/projects/import`, `/api/projects/{id}`
@@ -70,6 +88,8 @@ Run each command separately from the repository root:
 ```powershell
 python -m pytest tests\\test_workbench_domain_api.py tests\\test_workbench_scheduler.py tests\\test_workbench_run_controls.py tests\\test_workbench_results_exports.py tests\\test_workbench_realtime.py tests\\test_parameter_catalog.py -q
 cd frontend\\taichi-flow
+npm test
+npm run test:desktop
 npm run build
 ```
 

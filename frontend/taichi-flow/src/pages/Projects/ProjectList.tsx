@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { FolderOpen, Plus, Upload, Clock, Search, MoreHorizontal } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
+import { IconButton } from "../../components/IconButton";
 import { StatusBadge } from "../../components/StatusBadge";
 import { DirectoryPickerDialog } from "../../components/DirectoryPickerDialog";
 import type { ProjectInfo } from "../../types";
@@ -11,6 +13,7 @@ function formatDate(iso: string): string {
 }
 
 export function ProjectList() {
+  const navigate = useNavigate();
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const projectHistory = useTaichiFlowStore((state) => state.projectHistory);
   const fetchProjectList = useTaichiFlowStore((state) => state.fetchProjectList);
@@ -42,16 +45,13 @@ export function ProjectList() {
     if (!newPath.trim() || (dialogMode === "create" && !newName.trim())) return;
     setIsLoading(true);
     try {
-      if (dialogMode === "import") {
-        await openProject(newPath);
-      } else {
-        await createProject(newName, newPath);
-      }
+      const project = dialogMode === "import" ? await openProject(newPath) : await createProject(newName, newPath);
       setShowCreate(false);
       setNewName("");
       setNewPath("");
       const list = await fetchProjectList();
       setProjects(list);
+      navigate(`/launch/${project.project_id}`);
     } catch (err) {
       addToast({ type: "error", message: err instanceof Error ? err.message : dialogMode === "import" ? "导入项目失败" : "创建项目失败" });
     } finally {
@@ -59,12 +59,8 @@ export function ProjectList() {
     }
   };
 
-  const handleOpen = async (path: string) => {
-    try {
-      await openProject(path);
-    } catch (err) {
-      addToast({ type: "error", message: err instanceof Error ? err.message : "打开项目失败" });
-    }
+  const handleOpen = (project: ProjectInfo) => {
+    navigate(`/launch/${project.project_id}`);
   };
 
   const openProjectDialog = (mode: "create" | "import") => {
@@ -92,18 +88,16 @@ export function ProjectList() {
   };
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "32px" }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
+    <div className="tf-page">
+      <div className="tf-page-content tf-animate-in">
+        <div className="tf-page-header">
           <div>
-            <h1 className="tf-display" style={{ marginBottom: 8 }}>
-              项目
-            </h1>
-            <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-              一个项目包含一套共享输入和多个参数方案，方案共享项目输入，仅修改计算参数。
+            <h1 className="tf-display tf-mb-2">项目</h1>
+            <p className="tf-body tf-text-secondary">
+              选择或创建项目后将进入一体化编辑器。方案、参数、队列与导出均在项目内完成。
             </p>
           </div>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div className="tf-actions-bar">
             <Button icon={<Plus size={16} />} onClick={() => openProjectDialog("create")}>
               新建项目
             </Button>
@@ -116,64 +110,23 @@ export function ProjectList() {
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 12px",
-            borderRadius: "var(--radius-large)",
-            border: "1px solid var(--color-border)",
-            background: "var(--color-surface)",
-            marginBottom: 20,
-            maxWidth: 480,
-          }}
-        >
-          <Search size={16} color="var(--color-foreground-tertiary)" />
+        <div className="tf-search-box tf-search-box--medium">
+          <Search size={16} className="tf-text-tertiary" />
           <input
             type="text"
             placeholder="搜索项目名称或路径..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{
-              flex: 1,
-              border: "none",
-              background: "transparent",
-              outline: "none",
-              color: "var(--color-foreground)",
-              fontSize: 14,
-            }}
           />
         </div>
 
         {combined.length === 0 ? (
-          <div
-            style={{
-              padding: 64,
-              textAlign: "center",
-              borderRadius: "var(--radius-xlarge)",
-              border: "1px dashed var(--color-border-strong)",
-              background: "var(--color-surface)",
-            }}
-          >
-            <div
-              style={{
-                width: 64,
-                height: 64,
-                borderRadius: "50%",
-                background: "var(--color-surface-tertiary)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                margin: "0 auto 16px",
-              }}
-            >
-              <FolderOpen size={32} color="var(--color-foreground-tertiary)" />
+          <div className="tf-empty-state">
+            <div className="tf-empty-icon">
+              <FolderOpen size={32} className="tf-text-tertiary" />
             </div>
-            <h2 className="tf-title" style={{ marginBottom: 8 }}>
-              暂无项目
-            </h2>
-            <p className="tf-body" style={{ color: "var(--color-foreground-secondary)", marginBottom: 24 }}>
+            <h2 className="tf-title tf-mb-2">暂无项目</h2>
+            <p className="tf-body tf-text-secondary tf-mb-6">
               新建项目或打开本地项目，开始组织输入文件与参数方案。
             </p>
             <Button icon={<Plus size={16} />} onClick={() => openProjectDialog("create")}>
@@ -181,81 +134,51 @@ export function ProjectList() {
             </Button>
           </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 16 }}>
+          <div className="tf-project-grid">
             {combined.map((project) => (
               <div
                 key={project.project_id}
-                style={{
-                  padding: 20,
-                  borderRadius: "var(--radius-xlarge)",
-                  border: `1px solid ${activeProject?.project_id === project.project_id ? "var(--color-brand)" : "var(--color-border)"}`,
-                  background: "var(--color-surface)",
-                  boxShadow: "var(--shadow-rest)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 12,
-                  cursor: "pointer",
-                  transition: "box-shadow 120ms ease, border-color 120ms ease",
-                }}
-                onClick={() => handleOpen(project.root_path)}
-                onMouseEnter={(e) => (e.currentTarget.style.boxShadow = "var(--shadow-hover)")}
-                onMouseLeave={(e) => (e.currentTarget.style.boxShadow = "var(--shadow-rest)")}
+                className={`tf-project-card${activeProject?.project_id === project.project_id ? " active" : ""}`}
+                onClick={() => handleOpen(project)}
               >
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                  <div style={{ minWidth: 0 }}>
-                    <h3 className="tf-subtitle tf-ellipsis" style={{ marginBottom: 4 }}>
-                      {project.name}
-                    </h3>
-                    <p className="tf-caption tf-ellipsis" style={{ color: "var(--color-foreground-tertiary)" }}>
-                      {project.root_path}
-                    </p>
+                <div className="tf-row tf-justify-between tf-gap-2">
+                  <div className="tf-min-w-0">
+                    <h3 className="tf-subtitle tf-ellipsis tf-mb-2">{project.name}</h3>
+                    <p className="tf-caption tf-ellipsis tf-text-tertiary">{project.root_path}</p>
                   </div>
-                  {activeProject?.project_id === project.project_id && <StatusBadge variant="success">当前打开</StatusBadge>}
+                  {activeProject?.project_id === project.project_id && <StatusBadge variant="success">最近打开</StatusBadge>}
                 </div>
 
-                <div style={{ display: "flex", gap: 16 }}>
+                <div className="tf-metric-row">
                   <div>
-                    <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                      方案
-                    </div>
-                    <div className="tf-body" style={{ fontWeight: 600 }}>
-                      —
-                    </div>
+                    <div className="tf-caption tf-text-tertiary">方案</div>
+                    <div className="tf-body tf-font-semibold">—</div>
                   </div>
                   <div>
-                    <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                      输入版本
-                    </div>
-                    <div className="tf-body" style={{ fontWeight: 600 }}>
-                      —
-                    </div>
+                    <div className="tf-caption tf-text-tertiary">输入版本</div>
+                    <div className="tf-body tf-font-semibold">—</div>
                   </div>
                   <div>
-                    <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                      队列
-                    </div>
-                    <div className="tf-body" style={{ fontWeight: 600 }}>
-                      未运行
-                    </div>
+                    <div className="tf-caption tf-text-tertiary">队列</div>
+                    <div className="tf-body tf-font-semibold">未运行</div>
                   </div>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "auto" }}>
-                  <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)", display: "flex", alignItems: "center", gap: 4 }}>
+                <div className="tf-project-card-footer">
+                  <span className="tf-caption tf-text-tertiary tf-row tf-gap-1">
                     <Clock size={12} />
                     {formatDate(project.updated_at)}
                   </span>
-                  <button
+                  <IconButton
+                    size="small"
+                    icon={<MoreHorizontal size={16} />}
+                    label="从历史记录移除"
+                    className="tf-text-tertiary"
                     onClick={(e) => {
                       e.stopPropagation();
                       removeFromHistory(project.project_id);
                     }}
-                    style={{ color: "var(--color-foreground-tertiary)", display: "flex", alignItems: "center" }}
-                    title="从历史记录移除"
-                    aria-label="从历史记录移除"
-                  >
-                    <MoreHorizontal size={16} />
-                  </button>
+                  />
                 </div>
               </div>
             ))}
@@ -263,35 +186,15 @@ export function ProjectList() {
         )}
 
         {showCreate && (
-          <div
-            style={{
-              position: "fixed",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "rgba(0,0,0,0.35)",
-              zIndex: 900,
-            }}
-            onClick={() => setShowCreate(false)}
-          >
-            <div
-              style={{
-                width: 480,
-                padding: 24,
-                borderRadius: "var(--radius-xlarge)",
-                background: "var(--color-surface)",
-                boxShadow: "var(--shadow-dialog)",
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <h2 className="tf-title" style={{ marginBottom: 16 }}>
-                {dialogMode === "import" ? "打开或导入项目" : "新建项目"}
-              </h2>
-              <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
+          <div className="tf-dialog-overlay" onClick={() => setShowCreate(false)}>
+            <div className="tf-dialog tf-dialog-narrow" onClick={(e) => e.stopPropagation()}>
+              <h2 className="tf-title tf-mb-4">{dialogMode === "import" ? "打开或导入项目" : "新建项目"}</h2>
+              <div className="tf-form-stack">
                 {dialogMode === "create" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <label htmlFor="project-name" className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>项目名称（必填）</label>
+                  <div className="tf-form-field">
+                    <label htmlFor="project-name" className="tf-caption tf-text-secondary">
+                      项目名称（必填）
+                    </label>
                     <input
                       id="project-name"
                       value={newName}
@@ -299,14 +202,20 @@ export function ProjectList() {
                       placeholder="例如：2026 年山区洪水模拟"
                       aria-invalid={!newName.trim()}
                       aria-describedby={!newName.trim() ? "project-name-error" : undefined}
-                      style={{ padding: "8px 12px", borderRadius: "var(--radius-large)", border: `1px solid ${newName.trim() ? "var(--color-border)" : "var(--color-error)"}`, background: "var(--color-bg-canvas)", color: "var(--color-foreground)" }}
+                      className={`tf-input tf-full-width${!newName.trim() ? " is-invalid" : ""}`}
                     />
-                    {!newName.trim() && <span id="project-name-error" className="tf-caption" style={{ color: "var(--color-error)" }}>项目名称为必填项</span>}
+                    {!newName.trim() && (
+                      <span id="project-name-error" className="tf-caption tf-text-error">
+                        项目名称为必填项
+                      </span>
+                    )}
                   </div>
                 )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  <label htmlFor="project-root-path" className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>本地根目录（必填）</label>
-                  <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+                <div className="tf-form-field">
+                  <label htmlFor="project-root-path" className="tf-caption tf-text-secondary">
+                    本地根目录（必填）
+                  </label>
+                  <div className="tf-input-row">
                     <input
                       id="project-root-path"
                       value={newPath}
@@ -314,17 +223,23 @@ export function ProjectList() {
                       placeholder={dialogMode === "import" ? "C:\\TaichiFlowProjects\\existing-case" : "C:\\TaichiFlowProjects\\my-project"}
                       aria-invalid={!newPath.trim()}
                       aria-describedby={!newPath.trim() ? "project-root-error project-root-help" : "project-root-help"}
-                      style={{ flex: 1, minWidth: 0, padding: "8px 12px", borderRadius: "var(--radius-large)", border: `1px solid ${newPath.trim() ? "var(--color-border)" : "var(--color-error)"}`, background: "var(--color-bg-canvas)", color: "var(--color-foreground)", fontFamily: "var(--font-mono)" }}
+                      className={`tf-input tf-mono tf-flex-1${!newPath.trim() ? " is-invalid" : ""}`}
                     />
                     <Button type="button" variant="secondary" icon={<FolderOpen size={16} />} onClick={() => void handleChooseDirectory()} disabled={isSelectingDirectory}>
                       {isSelectingDirectory ? "正在打开…" : "选择目录"}
                     </Button>
                   </div>
-                  <span id="project-root-help" className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>可手工输入，或浏览本机已挂载盘符；选择后仍需点击{dialogMode === "import" ? "打开并导入" : "创建"}。</span>
-                  {!newPath.trim() && <span id="project-root-error" className="tf-caption" style={{ color: "var(--color-error)" }}>请选择或输入本地根目录</span>}
+                  <span id="project-root-help" className="tf-caption tf-text-tertiary">
+                    可手工输入，或浏览本机已挂载盘符；选择后仍需点击{dialogMode === "import" ? "打开并导入" : "创建"}。
+                  </span>
+                  {!newPath.trim() && (
+                    <span id="project-root-error" className="tf-caption tf-text-error">
+                      请选择或输入本地根目录
+                    </span>
+                  )}
                 </div>
               </div>
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+              <div className="tf-row tf-justify-end tf-gap-2">
                 <Button variant="secondary" onClick={() => setShowCreate(false)}>
                   取消
                 </Button>

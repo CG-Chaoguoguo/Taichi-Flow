@@ -25,6 +25,7 @@ from api.services import (
     write_runtime_metadata_files,
 )
 from api.services.parameter_catalog import build_parameter_catalog
+from api.services.structured_input_resolver import materialize_structured_rainfall
 from api.services.runtime_profile import (
     RuntimeProfile,
     apply_profile_environment,
@@ -135,6 +136,28 @@ def _native_file_stage(family: str) -> Tuple[str, str, Optional[str]]:
     return stages.get(family, ("recognized", "none", None))
 
 
+WORKBENCH_FAMILY_TO_NATIVE = {
+    "manning": "manningfil",
+    "slope": "slofil",
+    "thickness": "zfil",
+    "groundwater": "depfil",
+    "infiltration": "rizerofil",
+    "rainfall": "rifil",
+    "zones": "zonfil",
+    "soil": "zonfil",
+    "dem": "demfil",
+    "outflow": "outflow.txt",
+    "inflow": "inflow.txt",
+    "monitoring": "hydrograph.txt",
+    "drainage": "drainage.txt",
+    "swmm": "swmm.txt",
+}
+
+
+def _normalize_case_input_family(family: str) -> str:
+    return WORKBENCH_FAMILY_TO_NATIVE.get(family, family)
+
+
 def _case_input_overrides(
     case_input_files: Optional[Dict[str, str]],
     run_flags: Optional[Dict[str, Any]] = None,
@@ -155,9 +178,10 @@ def _case_input_overrides(
     simulate_inflow_hydrograph = bool(flags.get("simulate_inflow_hydrograph", False))
     simulate_outflow_cell = bool(flags.get("simulate_outflow_cell", True))
 
-    for family, path in case_input_files.items():
+    for raw_family, path in case_input_files.items():
         if not path:
             continue
+        family = _normalize_case_input_family(raw_family)
         status, runtime_stage, activation_condition = _native_file_stage(family)
         original_branch_active = None
         current_backend_branch_active = None
@@ -183,11 +207,11 @@ def _case_input_overrides(
             "current_backend_branch_active": current_backend_branch_active,
         }
 
-    dem_path = case_input_files.get("demfil")
+    dem_path = case_input_files.get("demfil") or case_input_files.get("dem")
     if dem_path:
         overrides["dem_file"] = dem_path
 
-    zone_path = case_input_files.get("zonfil")
+    zone_path = case_input_files.get("zonfil") or case_input_files.get("zones") or case_input_files.get("soil")
     if zone_path:
         overrides["soil_zones_file"] = zone_path
         overrides["spatial_zones"] = {
@@ -236,6 +260,17 @@ def prepare_runtime_from_payload(
 
     raw_overrides = overrides if overrides is not None else config
     raw_overrides = deepcopy(raw_overrides) if raw_overrides is not None else {}
+    structured_rainfall_audit: Optional[Dict[str, Any]] = None
+    structured_rainfall = raw_overrides.pop("structured_rainfall", None) if isinstance(raw_overrides, dict) else None
+    if isinstance(structured_rainfall, dict):
+        if not dem_file:
+            raise ValueError("Structured rainfall requires a bound DEM input.")
+        rainfall_config, structured_rainfall_audit = materialize_structured_rainfall(
+            structured_rainfall,
+            dem_file=dem_file,
+            output_dir=run_output_dir,
+        )
+        raw_overrides["rainfall"] = rainfall_config
     rainfall_payload = raw_overrides.get("rainfall") if isinstance(raw_overrides, dict) else None
     if isinstance(rainfall_payload, dict) and rainfall_payload.get("mode") == "uniform_periods":
         raw_overrides["rainfall"] = _write_frontend_uniform_rainfall(rainfall_payload, run_output_dir)
@@ -317,6 +352,11 @@ def prepare_runtime_from_payload(
         config_dict = _deep_merge(config_dict, normalized_overrides)
         flow_config = SimulationConfig.from_dict(config_dict)
         effective_config, runtime_input_manifest, provenance = build_direct_runtime_metadata(flow_config)
+
+    if structured_rainfall_audit is not None:
+        effective_config["structured_rainfall"] = structured_rainfall_audit
+        runtime_input_manifest["structured_rainfall"] = structured_rainfall_audit
+        provenance["structured_rainfall"] = structured_rainfall_audit
 
     if not requested_backend and flow_config.compute.backend == "auto":
         flow_config.compute.backend = profile.default_backend

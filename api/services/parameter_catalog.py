@@ -8,15 +8,100 @@ from typing import Any, Dict, Iterable, List, Optional
 from api.services.reference_config_parser import ReferenceConfigParseResult
 
 
+# Config-path keys accepted by scenario parameter_patch / runtime overrides.
 EDITABLE_PARAMETERS = {
     "hydrology.use_background_flux_offset",
     "hydrology.K_sat",
+    "hydrology.rizero_initial",
+    "hydrology.depthwt_initial",
     "soil.gamma_s",
     "soil.c",
     "soil.phi",
     "soil.gamma_w",
+    "soil.depth",
+    "soil.double_layer.lbstar",
+    "soil.double_layer.ltstar",
+    "soil.double_layer.min_slope_angle_deg",
+    "soil.double_layer.nzsb",
+    "soil.double_layer.nzst",
+    "soil.double_layer.uww",
     "rheology.n_manning",
     "rheology.limitfr",
+    "rheology.alpha1",
+    "rheology.alpha2",
+    "rheology.beta1",
+    "rheology.beta2",
+    "rheology.cs",
+    "rheology.kresis",
+    "rheology.shallown",
+    "erosion.d50",
+    "erosion.coedepo",
+    "erosion.k_deposition",
+    "time.t_end",
+    "time.dt_max",
+    "time.dt_min",
+    "time.dt_decrease",
+    "time.dt_increase",
+    "time.toldh",
+    "time.toldhp",
+    "time.dt_output",
+    "time.wavemax",
+    # Input-source mode switches (applied via scenario_config_overrides)
+    "rainfall.mode",
+    "rainfall.timeline",
+    "rainfall.periods",
+    "manning.source",
+}
+
+# edda_in field -> display metadata (Chinese name + English abbrev + group).
+PARAMETER_META: Dict[str, Dict[str, str]] = {
+    "hydrology.use_background_flux_offset": {"label_zh": "背景入渗偏移", "abbrev": "background_flux_offset", "group": "hydrology"},
+    "hydrology.K_sat": {"label_zh": "饱和导水率", "abbrev": "K_sat", "group": "hydrology"},
+    "hydrology.rizero_initial": {"label_zh": "初始入渗率", "abbrev": "rizero", "group": "hydrology"},
+    "hydrology.depthwt_initial": {"label_zh": "初始地下水深", "abbrev": "depth", "group": "hydrology"},
+    "soil.gamma_s": {"label_zh": "土体重度", "abbrev": "gamma_s", "group": "soil"},
+    "soil.c": {"label_zh": "黏聚力", "abbrev": "c", "group": "soil"},
+    "soil.phi": {"label_zh": "内摩擦角", "abbrev": "phi", "group": "soil"},
+    "soil.gamma_w": {"label_zh": "水重度", "abbrev": "uww", "group": "soil"},
+    "soil.depth": {"label_zh": "土层厚度", "abbrev": "depth", "group": "soil"},
+    "soil.double_layer.lbstar": {"label_zh": "下层厚度", "abbrev": "lbstar", "group": "soil"},
+    "soil.double_layer.ltstar": {"label_zh": "上层厚度", "abbrev": "ltstar", "group": "soil"},
+    "soil.double_layer.min_slope_angle_deg": {"label_zh": "最小坡度角", "abbrev": "min_slope_angle_deg", "group": "soil"},
+    "soil.double_layer.nzsb": {"label_zh": "下层分层数", "abbrev": "nzsb", "group": "soil"},
+    "soil.double_layer.nzst": {"label_zh": "上层分层数", "abbrev": "nzst", "group": "soil"},
+    "soil.double_layer.uww": {"label_zh": "水重度", "abbrev": "uww", "group": "soil"},
+    "rheology.n_manning": {"label_zh": "曼宁糙率", "abbrev": "manning", "group": "rheology"},
+    "rheology.limitfr": {"label_zh": "弗劳德数限制", "abbrev": "limitfr", "group": "rheology"},
+    "rheology.alpha1": {"label_zh": "二次流变系数 α1", "abbrev": "alpha1", "group": "rheology"},
+    "rheology.alpha2": {"label_zh": "二次流变系数 α2", "abbrev": "alpha2", "group": "rheology"},
+    "rheology.beta1": {"label_zh": "二次流变系数 β1", "abbrev": "beta1", "group": "rheology"},
+    "rheology.beta2": {"label_zh": "二次流变系数 β2", "abbrev": "beta2", "group": "rheology"},
+    "rheology.cs": {"label_zh": "悬移质系数", "abbrev": "cs", "group": "rheology"},
+    "rheology.kresis": {"label_zh": "粘滞阻力系数", "abbrev": "kresis", "group": "rheology"},
+    "rheology.shallown": {"label_zh": "浅水摩阻系数", "abbrev": "shallown", "group": "rheology"},
+    "erosion.d50": {"label_zh": "中值粒径", "abbrev": "d50", "group": "erosion"},
+    "erosion.coedepo": {"label_zh": "淤积系数", "abbrev": "coedepo", "group": "erosion"},
+    "erosion.k_deposition": {"label_zh": "淤积速率系数", "abbrev": "coedepo", "group": "erosion"},
+    "time.t_end": {"label_zh": "模拟结束时间", "abbrev": "simul", "group": "time"},
+    "time.dt_max": {"label_zh": "最大时间步", "abbrev": "dtmax", "group": "time"},
+    "time.dt_min": {"label_zh": "最小时间步", "abbrev": "dtmin", "group": "time"},
+    "time.dt_decrease": {"label_zh": "拒步缩减系数", "abbrev": "dtd", "group": "time"},
+    "time.dt_increase": {"label_zh": "接受步增长系数", "abbrev": "dti", "group": "time"},
+    "time.toldh": {"label_zh": "绝对水深变化限", "abbrev": "toldh", "group": "time"},
+    "time.toldhp": {"label_zh": "相对水深变化限", "abbrev": "toldhp", "group": "time"},
+    "time.dt_output": {"label_zh": "输出间隔", "abbrev": "tout", "group": "time"},
+    "time.wavemax": {"label_zh": "动波稳定系数", "abbrev": "wavemax", "group": "time"},
+    "spatial_zones.zone_file": {"label_zh": "分区栅格文件", "abbrev": "zonfil", "group": "spatial_zones"},
+    "spatial_zones.zones": {"label_zh": "分区参数", "abbrev": "zones", "group": "spatial_zones"},
+    "rainfall.mode": {"label_zh": "降雨模式", "abbrev": "rainfall_mode", "group": "inputs"},
+    "rainfall.timeline": {"label_zh": "降雨时间轴", "abbrev": "capt", "group": "inputs"},
+    "rainfall.periods": {"label_zh": "降雨时段", "abbrev": "cri", "group": "inputs"},
+    "manning.source": {"label_zh": "曼宁来源", "abbrev": "manning_source", "group": "inputs"},
+}
+
+READONLY_DISPLAY_PARAMETERS = {
+    "spatial_zones.zone_file",
+    "spatial_zones.zones",
 }
 
 CASE_CONFIG_OVERRIDE_PATHS = {
@@ -55,14 +140,7 @@ CASE_CONFIG_OVERRIDE_PATHS = {
 
 CONFIG_PATHS = {
     **{key: paths[0] for key, paths in CASE_CONFIG_OVERRIDE_PATHS.items()},
-    "hydrology.use_background_flux_offset": "hydrology.use_background_flux_offset",
-    "hydrology.K_sat": "hydrology.K_sat",
-    "soil.gamma_s": "soil.gamma_s",
-    "soil.c": "soil.c",
-    "soil.phi": "soil.phi",
-    "soil.gamma_w": "soil.gamma_w",
-    "rheology.n_manning": "rheology.n_manning",
-    "rheology.limitfr": "rheology.limitfr",
+    **{path: path for path in EDITABLE_PARAMETERS | READONLY_DISPLAY_PARAMETERS},
     "rainfall_mode": "rainfall",
     "rainfall_source": "rainfall",
     "manning_source": "rheology.n_manning",
@@ -115,7 +193,11 @@ LABELS = {
     "rheology.limitfr": "Froude limiter",
     "rainfall_mode": "Rainfall mode",
     "rainfall_source": "Rainfall source",
+    "rainfall.mode": "Rainfall mode",
+    "rainfall.timeline": "Rainfall timeline",
+    "rainfall.periods": "Rainfall periods",
     "manning_source": "Manning source",
+    "manning.source": "Manning source",
     "water_table_source": "Initial water table source",
     "initial_infiltration_source": "Initial infiltration source",
     "dfs_infiltration_variant": "DFS infiltration variant",
@@ -146,15 +228,23 @@ def _runtime_status(row: Dict[str, Any]) -> str:
     return "metadata_only"
 
 
+def _meta_for(key: str) -> Dict[str, str]:
+    return PARAMETER_META.get(key, {})
+
+
 def _entry_from_audit(row: Dict[str, Any]) -> Dict[str, Any]:
     key = str(row.get("parameter"))
     evidence = row.get("evidence") or {}
     status = _runtime_status(row)
+    meta = _meta_for(key)
     return {
         "key": key,
         "label": LABELS.get(key, key.replace("_", " ").replace(".", " / ")),
+        "label_zh": meta.get("label_zh"),
+        "abbrev": meta.get("abbrev"),
+        "group": meta.get("group") or (CONFIG_PATHS.get(key) or key).split(".")[0],
         "config_path": CONFIG_PATHS.get(key),
-        "parser_field": evidence.get("family") or key,
+        "parser_field": evidence.get("family") or meta.get("abbrev") or key,
         "runtime_consumer": evidence.get("runtime_stage") or CONFIG_PATHS.get(key),
         "activation_condition": evidence.get("activation_condition"),
         "runtime_status": status,
@@ -219,28 +309,36 @@ def build_parameter_catalog(
 
 
 def build_static_parameter_catalog() -> Dict[str, Any]:
-    """Return a minimal catalog before a case is parsed or a run is started."""
+    """Return the edda_in-aligned catalog before a case is parsed or a run starts."""
     parameters = []
-    for key in sorted(EDITABLE_PARAMETERS):
+    for key in sorted(EDITABLE_PARAMETERS | READONLY_DISPLAY_PARAMETERS):
+        meta = _meta_for(key)
+        editable = key in EDITABLE_PARAMETERS
         parameters.append(
             {
                 "key": key,
                 "label": LABELS.get(key, key),
-                "config_path": CONFIG_PATHS.get(key),
-                "parser_field": None,
-                "runtime_consumer": CONFIG_PATHS.get(key),
+                "label_zh": meta.get("label_zh") or LABELS.get(key, key),
+                "abbrev": meta.get("abbrev") or key.split(".")[-1],
+                "group": meta.get("group") or key.split(".")[0],
+                "config_path": CONFIG_PATHS.get(key) or key,
+                "parser_field": meta.get("abbrev"),
+                "runtime_consumer": CONFIG_PATHS.get(key) or key,
                 "activation_condition": "direct_config_payload",
-                "runtime_status": "production_consumed",
-                "editable": True,
+                "runtime_status": "production_consumed" if editable else "mapped_only",
+                "editable": editable,
                 "output_evidence": [],
-                "evidence": {"source": "static_catalog"},
+                "evidence": {"source": "static_catalog", "edda_in": True},
             }
         )
+    status_counts: Dict[str, int] = {}
+    for entry in parameters:
+        status_counts[entry["runtime_status"]] = status_counts.get(entry["runtime_status"], 0) + 1
     return {
-        "catalog_version": "taichi-flow-parameter-catalog-v1",
+        "catalog_version": "taichi-flow-parameter-catalog-v2",
         "editable_statuses": ["production_consumed", "config_fallback_consumed"],
         "parameters": parameters,
-        "status_counts": {"production_consumed": len(parameters)},
+        "status_counts": status_counts,
         "input_source_registry": {},
     }
 

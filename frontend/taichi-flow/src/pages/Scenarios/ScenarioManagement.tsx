@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
+import { IconButton } from "../../components/IconButton";
 import { StatusBadge } from "../../components/StatusBadge";
 import type { Scenario } from "../../types";
 
@@ -22,6 +23,7 @@ function formatDate(iso: string): string {
 
 const statusFilters = [
   { key: "all", label: "全部" },
+  { key: "draft", label: "草稿" },
   { key: "ready", label: "待模拟" },
   { key: "queued", label: "排队中" },
   { key: "running", label: "运行中" },
@@ -34,7 +36,9 @@ export function ScenarioManagement() {
   const navigate = useNavigate();
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
+  const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
   const fetchScenarios = useTaichiFlowStore((state) => state.fetchScenarios);
+  const fetchInputFiles = useTaichiFlowStore((state) => state.fetchInputFiles);
   const createScenario = useTaichiFlowStore((state) => state.createScenario);
   const duplicateScenario = useTaichiFlowStore((state) => state.duplicateScenario);
   const deleteScenario = useTaichiFlowStore((state) => state.deleteScenario);
@@ -49,7 +53,11 @@ export function ScenarioManagement() {
 
   useEffect(() => {
     fetchScenarios();
-  }, [fetchScenarios]);
+    fetchInputFiles();
+  }, [fetchScenarios, fetchInputFiles]);
+
+  const hasDem = inputFiles.some((file) => file.family === "dem" && (file.status === "ready" || file.status === "warning"));
+  const needsBasicInputs = !hasDem;
 
   const filtered = useMemo(() => {
     return scenarios
@@ -60,10 +68,18 @@ export function ScenarioManagement() {
   const handleCreate = async () => {
     if (!newName.trim()) return;
     try {
-      await createScenario(newName, baseId || undefined);
+      const scenario = await createScenario(newName, baseId || undefined);
       setShowCreate(false);
       setNewName("");
       setBaseId("");
+      if (scenario.status === "draft") {
+        addToast({
+          type: "warning",
+          message: "方案已创建。请在输入绑定中选择 DEM 等资产并完成预检，再加入队列。",
+        });
+      } else {
+        addToast({ type: "success", message: "方案已创建" });
+      }
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "创建方案失败" });
     }
@@ -95,25 +111,17 @@ export function ScenarioManagement() {
   };
 
   if (!activeProject) {
-    return (
-      <div style={{ padding: 48 }}>
-        <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-          请先选择项目。
-        </p>
-      </div>
-    );
+    return <div className="tf-empty-state tf-body">请先选择项目。</div>;
   }
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: "24px 32px 0" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+    <div className="tf-fill-col">
+      <div className="tf-page-toolbar tf-animate-in">
+        <div className="tf-page-header">
           <div>
-            <h1 className="tf-display" style={{ marginBottom: 4 }}>
-              方案管理
-            </h1>
-            <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-              同一项目内的多套参数方案共享输入文件，每套方案拥有独立的模拟状态和结果。
+            <h1 className="tf-display tf-mb-2">方案管理</h1>
+            <p className="tf-body tf-text-secondary">
+              同一项目共享输入版本；各方案仅参数不同，并落在项目下独立子目录中。
             </p>
           </div>
           <Button icon={<Plus size={16} />} onClick={() => setShowCreate(true)}>
@@ -121,43 +129,41 @@ export function ScenarioManagement() {
           </Button>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "6px 12px",
-              borderRadius: "var(--radius-large)",
-              border: "1px solid var(--color-border)",
-              background: "var(--color-surface)",
-              flex: 1,
-              maxWidth: 320,
-            }}
-          >
-            <Search size={16} color="var(--color-foreground-tertiary)" />
+        {needsBasicInputs ? (
+          <div role="status" className="tf-alert-banner tf-mb-4">
+            <div>
+              <div className="tf-body tf-font-semibold tf-mb-2">尚未准备好基础输入数据</div>
+              <div className="tf-caption tf-text-secondary">
+                仍可先新建方案。入队前请在项目资产库导入 DEM（必填）等数据，并在方案“输入绑定”中完成预检。
+              </div>
+            </div>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => navigate(`/projects/${activeProject.project_id}`)}
+            >
+              去项目上传
+            </Button>
+          </div>
+        ) : null}
+
+        <div className="tf-row tf-mb-4">
+          <div className="tf-search-box tf-search-box--narrow">
+            <Search size={16} className="tf-text-tertiary" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索方案名称..."
-              style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: "var(--color-foreground)" }}
             />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Filter size={16} color="var(--color-foreground-tertiary)" />
+          <div className="tf-row tf-gap-1">
+            <Filter size={16} className="tf-text-tertiary" />
             {statusFilters.map((f) => (
               <button
                 key={f.key}
+                type="button"
                 onClick={() => setFilter(f.key)}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: "var(--radius-medium)",
-                  border: "none",
-                  background: filter === f.key ? "var(--color-brand-bg-subtle)" : "transparent",
-                  color: filter === f.key ? "var(--color-brand)" : "var(--color-foreground-secondary)",
-                  fontSize: 13,
-                  cursor: "pointer",
-                }}
+                className={`tf-filter-pill${filter === f.key ? " active" : ""}`}
               >
                 {f.label}
               </button>
@@ -166,38 +172,31 @@ export function ScenarioManagement() {
         </div>
       </div>
 
-      <div style={{ flex: 1, overflow: "auto", padding: "0 32px 32px" }}>
-        <div style={{ borderRadius: "var(--radius-xlarge)", border: "1px solid var(--color-border)", overflow: "hidden", background: "var(--color-surface)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <div className="tf-scroll-body">
+        <div className="tf-table-wrap tf-glass">
+          <table className="tf-table">
             <thead>
-              <tr style={{ background: "var(--color-surface-tertiary)" }}>
-                {["方案名称", "输入版本", "参数摘要", "状态", "进度", "更新时间", "结果概况", "操作"].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      padding: "12px 16px",
-                      textAlign: "left",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: "var(--color-foreground-secondary)",
-                      borderBottom: "1px solid var(--color-border)",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {h}
-                  </th>
+              <tr>
+                {["方案名称", "输入版本", "工作目录", "参数摘要", "状态", "进度", "更新时间", "结果概况", "操作"].map((h) => (
+                  <th key={h}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ textAlign: "center", padding: 48, color: "var(--color-foreground-secondary)" }}>
-                    暂无符合条件的方案
-                  </td>
+                  <td colSpan={9} className="tf-empty-state tf-body">暂无符合条件的方案</td>
                 </tr>
               ) : (
-                filtered.map((s) => <ScenarioRow key={s.scenario_id} scenario={s} onEnqueue={handleEnqueue} onDuplicate={handleDuplicate} onDelete={handleDelete} />)
+                filtered.map((s) => (
+                  <ScenarioRow
+                    key={s.scenario_id}
+                    scenario={s}
+                    onEnqueue={handleEnqueue}
+                    onDuplicate={handleDuplicate}
+                    onDelete={handleDelete}
+                  />
+                ))
               )}
             </tbody>
           </table>
@@ -211,6 +210,7 @@ export function ScenarioManagement() {
           baseId={baseId}
           setBaseId={setBaseId}
           scenarios={scenarios}
+          needsBasicInputs={needsBasicInputs}
           onClose={() => setShowCreate(false)}
           onCreate={handleCreate}
         />
@@ -237,91 +237,84 @@ function ScenarioRow({
   const paramSummary = paramCount === 0 ? "使用基准参数" : `${paramCount} 项参数已修改`;
 
   return (
-    <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
-      <td style={{ padding: "12px 16px" }}>
-        <div className="tf-body" style={{ fontWeight: 600, marginBottom: 2 }}>
-          {scenario.name}
-        </div>
-        <div className="tf-mono" style={{ color: "var(--color-foreground-tertiary)" }}>
-          {scenario.scenario_id}
-        </div>
+    <tr>
+      <td>
+        <div className="tf-body tf-font-semibold tf-mb-2">{scenario.name}</div>
+        <div className="tf-mono tf-text-tertiary">{scenario.scenario_id}</div>
       </td>
-      <td style={{ padding: "12px 16px" }}>
-        <span className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-          {scenario.input_revision_id}
+      <td>
+        <span className={`tf-caption ${scenario.input_revision_id ? "tf-text-secondary" : "tf-text-warning"}`}>
+          {scenario.binding_state === "runtime_snapshot" ? "运行快照已冻结" : "草稿输入绑定"}
         </span>
       </td>
-      <td style={{ padding: "12px 16px" }}>
-        <span className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-          {paramSummary}
+      <td>
+        <span className="tf-mono tf-text-tertiary tf-ellipsis tf-block" title={scenario.work_dir}>
+          {scenario.work_dir || `scenarios/${scenario.scenario_id}`}
         </span>
       </td>
-      <td style={{ padding: "12px 16px" }}>
+      <td>
+        <span className="tf-body tf-text-secondary">{paramSummary}</span>
+      </td>
+      <td>
         <StatusBadge variant={scenario.status} dot />
       </td>
-      <td style={{ padding: "12px 16px" }}>
+      <td>
         {scenario.status === "running" ? (
           <div>
-            <div
-              style={{
-                height: 6,
-                borderRadius: 3,
-                background: "var(--color-surface-tertiary)",
-                overflow: "hidden",
-                marginBottom: 4,
-              }}
-            >
-              <div
-                style={{ width: `${scenario.progress}%`, height: "100%", background: "var(--color-brand)", transition: "width 500ms ease" }}
-              />
+            <div className="tf-progress tf-mb-2">
+              <div className="tf-progress-fill" style={{ width: `${scenario.progress}%` }} />
             </div>
-            <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-              {scenario.progress}%
-            </span>
+            <span className="tf-caption tf-text-tertiary">{scenario.progress}%</span>
           </div>
         ) : (
-          <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-            —
-          </span>
+          <span className="tf-caption tf-text-tertiary">—</span>
         )}
       </td>
-      <td style={{ padding: "12px 16px" }}>
-        <span className="tf-caption" style={{ color: "var(--color-foreground-secondary)", display: "flex", alignItems: "center", gap: 4 }}>
+      <td>
+        <span className="tf-caption tf-text-secondary tf-row tf-gap-1">
           <Clock size={12} />
           {formatDate(scenario.updated_at)}
         </span>
       </td>
-      <td style={{ padding: "12px 16px" }}>
-        <span className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+      <td>
+        <span className="tf-body tf-text-secondary">
           {scenario.status === "completed" ? `${scenario.result_family_count} 个结果族 · ${scenario.file_count} 个文件` : "—"}
         </span>
       </td>
-      <td style={{ padding: "12px 16px" }}>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
+      <td>
+        <div className="tf-icon-actions">
+          <IconButton
+            size="small"
+            icon={<Edit3 size={16} />}
+            label="打开"
+            className="tf-text-brand"
             onClick={() => navigate(`/projects/${projectId}/scenarios/${scenario.scenario_id}/calculate`)}
-            style={{ display: "flex", alignItems: "center", color: "var(--color-brand)" }}
-            title="打开"
-            aria-label="打开"
-          >
-            <Edit3 size={16} />
-          </button>
+          />
           {(scenario.status === "ready" || scenario.status === "draft" || scenario.status === "failed" || scenario.status === "stopped") && (
-            <button onClick={() => onEnqueue(scenario.scenario_id)} style={{ display: "flex", alignItems: "center", color: "var(--color-brand)" }} title="加入队列" aria-label="加入队列">
-              <Play size={16} />
-            </button>
+            <IconButton
+              size="small"
+              icon={<Play size={16} />}
+              label="加入队列"
+              className="tf-text-brand"
+              onClick={() => onEnqueue(scenario.scenario_id)}
+            />
           )}
           {scenario.status === "completed" && (
-            <button style={{ display: "flex", alignItems: "center", color: "var(--color-foreground-secondary)" }} title="查看结果" aria-label="查看结果">
-              <Download size={16} />
-            </button>
+            <IconButton size="small" icon={<Download size={16} />} label="查看结果" />
           )}
-          <button onClick={() => onDuplicate(scenario.scenario_id)} style={{ display: "flex", alignItems: "center", color: "var(--color-foreground-secondary)" }} title="复制" aria-label="复制">
-            <Copy size={16} />
-          </button>
-          <button onClick={() => onDelete(scenario.scenario_id)} style={{ display: "flex", alignItems: "center", color: "var(--color-error)" }} title="删除" aria-label="删除">
-            <Trash2 size={16} />
-          </button>
+          <IconButton
+            size="small"
+            icon={<Copy size={16} />}
+            label="复制"
+            onClick={() => onDuplicate(scenario.scenario_id)}
+          />
+          <IconButton
+            size="small"
+            icon={<Trash2 size={16} />}
+            label="删除"
+            className="tf-text-error"
+            onClick={() => onDelete(scenario.scenario_id)}
+          />
         </div>
       </td>
     </tr>
@@ -334,6 +327,7 @@ function CreateScenarioDialog({
   baseId,
   setBaseId,
   scenarios,
+  needsBasicInputs,
   onClose,
   onCreate,
 }: {
@@ -342,65 +336,24 @@ function CreateScenarioDialog({
   baseId: string;
   setBaseId: (v: string) => void;
   scenarios: Scenario[];
+  needsBasicInputs: boolean;
   onClose: () => void;
   onCreate: () => void | Promise<void>;
 }) {
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "rgba(0,0,0,0.35)",
-        zIndex: 900,
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{
-          width: 480,
-          padding: 24,
-          borderRadius: "var(--radius-xlarge)",
-          background: "var(--color-surface)",
-          boxShadow: "var(--shadow-dialog)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="tf-title" style={{ marginBottom: 16 }}>
-          新建参数方案
-        </h2>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
-          <label className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-            方案名称
-          </label>
+    <div className="tf-dialog-overlay" onClick={onClose}>
+      <div className="tf-dialog tf-dialog-narrow" onClick={(e) => e.stopPropagation()}>
+        <h2 className="tf-title tf-mb-4">新建参数方案</h2>
+        <div className="tf-form-stack">
+          <label className="tf-caption tf-text-secondary">方案名称</label>
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="例如：高摩阻方案"
-            style={{
-              padding: "8px 12px",
-              borderRadius: "var(--radius-large)",
-              border: "1px solid var(--color-border)",
-              background: "var(--color-bg-canvas)",
-              color: "var(--color-foreground)",
-            }}
+            className="tf-input tf-full-width"
           />
-          <label className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
-            基于方案
-          </label>
-          <select
-            value={baseId}
-            onChange={(e) => setBaseId(e.target.value)}
-            style={{
-              padding: "8px 12px",
-              borderRadius: "var(--radius-large)",
-              border: "1px solid var(--color-border)",
-              background: "var(--color-bg-canvas)",
-              color: "var(--color-foreground)",
-            }}
-          >
+          <label className="tf-caption tf-text-secondary">基于方案</label>
+          <select value={baseId} onChange={(e) => setBaseId(e.target.value)} className="tf-select tf-full-width">
             <option value="">基准参数</option>
             {scenarios.map((s) => (
               <option key={s.scenario_id} value={s.scenario_id}>
@@ -408,8 +361,13 @@ function CreateScenarioDialog({
               </option>
             ))}
           </select>
+          {needsBasicInputs ? (
+            <div className="tf-info-callout tf-caption">
+              当前还缺少 DEM 等基础输入。仍可创建为草稿方案；上传资产并完成输入绑定预检后，即可加入模拟队列。
+            </div>
+          ) : null}
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+        <div className="tf-row tf-justify-end tf-gap-2">
           <Button variant="secondary" onClick={onClose}>
             取消
           </Button>

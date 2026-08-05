@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { ArrowDown, ArrowUp, RotateCcw, Square, X } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { IconButton } from "../../components/IconButton";
 import { StatusBadge } from "../../components/StatusBadge";
 import type { QueueItem } from "../../types";
 
@@ -18,13 +19,7 @@ export function SimulationQueue() {
   }, [fetchQueue]);
 
   if (!activeProject) {
-    return (
-      <div style={{ padding: 48 }}>
-        <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-          请先选择项目。
-        </p>
-      </div>
-    );
+    return <div className="tf-empty-state tf-body">请先选择项目。</div>;
   }
 
   const running = queue.filter((q) => q.status === "running");
@@ -32,63 +27,31 @@ export function SimulationQueue() {
   const completed = queue.filter((q) => q.status === "completed" || q.status === "failed" || q.status === "interrupted" || q.status === "canceled");
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "32px" }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
+    <div className="tf-page">
+      <div className="tf-page-content tf-animate-in">
+        <div className="tf-page-header">
           <div>
-            <h1 className="tf-display" style={{ marginBottom: 4 }}>
-              模拟队列
-            </h1>
-            <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
+            <h1 className="tf-display tf-mb-2">模拟队列</h1>
+            <p className="tf-body tf-text-secondary">
               并发数固定为 1，方案按顺序串行执行。等待中的任务可调整顺序。
             </p>
           </div>
-          <div className="tf-caption" style={{ padding: "6px 12px", borderRadius: "var(--radius-large)", background: "var(--color-surface-tertiary)" }}>
-            并发数：1
-          </div>
+          <div className="tf-chip">并发数：1</div>
         </div>
 
-        {/* 当前运行 */}
-        <section style={{ marginBottom: 24 }}>
-          <h2 className="tf-subtitle" style={{ marginBottom: 12 }}>
-            当前运行
-          </h2>
+        <section className="tf-section">
+          <h2 className="tf-subtitle tf-mb-2">当前运行</h2>
           {running.length === 0 ? (
-            <div
-              style={{
-                padding: 24,
-                borderRadius: "var(--radius-xlarge)",
-                border: "1px dashed var(--color-border-strong)",
-                background: "var(--color-surface)",
-                color: "var(--color-foreground-secondary)",
-                textAlign: "center",
-              }}
-            >
-              没有运行中的任务
-            </div>
+            <div className="tf-empty-state tf-body">没有运行中的任务</div>
           ) : (
             running.map((item) => <QueueItemCard key={item.queue_item_id} item={item} onStop={() => stopRunningItem(item.queue_item_id)} />)
           )}
         </section>
 
-        {/* 等待队列 */}
-        <section style={{ marginBottom: 24 }}>
-          <h2 className="tf-subtitle" style={{ marginBottom: 12 }}>
-            等待队列
-          </h2>
+        <section className="tf-section">
+          <h2 className="tf-subtitle tf-mb-2">等待队列</h2>
           {waiting.length === 0 ? (
-            <div
-              style={{
-                padding: 24,
-                borderRadius: "var(--radius-xlarge)",
-                border: "1px dashed var(--color-border-strong)",
-                background: "var(--color-surface)",
-                color: "var(--color-foreground-secondary)",
-                textAlign: "center",
-              }}
-            >
-              队列中没有等待任务
-            </div>
+            <div className="tf-empty-state tf-body">队列中没有等待任务</div>
           ) : (
             waiting.map((item) => (
               <QueueItemCard
@@ -102,24 +65,10 @@ export function SimulationQueue() {
           )}
         </section>
 
-        {/* 最近完成 */}
         <section>
-          <h2 className="tf-subtitle" style={{ marginBottom: 12 }}>
-            最近完成/失败
-          </h2>
+          <h2 className="tf-subtitle tf-mb-2">最近完成/失败</h2>
           {completed.length === 0 ? (
-            <div
-              style={{
-                padding: 24,
-                borderRadius: "var(--radius-xlarge)",
-                border: "1px dashed var(--color-border-strong)",
-                background: "var(--color-surface)",
-                color: "var(--color-foreground-secondary)",
-                textAlign: "center",
-              }}
-            >
-              暂无完成或失败记录
-            </div>
+            <div className="tf-empty-state tf-body">暂无完成或失败记录</div>
           ) : (
             completed.slice(-5).map((item) => <QueueItemCard key={item.queue_item_id} item={item} onRetry={() => retryQueueItem(item.queue_item_id)} />)
           )}
@@ -145,76 +94,35 @@ function QueueItemCard({
   onRetry?: () => void;
 }) {
   return (
-    <div
-      style={{
-        padding: 16,
-        borderRadius: "var(--radius-large)",
-        border: "1px solid var(--color-border)",
-        background: "var(--color-surface)",
-        boxShadow: "var(--shadow-rest)",
-        marginBottom: 12,
-        display: "flex",
-        alignItems: "center",
-        gap: 16,
-      }}
-    >
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", minWidth: 40 }}>
-        <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-          #{item.position}
-        </span>
+    <div className="tf-card tf-row tf-mb-2">
+      <div className="tf-queue-position">
+        <span className="tf-caption tf-text-tertiary">#{item.position}</span>
         <StatusBadge variant={item.status} dot />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="tf-body" style={{ fontWeight: 600, marginBottom: 4 }}>
-          {item.scenario_name}
-        </div>
-        <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
+      <div className="tf-flex-1">
+        <div className="tf-body tf-font-semibold tf-mb-2">{item.scenario_name}</div>
+        <div className="tf-caption tf-text-tertiary">
           {item.simulation_id ? `simulation_id: ${item.simulation_id}` : "等待调度"} · 加入时间 {new Date(item.enqueued_at).toLocaleString("zh-CN")}
         </div>
         {item.status === "running" && (
-          <div
-            style={{
-              height: 6,
-              borderRadius: 3,
-              background: "var(--color-surface-tertiary)",
-              overflow: "hidden",
-              marginTop: 8,
-            }}
-          >
-            <div
-              style={{
-                width: `${item.progress}%`,
-                height: "100%",
-                background: "var(--color-brand)",
-                transition: "width 500ms ease",
-              }}
-            />
+          <div className="tf-progress tf-mt-2">
+            <div className="tf-progress-fill" style={{ width: `${item.progress}%` }} />
           </div>
         )}
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
+      <div className="tf-icon-actions">
         {item.status === "waiting" && (
           <>
-            <button style={{ color: "var(--color-foreground-secondary)" }} onClick={onMoveUp} title="上移" aria-label="上移">
-              <ArrowUp size={16} />
-            </button>
-            <button style={{ color: "var(--color-foreground-secondary)" }} onClick={onMoveDown} title="下移" aria-label="下移">
-              <ArrowDown size={16} />
-            </button>
-            <button style={{ color: "var(--color-error)" }} onClick={onCancel} title="取消" aria-label="取消">
-              <X size={16} />
-            </button>
+            <IconButton size="small" icon={<ArrowUp size={16} />} label="上移" onClick={onMoveUp} />
+            <IconButton size="small" icon={<ArrowDown size={16} />} label="下移" onClick={onMoveDown} />
+            <IconButton size="small" icon={<X size={16} />} label="取消" className="tf-text-error" onClick={onCancel} />
           </>
         )}
         {item.status === "running" && (
-          <button style={{ color: "var(--color-error)" }} onClick={onStop} title="停止" aria-label="停止">
-            <Square size={16} />
-          </button>
+          <IconButton size="small" icon={<Square size={16} />} label="停止" className="tf-text-error" onClick={onStop} />
         )}
         {(item.status === "failed" || item.status === "interrupted" || item.status === "canceled") && (
-          <button style={{ color: "var(--color-brand)" }} onClick={onRetry} title="重新排队" aria-label="重新排队">
-            <RotateCcw size={16} />
-          </button>
+          <IconButton size="small" icon={<RotateCcw size={16} />} label="重新排队" className="tf-text-brand" onClick={onRetry} />
         )}
       </div>
     </div>

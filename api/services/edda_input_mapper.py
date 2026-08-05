@@ -19,6 +19,7 @@ from api.services.native_sidecar_loader import (
     parse_case_sidecar,
 )
 from api.services.reference_config_parser import ReferenceConfigParseResult
+from api.services.scenario_config_overrides import apply_scenario_overrides
 from edda.config.sim_config import SimulationConfig
 from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
 from edda.solver.fortran_literals import FORTRAN_DEG2RAD
@@ -698,6 +699,8 @@ def build_reference_runtime_metadata(
     config_overrides: Optional[Dict[str, Any]] = None,
     top_level_overrides: Optional[Dict[str, Any]] = None,
 ) -> Tuple[SimulationConfig, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    # Apply scenario rainfall/manning overrides before building forcing/native files.
+    parsed = apply_scenario_overrides(parsed, config_overrides)
     zone_ids = sorted(parsed.zones.keys())
     default_zone = parsed.zones[zone_ids[0]]
 

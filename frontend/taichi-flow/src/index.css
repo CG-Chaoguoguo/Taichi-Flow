@@ -1,4 +1,6 @@
 @import "./styles/design-tokens.css";
+@import "./styles/materials.css";
+@import "./styles/components.css";
 
 * {
   box-sizing: border-box;
@@ -16,13 +18,13 @@ body,
 
 body {
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.43;
   color: var(--color-foreground);
+  background: var(--mica-base);
   background-color: var(--color-bg-canvas);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: "cv01", "ss03";
 }
 
 #root {
@@ -30,45 +32,41 @@ body {
   flex-direction: column;
 }
 
-/* 字体层级 —— Linear 风格 */
+/* Fluent 2 typography */
 .tf-display {
-  font-size: 32px;
-  font-weight: 510;
-  line-height: 1.13;
-  letter-spacing: -0.704px;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.4px;
 }
 
 .tf-title {
-  font-size: 24px;
-  font-weight: 400;
-  line-height: 1.33;
-  letter-spacing: -0.288px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .tf-subtitle {
-  font-size: 17px;
-  font-weight: 590;
-  line-height: 1.33;
-  letter-spacing: -0.165px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.375;
 }
 
 .tf-body {
-  font-size: 15px;
-  font-weight: 510;
-  line-height: 1.6;
-  letter-spacing: -0.165px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.43;
 }
 
 .tf-caption {
-  font-size: 13px;
-  font-weight: 510;
-  line-height: 1.5;
-  letter-spacing: -0.13px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.33;
 }
 
 .tf-mono {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   font-weight: 400;
 }
@@ -91,7 +89,6 @@ button {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
 }
 
 a {
@@ -130,10 +127,10 @@ a:hover {
 
 /* 通用工具类 */
 .tf-surface {
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-large);
-  box-shadow: var(--shadow-rest);
+  background: var(--layer-fill-default);
+  border: 1px solid var(--layer-stroke);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-2);
 }
 
 .tf-ellipsis {
@@ -153,3 +150,162 @@ a:hover {
   white-space: nowrap;
   border: 0;
 }
+
+.tf-link-button {
+  margin-left: var(--space-3);
+  color: var(--color-brand);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+.tf-link-button:hover {
+  text-decoration: underline;
+}
+
+.tf-link-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tf-full-width {
+  width: 100%;
+}
+
+.tf-flex-1 {
+  flex: 1;
+  min-width: 0;
+}
+
+.tf-text-secondary {
+  color: var(--color-foreground-secondary);
+}
+
+.tf-text-tertiary {
+  color: var(--color-foreground-tertiary);
+}
+
+.tf-text-brand {
+  color: var(--color-brand);
+}
+
+.tf-text-warning {
+  color: var(--color-warning);
+}
+
+.tf-mt-2 {
+  margin-top: var(--space-2);
+}
+
+.tf-gap-3 {
+  gap: var(--space-3);
+}
+
+.tf-gap-4 {
+  gap: var(--space-4);
+}
+
+.tf-justify-center {
+  justify-content: center;
+}
+
+.tf-justify-start {
+  justify-content: flex-start;
+}
+
+.tf-justify-between {
+  justify-content: space-between;
+}
+
+.tf-justify-end {
+  justify-content: flex-end;
+}
+
+.tf-gap-1 {
+  gap: var(--space-1);
+}
+
+.tf-gap-2 {
+  gap: var(--space-2);
+}
+
+.tf-mb-2 {
+  margin-bottom: var(--space-2);
+}
+
+.tf-mb-6 {
+  margin-bottom: var(--space-6);
+}
+
+.tf-mt-1 {
+  margin-top: var(--space-1);
+}
+
+.tf-collapse-icon {
+  transition: transform var(--motion-normal) var(--ease-decelerate);
+}
+
+.tf-collapse-icon.is-collapsed {
+  transform: rotate(180deg);
+}
+
+.tf-topbar-title {
+  color: var(--color-foreground);
+  max-width: 190px;
+  flex-shrink: 0;
+}
+
+.tf-topbar-path {
+  color: var(--color-foreground-tertiary);
+  flex: 1 1 140px;
+  min-width: 60px;
+  max-width: 300px;
+}
+
+.tf-topbar-metrics {
+  color: var(--color-foreground-secondary);
+}
+
+.tf-topbar-time {
+  color: var(--color-foreground-tertiary);
+  min-width: 80px;
+  text-align: right;
+}
+
+.tf-toast-message {
+  flex: 1;
+  color: var(--color-foreground);
+}
+
+.tf-toast-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-foreground-tertiary);
+}
+
+.tf-toast-dot--success { background: var(--color-success); }
+.tf-toast-dot--error { background: var(--color-error); }
+.tf-toast-dot--warning { background: var(--color-warning); }
+.tf-toast-dot--info { background: var(--color-info); }
+
+.tf-status-dot--draft,
+.tf-status-dot--archived,
+.tf-status-dot--canceled,
+.tf-status-dot--cancelled,
+.tf-status-dot--neutral { background: var(--color-foreground-tertiary); }
+.tf-status-dot--ready,
+.tf-status-dot--queued,
+.tf-status-dot--waiting,
+.tf-status-dot--starting,
+.tf-status-dot--info { background: var(--color-info); }
+.tf-status-dot--running { background: var(--color-brand); }
+.tf-status-dot--completed,
+.tf-status-dot--success { background: var(--color-success); }
+.tf-status-dot--failed,
+.tf-status-dot--interrupted,
+.tf-status-dot--error { background: var(--color-error); }
+.tf-status-dot--stopped,
+.tf-status-dot--stopping,
+.tf-status-dot--warning { background: var(--color-warning); }

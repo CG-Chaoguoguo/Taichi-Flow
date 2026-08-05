@@ -1,12 +1,10 @@
 import { useEffect, useState, type PropsWithChildren } from "react";
 import { BrowserRouter, HashRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
-import { AppShell } from "./layouts/AppShell";
+import { LauncherShell } from "./layouts/LauncherShell";
+import { ProjectEditorShell } from "./layouts/ProjectEditorShell";
 import { ProjectList } from "./pages/Projects/ProjectList";
-import { ProjectOverview } from "./pages/Projects/ProjectOverview";
-import { ScenarioManagement } from "./pages/Scenarios/ScenarioManagement";
-import { CalculateWorkspace } from "./pages/Calculate/CalculateWorkspace";
-import { SimulationQueue } from "./pages/Queue/SimulationQueue";
-import { ExportData } from "./pages/Export/ExportData";
+import { ProjectLaunchScreen } from "./pages/Launch/ProjectLaunchScreen";
+import { EditorIndexRedirect, ProjectEditor } from "./pages/Editor/ProjectEditor";
 import { Settings } from "./pages/Settings/Settings";
 import { useTaichiFlowStore } from "./stores/taichiFlowStore";
 
@@ -15,7 +13,17 @@ const Router =
     ? HashRouter
     : BrowserRouter;
 
-export function ProjectRouteGuard({ children }: PropsWithChildren) {
+function LegacyEditorRedirect({ dock }: { dock?: "queue" | "export" }) {
+  const { projectId = "", scenarioId } = useParams();
+  const scenarios = useTaichiFlowStore((state) => state.scenarios);
+  const targetScenario = scenarioId || scenarios[0]?.scenario_id;
+  if (!projectId) return <Navigate to="/projects" replace />;
+  if (!targetScenario) return <Navigate to={`/launch/${projectId}`} replace />;
+  const query = dock ? `?dock=${dock}` : "";
+  return <Navigate to={`/editor/${projectId}/scenarios/${targetScenario}${query}`} replace />;
+}
+
+export function EditorRouteGuard({ children }: PropsWithChildren) {
   const { projectId } = useParams();
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const activeProjectId = useTaichiFlowStore((state) => state.activeProjectId);
@@ -39,8 +47,15 @@ export function ProjectRouteGuard({ children }: PropsWithChildren) {
 
   if (activeProject && activeProject.project_id === projectId) return children;
   if (restoring) {
-    return <div role="status" className="tf-body" style={{ padding: 32, color: "var(--color-foreground-secondary)" }}>正在恢复活动项目…</div>;
+    return (
+      <div role="status" className="tf-body" style={{ padding: 32, color: "var(--color-foreground-secondary)" }}>
+        正在恢复活动项目…
+      </div>
+    );
   }
+  // Closing the project clears activeProject while navigating to /projects — don't bounce back to launch.
+  if (!activeProjectId) return <Navigate to="/projects" replace />;
+  if (projectId) return <Navigate to={`/launch/${projectId}`} replace />;
   return <Navigate to="/projects" replace />;
 }
 
@@ -55,17 +70,40 @@ function AppContent() {
   return (
     <Router>
       <Routes>
-        <Route path="/" element={<AppShell />}>
+        <Route path="/" element={<LauncherShell />}>
           <Route index element={<Navigate to="/projects" replace />} />
           <Route path="projects" element={<ProjectList />} />
-          <Route path="projects/:projectId" element={<ProjectRouteGuard><ProjectOverview /></ProjectRouteGuard>} />
-          <Route path="projects/:projectId/scenarios" element={<ProjectRouteGuard><ScenarioManagement /></ProjectRouteGuard>} />
-          <Route path="projects/:projectId/scenarios/:scenarioId/calculate" element={<ProjectRouteGuard><CalculateWorkspace /></ProjectRouteGuard>} />
-          <Route path="projects/:projectId/queue" element={<ProjectRouteGuard><SimulationQueue /></ProjectRouteGuard>} />
-          <Route path="projects/:projectId/export" element={<ProjectRouteGuard><ExportData /></ProjectRouteGuard>} />
           <Route path="settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/projects" replace />} />
         </Route>
+
+        <Route path="/launch/:projectId" element={<ProjectLaunchScreen />} />
+
+        <Route path="/editor/:projectId" element={<ProjectEditorShell />}>
+          <Route
+            index
+            element={
+              <EditorRouteGuard>
+                <EditorIndexRedirect />
+              </EditorRouteGuard>
+            }
+          />
+          <Route
+            path="scenarios/:scenarioId"
+            element={
+              <EditorRouteGuard>
+                <ProjectEditor />
+              </EditorRouteGuard>
+            }
+          />
+        </Route>
+
+        <Route path="/projects/:projectId" element={<Navigate to="/projects" replace />} />
+        <Route path="/projects/:projectId/scenarios" element={<LegacyEditorRedirect />} />
+        <Route path="/projects/:projectId/scenarios/:scenarioId/calculate" element={<LegacyEditorRedirect />} />
+        <Route path="/projects/:projectId/queue" element={<LegacyEditorRedirect dock="queue" />} />
+        <Route path="/projects/:projectId/export" element={<LegacyEditorRedirect dock="export" />} />
+        <Route path="/calculate" element={<Navigate to="/projects" replace />} />
+        <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>
     </Router>
   );

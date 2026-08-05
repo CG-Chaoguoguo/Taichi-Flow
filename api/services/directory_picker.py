@@ -1,4 +1,4 @@
-"""Local-only directory discovery for the browser project-root picker."""
+"""Local-only directory discovery for the browser project-root and file picker."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,11 +47,13 @@ class DirectoryPickerService:
         return sorted(normalized, key=lambda item: str(item).casefold())
 
     @staticmethod
-    def _entry(path: Path) -> dict[str, object]:
+    def _entry(path: Path, *, kind: str = "directory") -> dict[str, object]:
         return {
             "name": path.name or str(path),
             "path": str(path),
             "writable": os.access(path, os.W_OK),
+            "kind": kind,
+            "size": path.stat().st_size if kind == "file" and path.is_file() else None,
         }
 
     def _containing_root(self, path: Path) -> Optional[Path]:
@@ -63,6 +65,53 @@ class DirectoryPickerService:
                 continue
         return None
 
+    def resolve_local_path(self, raw_path: str, *, expect_file: bool = False) -> Path:
+        if _is_unc_path(raw_path):
+            raise WorkbenchError(
+                "network_path_not_supported",
+                "仅支持本机路径，不支持 UNC 或网络共享。",
+                status_code=422,
+                details={"path": raw_path},
+            )
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            raise WorkbenchError(
+                "directory_path_not_absolute",
+                "路径必须是绝对路径。",
+                status_code=422,
+                details={"path": raw_path},
+            )
+        resolved = candidate.resolve()
+        if self._containing_root(resolved) is None:
+            raise WorkbenchError(
+                "directory_path_not_local",
+                "路径不在本机可选择卷中。",
+                status_code=422,
+                details={"path": str(resolved)},
+            )
+        if not resolved.exists():
+            raise WorkbenchError(
+                "path_not_found",
+                "路径不存在。",
+                status_code=404,
+                details={"path": str(resolved)},
+            )
+        if expect_file and not resolved.is_file():
+            raise WorkbenchError(
+                "path_not_file",
+                "所选路径不是文件。",
+                status_code=409,
+                details={"path": str(resolved)},
+            )
+        if not expect_file and not resolved.is_dir():
+            raise WorkbenchError(
+                "directory_not_directory",
+                "所选路径不是目录。",
+                status_code=409,
+                details={"path": str(resolved)},
+            )
+        return resolved
+
     def list_directories(self, raw_path: Optional[str]) -> dict[str, object]:
         roots = [self._entry(root) for root in self.allowed_roots]
         if raw_path is None or not raw_path.strip():
@@ -71,56 +120,26 @@ class DirectoryPickerService:
                 "parent_path": None,
                 "roots": roots,
                 "directories": [],
+                "files": [],
                 "can_select": False,
             }
 
-        if _is_unc_path(raw_path):
-            raise WorkbenchError(
-                "network_path_not_supported",
-                "目录选择器仅支持本机路径，不支持 UNC 或网络共享。",
-                status_code=422,
-                details={"path": raw_path},
-            )
-
-        candidate = Path(raw_path).expanduser()
-        if not candidate.is_absolute():
-            raise WorkbenchError(
-                "directory_path_not_absolute",
-                "目录路径必须是绝对路径。",
-                status_code=422,
-                details={"path": raw_path},
-            )
-        resolved = candidate.resolve()
+        resolved = self.resolve_local_path(raw_path, expect_file=False)
         containing_root = self._containing_root(resolved)
-        if containing_root is None:
-            raise WorkbenchError(
-                "directory_path_not_local",
-                "目录不在本机可选择卷中。",
-                status_code=422,
-                details={"path": str(resolved)},
-            )
-        if not resolved.exists():
-            raise WorkbenchError(
-                "directory_not_found",
-                "目录不存在。",
-                status_code=404,
-                details={"path": str(resolved)},
-            )
-        if not resolved.is_dir():
-            raise WorkbenchError(
-                "directory_not_directory",
-                "所选路径不是目录。",
-                status_code=409,
-                details={"path": str(resolved)},
-            )
+        assert containing_root is not None
 
+        directories: list[Path] = []
+        files: list[Path] = []
         try:
-            children = []
             for child in resolved.iterdir():
                 try:
                     child_resolved = child.resolve()
-                    if child.is_dir() and self._containing_root(child_resolved) is not None:
-                        children.append(child_resolved)
+                    if self._containing_root(child_resolved) is None:
+                        continue
+                    if child.is_dir():
+                        directories.append(child_resolved)
+                    elif child.is_file():
+                        files.append(child_resolved)
                 except (OSError, PermissionError):
                     continue
         except (OSError, PermissionError) as exc:
@@ -131,12 +150,14 @@ class DirectoryPickerService:
                 details={"path": str(resolved)},
             ) from exc
 
-        children = sorted(set(children), key=lambda item: item.name.casefold())
+        directories = sorted(set(directories), key=lambda item: item.name.casefold())
+        files = sorted(set(files), key=lambda item: item.name.casefold())
         parent = None if resolved == containing_root else resolved.parent
         return {
             "current_path": str(resolved),
             "parent_path": str(parent) if parent is not None else None,
             "roots": roots,
-            "directories": [self._entry(child) for child in children],
+            "directories": [self._entry(child) for child in directories],
+            "files": [self._entry(child, kind="file") for child in files],
             "can_select": os.access(resolved, os.W_OK),
         }

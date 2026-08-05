@@ -76,69 +76,37 @@ export function ExportData() {
   };
 
   if (!activeProject) {
-    return (
-      <div style={{ padding: 48 }}>
-        <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-          请先选择项目。
-        </p>
-      </div>
-    );
+    return <div className="tf-empty-state tf-body">请先选择项目。</div>;
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: "32px" }}>
-      <div style={{ maxWidth: 1000, margin: "0 auto" }}>
-        <div style={{ marginBottom: 24 }}>
-          <h1 className="tf-display" style={{ marginBottom: 4 }}>
-            导出数据
-          </h1>
-          <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-            按参数方案选择输出结果和参数文件，生成结构清晰的导出包。
-          </p>
+    <div className="tf-page">
+      <div className="tf-page-content tf-page-content--medium tf-animate-in">
+        <div className="tf-page-header tf-mb-2">
+          <div>
+            <h1 className="tf-display tf-mb-2">导出数据</h1>
+            <p className="tf-body tf-text-secondary">
+              按参数方案选择输出结果和参数文件，生成结构清晰的导出包。
+            </p>
+          </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
+        <div className="tf-step-bar">
           {[1, 2, 3, 4].map((s) => (
-            <div
-              key={s}
-              style={{
-                flex: 1,
-                height: 6,
-                borderRadius: 3,
-                background: s <= step ? "var(--color-brand)" : "var(--color-surface-tertiary)",
-              }}
-            />
+            <div key={s} className={`tf-step-segment${s <= step ? " done" : ""}`} />
           ))}
         </div>
 
         {step === 1 && (
           <StepCard title="步骤 1：选择方案">
             {completedScenarios.length === 0 ? (
-              <p className="tf-body" style={{ color: "var(--color-foreground-secondary)" }}>
-                没有已完成的方案。请先完成模拟。
-              </p>
+              <p className="tf-body tf-text-secondary">没有已完成的方案。请先完成模拟。</p>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+              <div className="tf-card-grid">
                 {completedScenarios.map((s) => (
-                  <button
-                    key={s.scenario_id}
-                    onClick={() => handleSelectScenario(s)}
-                    style={{
-                      padding: 16,
-                      borderRadius: "var(--radius-large)",
-                      border: "1px solid var(--color-border)",
-                      background: "var(--color-surface)",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      transition: "box-shadow 120ms ease",
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.boxShadow = "var(--shadow-hover)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.boxShadow = "var(--shadow-rest)")}
-                  >
-                    <div className="tf-body" style={{ fontWeight: 600, marginBottom: 4 }}>
-                      {s.name}
-                    </div>
-                    <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
+                  <button key={s.scenario_id} type="button" onClick={() => handleSelectScenario(s)} className="tf-selectable-card">
+                    <div className="tf-body tf-font-semibold tf-mb-2">{s.name}</div>
+                    <div className="tf-caption tf-text-tertiary">
                       {s.result_family_count} 个结果族 · {s.file_count} 个文件
                     </div>
                   </button>
@@ -150,24 +118,10 @@ export function ExportData() {
 
         {step === 2 && selectedScenario && (
           <StepCard title="步骤 2：选择模拟记录">
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <button
-                onClick={() => setStep(3)}
-                style={{
-                  padding: 16,
-                  borderRadius: "var(--radius-large)",
-                  border: "1px solid var(--color-brand)",
-                  background: "var(--color-brand-bg-subtle)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <div className="tf-body" style={{ fontWeight: 600, color: "var(--color-brand)" }}>
-                  最近完成：{selectedScenario.latest_simulation_id}
-                </div>
-                <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                  方案：{selectedScenario.name}
-                </div>
+            <div className="tf-stack-sm">
+              <button type="button" onClick={() => setStep(3)} className="tf-selectable-card is-selected">
+                <div className="tf-body tf-font-semibold tf-text-brand">最近完成：{selectedScenario.latest_simulation_id}</div>
+                <div className="tf-caption tf-text-tertiary">方案：{selectedScenario.name}</div>
               </button>
             </div>
           </StepCard>
@@ -175,58 +129,38 @@ export function ExportData() {
 
         {step === 3 && selectedScenario && (
           <StepCard title="步骤 3：选择数据">
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="tf-stack-md">
               <div>
-                <h4 className="tf-subtitle" style={{ marginBottom: 8 }}>
-                  参数文件
-                </h4>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <h4 className="tf-subtitle tf-mb-2">参数文件</h4>
+                <div className="tf-stack-sm">
+                  <label className="tf-check-row">
                     <input type="checkbox" checked={includeJson} onChange={(e) => setIncludeJson(e.target.checked)} />
-                    <FileJson size={16} color="var(--color-foreground-tertiary)" />
+                    <FileJson size={16} className="tf-text-tertiary" />
                     <span className="tf-body">effective_parameters.json</span>
                   </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <label className="tf-check-row">
                     <input type="checkbox" checked={includeCsv} onChange={(e) => setIncludeCsv(e.target.checked)} />
-                    <FileSpreadsheet size={16} color="var(--color-foreground-tertiary)" />
+                    <FileSpreadsheet size={16} className="tf-text-tertiary" />
                     <span className="tf-body">effective_parameters.csv</span>
                   </label>
                 </div>
               </div>
 
               <div>
-                <h4 className="tf-subtitle" style={{ marginBottom: 8 }}>
-                  结果族
-                </h4>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <h4 className="tf-subtitle tf-mb-2">结果族</h4>
+                <div className="tf-stack-sm">
                   {families.map((family) => (
-                    <label
-                      key={family.family_id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: 10,
-                        borderRadius: "var(--radius-medium)",
-                        border: "1px solid var(--color-border)",
-                        background: "var(--color-surface)",
-                        cursor: "pointer",
-                      }}
-                    >
+                    <label key={family.family_id} className="tf-check-card">
                       <input type="checkbox" checked={selectedFamilies.has(family.family_id)} onChange={() => handleToggleFamily(family.family_id)} />
-                      <Folder size={16} color="var(--color-foreground-tertiary)" />
-                      <span className="tf-body" style={{ flex: 1 }}>
-                        {family.label}
-                      </span>
-                      <span className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
-                        {family.file_count} 个文件
-                      </span>
+                      <Folder size={16} className="tf-text-tertiary" />
+                      <span className="tf-body tf-flex-1">{family.label}</span>
+                      <span className="tf-caption tf-text-tertiary">{family.file_count} 个文件</span>
                     </label>
                   ))}
                 </div>
               </div>
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+              <div className="tf-row tf-justify-end tf-gap-2">
                 <Button variant="secondary" onClick={() => setStep(2)}>
                   上一步
                 </Button>
@@ -240,45 +174,25 @@ export function ExportData() {
 
         {step === 4 && selectedScenario && (
           <StepCard title="步骤 4：确认并导出">
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div
-                style={{
-                  padding: 16,
-                  borderRadius: "var(--radius-large)",
-                  background: "var(--color-surface-tertiary)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                }}
-              >
-                <div className="tf-body" style={{ fontWeight: 600 }}>
+            <div className="tf-stack-md">
+              <div className="tf-inset tf-stack-sm">
+                <div className="tf-body tf-font-semibold">
                   {selectedScenario.name}_{new Date().toISOString().slice(0, 10)}.zip
                 </div>
-                <div className="tf-caption" style={{ color: "var(--color-foreground-secondary)" }}>
+                <div className="tf-caption tf-text-secondary">
                   已选择 {selectedFamilies.size} 个结果族，参数文件 {includeJson || includeCsv ? "已包含" : "未包含"}
                 </div>
               </div>
 
               {exports.filter((e) => e.scenario_id === selectedScenario.scenario_id).length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="tf-stack-sm">
                   {exports
                     .filter((e) => e.scenario_id === selectedScenario.scenario_id)
                     .map((e) => (
-                      <div
-                        key={e.export_id}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: 12,
-                          borderRadius: "var(--radius-medium)",
-                          border: "1px solid var(--color-border)",
-                          background: "var(--color-surface)",
-                        }}
-                      >
+                      <div key={e.export_id} className="tf-inset tf-row tf-inset-row">
                         <div>
                           <div className="tf-body">{e.export_id}</div>
-                          <div className="tf-caption" style={{ color: "var(--color-foreground-tertiary)" }}>
+                          <div className="tf-caption tf-text-tertiary">
                             {formatSize(e.total_size)} · {e.file_count} 个文件
                           </div>
                         </div>
@@ -294,7 +208,7 @@ export function ExportData() {
                 </div>
               )}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+              <div className="tf-row tf-justify-end tf-gap-2">
                 <Button variant="secondary" onClick={() => setStep(3)}>
                   上一步
                 </Button>
@@ -312,18 +226,8 @@ export function ExportData() {
 
 function StepCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div
-      style={{
-        padding: 24,
-        borderRadius: "var(--radius-xlarge)",
-        border: "1px solid var(--color-border)",
-        background: "var(--color-surface)",
-        boxShadow: "var(--shadow-rest)",
-      }}
-    >
-      <h2 className="tf-title" style={{ marginBottom: 16 }}>
-        {title}
-      </h2>
+    <div className="tf-card">
+      <h2 className="tf-title tf-card-header">{title}</h2>
       {children}
     </div>
   );
