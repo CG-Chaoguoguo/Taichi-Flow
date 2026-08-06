@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueItem, ResultFamily, Scenario, ScenarioConfiguration, SimulationRun, SystemMetrics, Toast } from "../types";
+import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueBatchDeleteResult, QueueDeletePreview, QueueItem, QueueStartResult, ResultFamily, Scenario, ScenarioConfiguration, SimulationRun, SystemMetrics, Toast } from "../types";
 import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
@@ -130,7 +130,10 @@ interface TaichiFlowStore {
   createInputRevision: (uploadIds: string[], versionTag?: string) => Promise<InputRevision>;
   fetchQueue: () => Promise<void>;
   enqueueScenario: (scenarioId: string) => Promise<void>;
+  startQueueBatch: () => Promise<QueueStartResult | null>;
   reorderQueue: (itemId: string, newPosition: number) => Promise<void>;
+  previewQueueDeletion: (itemIds: string[]) => Promise<QueueDeletePreview | null>;
+  deleteQueueItems: (itemIds: string[]) => Promise<QueueBatchDeleteResult | null>;
   cancelQueueItem: (itemId: string) => Promise<void>;
   stopRunningItem: (itemId: string) => Promise<void>;
   retryQueueItem: (itemId: string) => Promise<void>;
@@ -610,36 +613,113 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       enqueueScenario: async (scenarioId) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.enqueueScenario(project.project_id, scenarioId);
-        await get().fetchQueue();
-        await get().fetchScenarios();
-        set({ dockTab: "queue" });
+        try {
+          await queueApi.enqueueScenario(project.project_id, scenarioId);
+          await get().fetchQueue();
+          await get().fetchScenarios();
+          set({ dockTab: "queue" });
+          get().addToast({ type: "success", message: "已加入待运行队列" });
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "error", message: errorMessage(error) });
+        }
+      },
+      startQueueBatch: async () => {
+        const project = get().activeProject;
+        if (!project) return null;
+        try {
+          const result = await queueApi.startQueue(project.project_id);
+          set({ queue: result.items, dockTab: "queue" });
+          await get().fetchScenarios();
+          get().addToast({
+            type: "success",
+            message: result.count ? `已启动 ${result.count} 项当前批次` : "当前没有待运行项目",
+          });
+          return result;
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "error", message: errorMessage(error) });
+          return null;
+        }
       },
       reorderQueue: async (itemId, newPosition) => {
         const project = get().activeProject;
         if (!project) return;
-        set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
+        try {
+          set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
+        } catch (error) {
+          await get().fetchQueue();
+          const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+          get().addToast({
+            type: "warning",
+            message: code === "queue_order_locked" ? "运行批次已启动，队列排序已锁定" : errorMessage(error),
+          });
+        }
+      },
+      previewQueueDeletion: async (itemIds) => {
+        const project = get().activeProject;
+        if (!project) return null;
+        try {
+          return await queueApi.previewDelete(project.project_id, itemIds);
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "error", message: errorMessage(error) });
+          return null;
+        }
+      },
+      deleteQueueItems: async (itemIds) => {
+        const project = get().activeProject;
+        if (!project) return null;
+        try {
+          const result = await queueApi.batchDelete(project.project_id, itemIds);
+          set({ queue: result.items });
+          await get().fetchScenarios();
+          get().addToast({
+            type: "success",
+            message: result.preserved_result_count ? `已移除队列项，保留 ${result.preserved_result_count} 条运行结果` : "已移除所选队列项",
+          });
+          return result;
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "error", message: errorMessage(error) });
+          return null;
+        }
       },
       cancelQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.cancelQueueItem(project.project_id, itemId);
-        await get().fetchQueue();
-        await get().fetchScenarios();
+        try {
+          await queueApi.cancelQueueItem(project.project_id, itemId);
+          await get().fetchQueue();
+          await get().fetchScenarios();
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "warning", message: errorMessage(error) });
+        }
       },
       stopRunningItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.stopRunningItem(project.project_id, itemId);
-        await get().fetchQueue();
-        await get().fetchScenarios();
+        try {
+          await queueApi.stopRunningItem(project.project_id, itemId);
+          await get().fetchQueue();
+          await get().fetchScenarios();
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "warning", message: errorMessage(error) });
+        }
       },
       retryQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.retryQueueItem(project.project_id, itemId);
-        await get().fetchQueue();
-        await get().fetchScenarios();
+        try {
+          await queueApi.retryQueueItem(project.project_id, itemId);
+          await get().fetchQueue();
+          await get().fetchScenarios();
+        } catch (error) {
+          await get().fetchQueue();
+          get().addToast({ type: "warning", message: errorMessage(error) });
+        }
       },
 
       fetchResultFamilies: async (simulationId) => {

@@ -9,6 +9,7 @@ from api.services.rainfall_timeline import timeline_from_boundaries
 BJ_HXL_TEMPLATE_V1_ID = "pt-bj-hxl-v1"
 BJ_HXL_TEMPLATE_ID = "pt-bj-hxl-v2"
 BJ_HXL_SOURCE_HASH = "6ed94a70bd075d392c4cd1ea2659416efc62e2beb0e9c8ca247648ff50cd9689"
+PATH_FREE_PARAMETER_TEMPLATE_VERSION = "2"
 
 
 def _bj_hxl_rainfall_periods() -> list[Dict[str, Any]]:
@@ -216,9 +217,39 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
         values.update(
             {
                 "hydrology.K_sat": default_zone.top.k_sat,
+                "hydrology.theta_s": default_zone.top.theta_sat,
+                "hydrology.theta_i": default_zone.top.theta_ini,
+                "hydrology.psi_f": default_zone.top.psi_f,
                 "soil.gamma_s": default_zone.top.gamma_s,
                 "soil.c": default_zone.top.c,
                 "soil.phi": default_zone.top.phi,
+                "soil.double_layer.enabled": True,
+                "soil.double_layer.zmin": 0.001,
+                "soil.double_layer.top_layer.c": default_zone.top.c,
+                "soil.double_layer.top_layer.phi": default_zone.top.phi,
+                "soil.double_layer.top_layer.phib": default_zone.top.phib,
+                "soil.double_layer.top_layer.gamma_s": default_zone.top.gamma_s,
+                "soil.double_layer.top_layer.K_sat": default_zone.top.k_sat,
+                "soil.double_layer.top_layer.theta_sat": default_zone.top.theta_sat,
+                "soil.double_layer.top_layer.theta_res": default_zone.top.theta_res,
+                "soil.double_layer.top_layer.theta_ini": default_zone.top.theta_ini,
+                "soil.double_layer.top_layer.alpha": default_zone.top.alpha,
+                "soil.double_layer.top_layer.diffusivity": default_zone.top.diffusivity,
+                "soil.double_layer.bottom_layer.c": default_zone.bottom.c,
+                "soil.double_layer.bottom_layer.phi": default_zone.bottom.phi,
+                "soil.double_layer.bottom_layer.phib": default_zone.bottom.phib,
+                "soil.double_layer.bottom_layer.gamma_s": default_zone.bottom.gamma_s,
+                "soil.double_layer.bottom_layer.K_sat": default_zone.bottom.k_sat,
+                "soil.double_layer.bottom_layer.theta_sat": default_zone.bottom.theta_sat,
+                "soil.double_layer.bottom_layer.theta_res": default_zone.bottom.theta_res,
+                "soil.double_layer.bottom_layer.theta_ini": default_zone.bottom.theta_ini,
+                "soil.double_layer.bottom_layer.alpha": default_zone.bottom.alpha,
+                "soil.double_layer.bottom_layer.diffusivity": default_zone.bottom.diffusivity,
+                "erosion.tau_c": default_zone.top.ctao,
+                "erosion.ctao": default_zone.top.ctao,
+                "erosion.k_erosion": default_zone.top.kero,
+                "spatial_zones.enabled": True,
+                "spatial_zones.num_zones": len(zones),
             }
         )
         normalized_zones: Dict[str, Any] = {}
@@ -254,6 +285,29 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
                 "lbstar": float(getattr(parsed, "lbstar", 1.0)),
             }
         values["spatial_zones.zones"] = normalized_zones
+
+    values.update(
+        {
+            "hydrology.dfs_infiltration_variant": getattr(parsed, "dfs_infiltration_variant", "tol_clipped_fhw"),
+            "hydrology.dfs_face_flux_variant": getattr(parsed, "dfs_face_flux_variant", "asymmetric_head_guard"),
+            "hydrology.dfs_failure_source_variant": getattr(parsed, "dfs_failure_source_variant", "live_doublelayer_in_dfs"),
+            "hydrology.inflow_denominator_variant": getattr(parsed, "inflow_denominator_variant", "CELLAREA"),
+            "hydrology.inflow_denominator_direction": getattr(parsed, "inflow_denominator_direction", None),
+            "hydrology.inflow_denominator_fv_value": getattr(parsed, "inflow_denominator_fv_value", None),
+            "rheology.rho_water": 1000.0,
+            "rheology.rho_sediment": 2650.0,
+            "rheology.Cv_threshold": 0.2,
+            "rheology.Cv_max": float(getattr(parsed, "cvstar", 0.7)),
+            "rheology.manningb": 0.0538,
+            "rheology.manningm": 6.0896,
+            "erosion.v_critical": 0.5,
+            "time.dt_initial": 1.0,
+            "compute.use_double_precision": True,
+            "boundary_conditions.mode": "auto",
+            "boundary_conditions.default_type": "outflow",
+            "boundary_conditions.include_nodata": True,
+        }
+    )
 
     cri_values = list(getattr(parsed, "cri_mps", []) or [])
     boundaries = list(getattr(parsed, "capt_s", []) or [])

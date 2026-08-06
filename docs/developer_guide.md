@@ -55,5 +55,6 @@ npm run build
 node --test desktop\\directoryPicker.test.cjs
 ```
 
-Append each result to `agentlog.md` with command, artifact path, compared case,
-metric/diff evidence, production decision, cleanup status, and next action.
+Keep generated evidence under ignored local `artifacts/diagnostics/` paths.
+Commit only maintained tests and durable documentation; do not commit execution
+logs, simulation outputs, local state databases, or one-off diagnostic scripts.

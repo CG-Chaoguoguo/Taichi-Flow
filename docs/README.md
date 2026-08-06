@@ -21,10 +21,9 @@ frontend/domain cutover does not modify `edda/` formulas, source timing,
 dry/wet gates, direction order, timestep semantics, or output meaning. No
 Fortran parity claim is made by the UI verification.
 
-## Evidence
+## Repository hygiene
 
-Migration, OpenAPI inventory, browser screenshots, and test logs live under
-`artifacts/agent_runs/2026-08-02_taichi_flow_full_ui_cutover/`. The root
-`agentlog.md` is append-only and records command, artifact, compared case,
-metric/diff evidence, production decision, cleanup, and next action for each
-phase.
+Commit stable source, maintained tests, architecture decisions, and user or
+developer documentation only. Generated diagnostics, browser screenshots,
+logs, outputs, local state databases, and temporary comparison material remain
+under ignored local directories.

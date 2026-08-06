@@ -45,7 +45,7 @@ class DEMReader:
         logger.info(f"Reading DEM file: {self.dem_file}")
 
         suffix = self.dem_file.suffix.lower()
-        if suffix in {".asc", ".txt"}:
+        if suffix in {".asc", ".txt"} or self._looks_like_ascii_grid():
             self.elevation, self.metadata = read_ascii_grid(str(self.dem_file))
             self.transform = None
             self.crs = None
@@ -85,6 +85,15 @@ class DEMReader:
             logger.info(f"NoData value: {src.nodata}")
 
         return self.elevation, self.metadata
+
+    def _looks_like_ascii_grid(self) -> bool:
+        """Recognize extensionless AAIGrid blobs without changing reader semantics."""
+        try:
+            with self.dem_file.open("r", encoding="ascii") as handle:
+                first_line = handle.readline().strip().lower()
+        except (OSError, UnicodeDecodeError):
+            return False
+        return first_line.startswith("ncols ") or first_line.startswith("ncols\t")
 
     def get_nodata_mask(self) -> np.ndarray:
         """

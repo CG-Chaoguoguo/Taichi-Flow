@@ -28,7 +28,10 @@ GET/PATCH/DELETE /api/projects/{project_id}/scenarios/{scenario_id}
 POST /api/projects/{project_id}/scenarios/{scenario_id}/duplicate
 POST /api/projects/{project_id}/scenarios/{scenario_id}/archive
 GET/POST /api/projects/{project_id}/queue
+POST /api/projects/{project_id}/queue/start
 PATCH /api/projects/{project_id}/queue/order
+POST /api/projects/{project_id}/queue/delete-preview
+POST /api/projects/{project_id}/queue/batch-delete
 DELETE /api/projects/{project_id}/queue/{queue_item_id}
 POST /api/projects/{project_id}/queue/{queue_item_id}/retry
 POST /api/projects/{project_id}/queue/{queue_item_id}/stop
@@ -66,3 +69,8 @@ locations. Electron uses the native directory dialog instead of this endpoint.
 
 The old project aliases, root upload routes, singular simulation routes, and
 old WebSocket path are absent rather than redirected.
+
+Creating a queue item leaves it in `waiting`; it is not released to the
+scheduler until `POST /queue/start` atomically starts the current waiting
+batch. Reordering is locked while a released batch is active. Batch deletion is
+soft removal: completed run records and result files remain available.

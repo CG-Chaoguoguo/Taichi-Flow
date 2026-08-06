@@ -3,7 +3,7 @@
 > 文档类型：前端产品定义与完整落地规格  
 > 适用对象：产品设计、UI/UX、前端开发、后端联调与验收人员  
 > 设计方向：Microsoft Fluent 2，桌面端科研计算工作台  
-> 代码基线：`C:\Users\Administrator\Desktop\Taichi-Flow`（2026-08-02）
+> 代码基线：当前 Taichi-Flow 仓库（2026-08-02）
 
 ## 1. 产品定义
 

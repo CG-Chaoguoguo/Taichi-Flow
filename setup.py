@@ -10,11 +10,10 @@ setup(
     name="taichi-flow",
     version="0.1.0",
     author="Taichi Flow Development Team",
-    author_email="your.email@example.com",
     description="Taichi/CUDA debris-flow simulation service",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/taichi-flow",
+    url="https://github.com/CG-Chaoguoguo/Taichi-Flow",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",

@@ -17,7 +17,7 @@ import os
 import sqlite3
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class WorkbenchError(Exception):
@@ -269,6 +269,7 @@ class ProjectDatabase:
                     scenario_version INTEGER,
                     input_revision_id TEXT REFERENCES input_revisions(revision_id),
                     position INTEGER NOT NULL,
+                    queue_order INTEGER,
                     status TEXT NOT NULL,
                     simulation_id TEXT REFERENCES simulation_runs(simulation_id),
                     retry_of TEXT REFERENCES queue_items(queue_item_id),
@@ -277,8 +278,11 @@ class ProjectDatabase:
                     finished_at TEXT,
                     progress REAL NOT NULL DEFAULT 0,
                     summary TEXT NOT NULL,
-                    cancel_reason TEXT
+                    cancel_reason TEXT,
+                    deleted_at TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_queue_items_order
+                    ON queue_items(status, queue_order, enqueued_at, queue_item_id);
                 CREATE TABLE IF NOT EXISTS result_families (
                     family_id TEXT PRIMARY KEY,
                     simulation_id TEXT NOT NULL REFERENCES simulation_runs(simulation_id),
@@ -678,9 +682,58 @@ class ProjectDatabase:
                 );
                 """
             )
+        if version < 7:
+            # Queue position is historical (the public #N identifier); the
+            # mutable queue_order is the only ordering key used by the
+            # scheduler-facing queue.  Existing records which were queued but
+            # never claimed must not auto-start after this migration.
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "queue_order" not in queue_columns:
+                connection.execute("ALTER TABLE queue_items ADD COLUMN queue_order INTEGER")
+            if "deleted_at" not in queue_columns:
+                connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
+            connection.execute(
+                "UPDATE queue_items SET queue_order=position WHERE queue_order IS NULL"
+            )
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET status='waiting', summary=CASE
+                    WHEN summary IS NULL OR summary='' OR summary='等待调度'
+                    THEN '待运行' ELSE summary END
+                WHERE status='queued' AND simulation_id IS NULL
+                """
+            )
+            waiting_rows = connection.execute(
+                """
+                SELECT queue_item_id FROM queue_items
+                WHERE status='waiting' AND deleted_at IS NULL
+                ORDER BY queue_order, enqueued_at, queue_item_id
+                """
+            ).fetchall()
+            for order, row in enumerate(waiting_rows, start=1):
+                connection.execute(
+                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
+                    (order, row["queue_item_id"]),
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_queue_items_order ON queue_items(status, queue_order, enqueued_at, queue_item_id)"
+            )
         from api.services.parameter_templates import builtin_parameter_templates
 
-        for template in builtin_parameter_templates():
+        templates = builtin_parameter_templates()
+        existing_template_ids = {
+            str(row["template_id"])
+            for row in connection.execute(
+                "SELECT template_id FROM parameter_templates WHERE source_kind='bundled_case'"
+            ).fetchall()
+        }
+        for template in templates:
+            if template["template_id"] in existing_template_ids:
+                continue
             connection.execute(
                 """
                 INSERT OR IGNORE INTO parameter_templates(
@@ -700,10 +753,11 @@ class ProjectDatabase:
                     utc_now(),
                 ),
             )
-        connection.execute(
-            "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
+        if version < SCHEMA_VERSION:
+            connection.execute(
+                "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
 
     def metadata(self) -> Optional[Dict[str, Any]]:
         if not self.database_path.exists():
@@ -950,6 +1004,8 @@ class WorkbenchStore:
         stream: BinaryIO,
     ) -> Dict[str, Any]:
         """Confirm a path-free parameter import without touching input bindings."""
+        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION
+
         preview = self.preview_parameter_import(
             project_id,
             scenario_id,
@@ -957,7 +1013,7 @@ class WorkbenchStore:
             stream=stream,
         )
         source_hash = str(preview["source_hash"])
-        template_id = f"pt-import-{source_hash[:16]}-params"
+        template_id = f"pt-import-{source_hash[:16]}-params-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
         values = dict(preview["values"])
         now = utc_now()
         database = self.project_database(project_id)
@@ -971,10 +1027,11 @@ class WorkbenchStore:
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, 1, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
+                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported parameters {source_hash[:8]}",
                     "Path-free parameter import; all legacy file references were intentionally ignored.",
                     source_hash,
@@ -1072,7 +1129,7 @@ class WorkbenchStore:
     ) -> Dict[str, Any]:
         """Collect confirmed legacy files and replace path coupling with semantic bindings."""
         from api.services.legacy_migration import build_legacy_migration_plan
-        from api.services.parameter_templates import normalized_parameter_values
+        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION, normalized_parameter_values
 
         scenario, config_item, parsed = self._legacy_scenario_config(project_id, scenario_id)
         current_version = int(scenario["version"] or 1)
@@ -1112,7 +1169,7 @@ class WorkbenchStore:
             )
 
         values = normalized_parameter_values(parsed)
-        template_id = f"pt-import-{source_hash[:16]}"
+        template_id = f"pt-import-{source_hash[:16]}-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
         database = self.project_database(project_id)
         now = utc_now()
         provenance = {
@@ -1125,10 +1182,11 @@ class WorkbenchStore:
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, 1, ?, ?, 'legacy_migration', ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, 'legacy_migration', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
+                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported edda_in {source_hash[:8]}",
                     "Path-free parameter template produced by the explicit legacy migration wizard.",
                     source_hash,
@@ -1484,7 +1542,9 @@ class WorkbenchStore:
             SELECT b.asset_id, COUNT(DISTINCT q.queue_item_id) AS count
             FROM scenario_draft_bindings b
             JOIN queue_items q ON q.scenario_id=b.scenario_id
-            WHERE b.asset_id IN ({placeholders}) AND q.status='queued'
+            WHERE b.asset_id IN ({placeholders})
+              AND q.deleted_at IS NULL
+              AND q.status IN ('waiting', 'queued')
             GROUP BY b.asset_id
             """,
             tuple(normalized),
@@ -1543,7 +1603,9 @@ class WorkbenchStore:
             SELECT DISTINCT q.queue_item_id, q.scenario_id
             FROM queue_items q
             JOIN scenario_draft_bindings b ON b.scenario_id=q.scenario_id
-            WHERE q.status='queued' AND b.asset_id IN ({placeholders})
+            WHERE q.deleted_at IS NULL
+              AND q.status IN ('waiting', 'queued')
+              AND b.asset_id IN ({placeholders})
             ORDER BY q.queue_item_id
             """,
             tuple(normalized),
@@ -1653,7 +1715,9 @@ class WorkbenchStore:
                     UPDATE queue_items
                     SET status='cancelled', finished_at=?, summary='Draft input deleted; queue item cancelled.',
                         cancel_reason='asset_deleted'
-                    WHERE queue_item_id IN ({queue_placeholders}) AND status='queued'
+                    WHERE queue_item_id IN ({queue_placeholders})
+                      AND status IN ('waiting', 'queued')
+                      AND deleted_at IS NULL
                     """,
                     (now, *impact["cancelled_queue_item_ids"]),
                 )
@@ -1668,7 +1732,7 @@ class WorkbenchStore:
                     UPDATE scenarios
                     SET status='draft', version=version+1, updated_at=?
                     WHERE scenario_id IN ({scenario_placeholders})
-                      AND archived=0 AND status IN ('draft', 'ready', 'queued')
+                      AND archived=0 AND status IN ('draft', 'ready', 'queued', 'waiting')
                     """,
                     (now, *impact["affected_scenario_ids"]),
                 )
@@ -2908,7 +2972,7 @@ class WorkbenchStore:
                     UPDATE queue_items
                     SET status='cancelled', finished_at=?, summary='Draft changed; queue item cancelled.',
                         cancel_reason='draft_changed'
-                    WHERE scenario_id=? AND status='queued'
+                    WHERE scenario_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
                     """,
                     (now, scenario_id),
                 )
@@ -3006,6 +3070,7 @@ class WorkbenchStore:
             "scenario_id": data["scenario_id"],
             "scenario_name": scenario["name"] if scenario else data["scenario_id"],
             "position": data["position"],
+            "queue_order": int(data["queue_order"]) if data.get("queue_order") is not None else None,
             "status": data["status"],
             "simulation_id": data.get("simulation_id"),
             "scenario_version": int(data["scenario_version"]) if data.get("scenario_version") is not None else None,
@@ -3017,13 +3082,21 @@ class WorkbenchStore:
             "finished_at": data.get("finished_at"),
             "progress": float(data["progress"]),
             "summary": data["summary"],
+            "deletable": data.get("status") not in {"starting", "running", "stopping"},
         }
 
     def list_queue(self, project_id: str) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
         with database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM queue_items ORDER BY position, enqueued_at, queue_item_id"
+                """
+                SELECT * FROM queue_items
+                WHERE deleted_at IS NULL
+                ORDER BY
+                    CASE WHEN status IN ('waiting', 'queued', 'starting', 'running', 'stopping') THEN 0 ELSE 1 END,
+                    CASE WHEN status IN ('waiting', 'queued') THEN queue_order ELSE NULL END,
+                    position, enqueued_at, queue_item_id
+                """
             ).fetchall()
         return [self._public_queue_item(project_id, row) for row in rows]
 
@@ -3148,22 +3221,30 @@ class WorkbenchStore:
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND status IN ('queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND deleted_at IS NULL
+                  AND status IN ('waiting', 'queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
             if duplicate:
                 raise WorkbenchError("scenario_already_queued", "Scenario is already queued.", status_code=409)
             position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
+            queue_order = connection.execute(
+                """
+                SELECT COALESCE(MAX(queue_order), 0) + 1
+                FROM queue_items
+                WHERE deleted_at IS NULL AND status='waiting'
+                """
+            ).fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             connection.execute(
                 """
                 INSERT INTO queue_items(
                     queue_item_id, scenario_id, scenario_version, input_revision_id,
-                    position, status, simulation_id, retry_of, enqueued_at,
+                    position, queue_order, status, simulation_id, retry_of, enqueued_at,
                     started_at, finished_at, progress, summary, cancel_reason
-                ) VALUES(?, ?, ?, ?, ?, 'queued', NULL, ?, ?, NULL, NULL, 0, 'Draft input preflight passed.', NULL)
+                ) VALUES(?, ?, ?, ?, ?, ?, 'waiting', NULL, ?, ?, NULL, NULL, 0, '待运行', NULL)
                 """,
                 (
                     queue_item_id,
@@ -3171,54 +3252,311 @@ class WorkbenchStore:
                     int(current["version"] or 1),
                     frozen_revision_id,
                     position,
+                    queue_order,
                     retry_of,
                     now,
                 ),
             )
             connection.execute(
-                "UPDATE scenarios SET status='queued', updated_at=? WHERE scenario_id=?",
+                "UPDATE scenarios SET status='waiting', updated_at=? WHERE scenario_id=?",
                 (now, scenario_id),
             )
         return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
 
+    @staticmethod
+    def _normalize_waiting_queue_order_connection(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT queue_item_id FROM queue_items
+            WHERE status='waiting' AND deleted_at IS NULL
+            ORDER BY queue_order, enqueued_at, queue_item_id
+            """
+        ).fetchall()
+        for order, row in enumerate(rows, start=1):
+            connection.execute(
+                "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
+                (order, row["queue_item_id"]),
+            )
+
+    def start_queue_batch(self, project_id: str) -> Dict[str, Any]:
+        """Release the currently staged waiting rows as one scheduler batch."""
+        database = self.project_database(project_id)
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT queue_item_id FROM queue_items
+                WHERE status='waiting' AND deleted_at IS NULL
+                ORDER BY queue_order, enqueued_at, queue_item_id
+                """
+            ).fetchall()
+            started_item_ids = [str(row["queue_item_id"]) for row in rows]
+            if started_item_ids:
+                placeholders = ",".join("?" for _ in started_item_ids)
+                connection.execute(
+                    f"""
+                    UPDATE queue_items
+                    SET status='queued', summary='已加入当前运行批次'
+                    WHERE queue_item_id IN ({placeholders})
+                      AND status='waiting' AND deleted_at IS NULL
+                    """,
+                    tuple(started_item_ids),
+                )
+                connection.execute(
+                    f"""
+                    UPDATE scenarios
+                    SET status='queued', updated_at=?
+                    WHERE scenario_id IN (
+                        SELECT scenario_id FROM queue_items
+                        WHERE queue_item_id IN ({placeholders})
+                    )
+                    """,
+                    (now, *started_item_ids),
+                )
+        return {
+            "started_item_ids": started_item_ids,
+            "items": self.list_queue(project_id),
+            "count": len(started_item_ids),
+        }
+
     def reorder_queue(self, project_id: str, queue_item_id: str, new_position: int) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
-        row = self._queue_row(project_id, queue_item_id)
-        if row["status"] != "queued":
-            raise WorkbenchError("queue_item_not_reorderable", "只有等待中的队列项可以重排。", status_code=409)
         with database.connect() as connection:
-            queued = connection.execute(
-                "SELECT queue_item_id FROM queue_items WHERE status='queued' ORDER BY position, enqueued_at"
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
+                (queue_item_id,),
+            ).fetchone()
+            if not row:
+                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
+            if row["status"] != "waiting":
+                raise WorkbenchError(
+                    "queue_order_locked",
+                    "运行批次已启动，队列排序已锁定。",
+                    status_code=409,
+                )
+            active_batch = connection.execute(
+                """
+                SELECT 1 FROM queue_items
+                WHERE deleted_at IS NULL
+                  AND status IN ('queued', 'starting', 'running', 'stopping')
+                LIMIT 1
+                """
+            ).fetchone()
+            if active_batch:
+                raise WorkbenchError(
+                    "queue_order_locked",
+                    "Queue order is locked while a released batch is active.",
+                    status_code=409,
+                )
+            waiting = connection.execute(
+                """
+                SELECT queue_item_id FROM queue_items
+                WHERE status='waiting' AND deleted_at IS NULL
+                ORDER BY queue_order, enqueued_at, queue_item_id
+                """
             ).fetchall()
-            ordered_ids = [str(item["queue_item_id"]) for item in queued]
+            ordered_ids = [str(item["queue_item_id"]) for item in waiting]
+            if queue_item_id not in ordered_ids:
+                raise WorkbenchError("queue_item_not_reorderable", "只有待运行项可以重排。", status_code=409)
             ordered_ids.remove(queue_item_id)
             index = max(0, min(len(ordered_ids), new_position - 1))
             ordered_ids.insert(index, queue_item_id)
-            for position, item_id in enumerate(ordered_ids, start=1):
+            for queue_order, item_id in enumerate(ordered_ids, start=1):
                 connection.execute(
-                    "UPDATE queue_items SET position=? WHERE queue_item_id=?", (position, item_id)
+                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
+                    (queue_order, item_id),
                 )
         return self.list_queue(project_id)
 
     def cancel_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         database = self.project_database(project_id)
-        row = self._queue_row(project_id, queue_item_id)
-        if row["status"] != "queued":
-            raise WorkbenchError("queue_item_not_cancelable", "只有等待中的队列项可以取消。", status_code=409)
         now = utc_now()
         with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
+                (queue_item_id,),
+            ).fetchone()
+            if not row:
+                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
+            if row["status"] not in {"waiting", "queued"}:
+                raise WorkbenchError("queue_item_not_cancelable", "只有尚未启动的队列项可以取消。", status_code=409)
             connection.execute(
                 """
                 UPDATE queue_items SET status='cancelled', finished_at=?, summary='已取消'
-                WHERE queue_item_id=?
+                WHERE queue_item_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
                 """,
                 (now, queue_item_id),
             )
-            connection.execute(
-                "UPDATE scenarios SET status='ready', updated_at=? WHERE scenario_id=?",
-                (now, row["scenario_id"]),
-            )
+            self._restore_scenario_status_connection(connection, str(row["scenario_id"]), now)
         return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
+
+    @staticmethod
+    def _restore_scenario_status_connection(
+        connection: sqlite3.Connection,
+        scenario_id: str,
+        now: str,
+    ) -> str:
+        active = connection.execute(
+            """
+            SELECT status FROM queue_items
+            WHERE scenario_id=? AND deleted_at IS NULL
+              AND status IN ('starting', 'running', 'stopping')
+            ORDER BY started_at DESC, enqueued_at DESC LIMIT 1
+            """,
+            (scenario_id,),
+        ).fetchone()
+        if active:
+            status = str(active["status"])
+        else:
+            staged = connection.execute(
+                """
+                SELECT status FROM queue_items
+                WHERE scenario_id=? AND deleted_at IS NULL
+                  AND status IN ('waiting', 'queued')
+                ORDER BY queue_order, enqueued_at DESC LIMIT 1
+                """,
+                (scenario_id,),
+            ).fetchone()
+            if staged:
+                status = str(staged["status"])
+            else:
+                latest = connection.execute(
+                    """
+                    SELECT COALESCE(r.status, q.status) AS status
+                    FROM queue_items q
+                    LEFT JOIN simulation_runs r ON r.simulation_id=q.simulation_id
+                    WHERE q.scenario_id=?
+                      AND q.status IN ('completed', 'failed', 'interrupted', 'stopped', 'cancelled', 'canceled')
+                      AND (q.deleted_at IS NULL OR q.simulation_id IS NOT NULL)
+                    ORDER BY COALESCE(q.finished_at, q.enqueued_at) DESC, q.position DESC
+                    LIMIT 1
+                    """,
+                    (scenario_id,),
+                ).fetchone()
+                if latest:
+                    status = str(latest["status"])
+                else:
+                    row = connection.execute(
+                        "SELECT input_revision_id, archived FROM scenarios WHERE scenario_id=?",
+                        (scenario_id,),
+                    ).fetchone()
+                    status = "ready" if row and row["input_revision_id"] else "draft"
+        connection.execute(
+            "UPDATE scenarios SET status=?, updated_at=? WHERE scenario_id=?",
+            (status, now, scenario_id),
+        )
+        return status
+
+    def preview_queue_delete(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
+        normalized = self._normalize_queue_item_ids(queue_item_ids)
+        database = self.project_database(project_id)
+        with database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
+                tuple(normalized),
+            ).fetchall()
+            found = {str(row["queue_item_id"]): row for row in rows}
+            missing = [item_id for item_id in normalized if item_id not in found]
+            if missing:
+                raise WorkbenchError(
+                    "queue_item_not_found",
+                    "一个或多个队列项不存在或已移除。",
+                    status_code=404,
+                    details={"queue_item_ids": missing},
+                )
+            active = [
+                self._public_queue_item(project_id, row)
+                for row in rows
+                if row["status"] in {"starting", "running", "stopping"}
+            ]
+            removable = [
+                self._public_queue_item(project_id, row)
+                for row in rows
+                if row["status"] not in {"starting", "running", "stopping"}
+            ]
+        return {
+            "queue_item_ids": normalized,
+            "items": removable,
+            "active_items": active,
+            "can_delete": not active,
+            "preserves_results": True,
+        }
+
+    @staticmethod
+    def _normalize_queue_item_ids(queue_item_ids: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item_id in queue_item_ids:
+            value = str(item_id or "").strip()
+            if value and value not in seen:
+                normalized.append(value)
+                seen.add(value)
+        if not normalized:
+            raise WorkbenchError("queue_item_ids_required", "请至少选择一个队列项。", status_code=422)
+        return normalized
+
+    def batch_delete_queue_items(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
+        normalized = self._normalize_queue_item_ids(queue_item_ids)
+        database = self.project_database(project_id)
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
+                tuple(normalized),
+            ).fetchall()
+            found = {str(row["queue_item_id"]): row for row in rows}
+            missing = [item_id for item_id in normalized if item_id not in found]
+            if missing:
+                raise WorkbenchError(
+                    "queue_item_not_found",
+                    "一个或多个队列项不存在或已移除。",
+                    status_code=404,
+                    details={"queue_item_ids": missing},
+                )
+            active = [
+                str(row["queue_item_id"])
+                for row in rows
+                if row["status"] in {"starting", "running", "stopping"}
+            ]
+            if active:
+                raise WorkbenchError(
+                    "queue_item_active",
+                    "活动计算不能删除，请先停止后再删除。",
+                    status_code=409,
+                    details={"active_queue_item_ids": active},
+                )
+            waiting_or_queued = [
+                str(row["queue_item_id"])
+                for row in rows
+                if row["status"] in {"waiting", "queued"}
+            ]
+            placeholders = ",".join("?" for _ in normalized)
+            connection.execute(
+                f"""
+                UPDATE queue_items
+                SET deleted_at=?,
+                    status=CASE WHEN status IN ('waiting', 'queued') THEN 'cancelled' ELSE status END,
+                    finished_at=CASE WHEN status IN ('waiting', 'queued') THEN COALESCE(finished_at, ?) ELSE finished_at END,
+                    summary=CASE WHEN status IN ('waiting', 'queued') THEN '已从队列移除' ELSE summary END,
+                    cancel_reason=CASE WHEN status IN ('waiting', 'queued') THEN 'queue_deleted' ELSE cancel_reason END
+                WHERE queue_item_id IN ({placeholders}) AND deleted_at IS NULL
+                """,
+                (now, now, *normalized),
+            )
+            scenario_ids = sorted({str(row["scenario_id"]) for row in rows})
+            for scenario_id in scenario_ids:
+                self._restore_scenario_status_connection(connection, scenario_id, now)
+            self._normalize_waiting_queue_order_connection(connection)
+        return {
+            "deleted_ids": normalized,
+            "cancelled_ids": waiting_or_queued,
+            "preserved_result_count": sum(1 for row in rows if row["simulation_id"]),
+            "items": self.list_queue(project_id),
+        }
 
     def _legacy_retry_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         row = self._queue_row(project_id, queue_item_id)
@@ -3248,6 +3586,7 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
+            database.ensure_schema()
             with database.connect() as connection:
                 queue_rows = connection.execute(
                     "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE status IN ('starting', 'running', 'stopping')"
@@ -3284,8 +3623,8 @@ class WorkbenchStore:
                            s.effective_parameters_json, s.name AS scenario_name
                     FROM queue_items q
                     JOIN scenarios s ON s.scenario_id=q.scenario_id
-                    WHERE q.status='queued'
-                    ORDER BY q.position, q.enqueued_at, q.queue_item_id
+                    WHERE q.status='queued' AND q.deleted_at IS NULL
+                    ORDER BY q.queue_order, q.enqueued_at, q.queue_item_id
                     LIMIT 1
                     """
                 ).fetchone()
@@ -3545,6 +3884,14 @@ class WorkbenchStore:
                         simulation_id,
                     ),
                 )
+            elif "progress" in values:
+                connection.execute(
+                    """
+                    UPDATE queue_items SET progress=?
+                    WHERE simulation_id=? AND status IN ('starting', 'running', 'stopping')
+                    """,
+                    (float(values["progress"] or 0), simulation_id),
+                )
 
     def finish_run(self, project_id: str, simulation_id: str, result: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
@@ -3632,6 +3979,7 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
+            database.ensure_schema()
             with database.connect() as connection:
                 row = connection.execute(
                     "SELECT * FROM simulation_runs WHERE simulation_id=?", (simulation_id,)
