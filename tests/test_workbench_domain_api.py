@@ -382,9 +382,9 @@ def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> Non
         retried = client.post(f"{queue_url}/{first.json()['queue_item_id']}/retry")
         assert retried.status_code == 201
         assert retried.json()["retry_of"] == first.json()["queue_item_id"]
-        assert retried.json()["status"] == "queued"
+        assert retried.json()["status"] == "waiting"
 
     with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
         persisted = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
-        assert {item["status"] for item in persisted} == {"queued", "cancelled"}
+        assert {item["status"] for item in persisted} == {"waiting", "cancelled"}
         assert any(item["retry_of"] == first.json()["queue_item_id"] for item in persisted)

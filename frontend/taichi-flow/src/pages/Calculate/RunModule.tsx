@@ -1,23 +1,37 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Cpu, List, Monitor, Play, RefreshCw, Square, Terminal, Timer } from "lucide-react";
+import { AlertCircle, CheckCircle2, Cpu, List, ListPlus, Monitor, RefreshCw, Terminal, Timer } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
 import { StatusBadge } from "../../components/StatusBadge";
-import type { Scenario } from "../../types";
+import type { QueueItem, Scenario } from "../../types";
 import { runApi } from "../../api/taichiFlowAdapter";
+
+export function selectScenarioQueueItem(
+  queue: QueueItem[],
+  scenario: Pick<Scenario, "scenario_id" | "latest_simulation_id">,
+): QueueItem | undefined {
+  const scenarioItems = queue.filter((item) => item.scenario_id === scenario.scenario_id);
+  const currentQueueItem = scenarioItems.find((item) =>
+    ["waiting", "queued", "starting", "running", "stopping"].includes(item.status),
+  );
+  if (currentQueueItem) return currentQueueItem;
+  const latestSimulationItem = scenarioItems.find(
+    (item) => Boolean(scenario.latest_simulation_id) && item.simulation_id === scenario.latest_simulation_id,
+  );
+  return latestSimulationItem ?? scenarioItems[scenarioItems.length - 1];
+}
 
 export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const queue = useTaichiFlowStore((state) => state.queue);
   const metrics = useTaichiFlowStore((state) => state.metrics);
   const enqueueScenario = useTaichiFlowStore((state) => state.enqueueScenario);
-  const cancelQueueItem = useTaichiFlowStore((state) => state.cancelQueueItem);
-  const stopRunningItem = useTaichiFlowStore((state) => state.stopRunningItem);
   const retryQueueItem = useTaichiFlowStore((state) => state.retryQueueItem);
+  const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const scenarioConfiguration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
 
-  const item = queue.find((q) => q.scenario_id === scenario.scenario_id);
+  const item = selectScenarioQueueItem(queue, scenario);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
 
@@ -55,7 +69,7 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <StatusBadge variant="neutral">只读</StatusBadge>
           </div>
           <div className="tf-caption tf-text-secondary">
-            打开项目并选择方案后，可在此进行预检、入队与运行控制。
+            打开项目并选择方案后，可在此进行预检、入队并查看运行状态。
           </div>
         </div>
         <div className="tf-stack-md">
@@ -65,7 +79,7 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <CheckItem ok={false} text="运行输入将在开始计算时冻结" />
             <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
           </div>
-          <Button icon={<Play size={16} />} disabled>
+          <Button icon={<ListPlus size={16} />} disabled>
             加入模拟队列
           </Button>
         </div>
@@ -105,25 +119,25 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
               请补齐草稿输入绑定或参数校验项后再加入队列。
             </div>
           ) : null}
-          <Button icon={<Play size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid}>
+          <Button icon={<ListPlus size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid}>
             加入模拟队列
           </Button>
         </div>
       ) : null}
 
       {/* 等待中 */}
-      {scenario.status === "queued" && item && (item.status === "waiting" || item.status === "queued") && (
+      {(scenario.status === "waiting" || scenario.status === "queued") && item && (item.status === "waiting" || item.status === "queued") && (
         <div className="tf-stack-md">
           <h4 className="tf-subtitle">队列位置</h4>
           <div className="tf-display tf-text-brand">
-            #{item.position}
+            #{item.queue_order ?? item.position}
           </div>
           <p className="tf-body tf-text-secondary">
-            当前队列并发数限制为 1，前面还有 {item.position - 1} 个任务。
+            {item.status === "waiting" ? "已加入待运行批次；请在底部队列点击“运行队列”。" : "当前批次已释放给调度器，排序已锁定。"}
           </p>
-          <p className="tf-caption tf-text-warning">文件仍可修改；修改或删除会自动取消本次等待任务。</p>
-          <Button variant="secondary" icon={<Square size={16} />} onClick={() => cancelQueueItem(item.queue_item_id)}>
-            取消排队
+          <p className="tf-caption tf-text-warning">计算开始前输入仍可修改；开始后将冻结运行快照。</p>
+          <Button variant="secondary" icon={<List size={16} />} onClick={() => setDockTab("queue")}>
+            打开队列
           </Button>
         </div>
       )}
@@ -153,9 +167,6 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <Terminal size={12} />
             轮询状态 · simulation_id: {item.simulation_id || "—"}
           </div>
-          <Button variant="danger" icon={<Square size={16} />} onClick={() => stopRunningItem(item.queue_item_id)}>
-            停止模拟
-          </Button>
         </div>
       )}
 

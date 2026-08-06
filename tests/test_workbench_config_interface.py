@@ -41,6 +41,7 @@ def test_config_interface_and_case_base_dir(tmp_path, monkeypatch):
         parameter_patch={"rainfall.mode": "uniform_cri", "rheology.n_manning": 0.08},
     )
     queue_item = store.enqueue_scenario(project_id, scenario["scenario_id"])
+    store.start_queue_batch(project_id)
     claim = store.claim_queue_item(project_id, queue_item["queue_item_id"])
     assert Path(claim["case_base_dir"]) == case_dir.resolve()
     assert claim["overrides"]["rainfall"]["mode"] == "uniform_cri"

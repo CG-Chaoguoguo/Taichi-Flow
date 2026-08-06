@@ -137,6 +137,7 @@ def test_running_snapshot_locks_assets_then_terminal_delete_retains_retryable_sn
         assert queue.status_code == 201, queue.text
         item = queue.json()
         assert item["input_revision_id"] is None
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
 
         claim = client.app.state.workbench.claim_queue_item(project_id, item["queue_item_id"])
         simulation_id = claim["simulation_id"]
@@ -185,6 +186,7 @@ def test_running_snapshot_locks_assets_then_terminal_delete_retains_retryable_sn
         retried = client.post(f"/api/projects/{project_id}/queue/{item['queue_item_id']}/retry")
         assert retried.status_code == 201, retried.text
         assert retried.json()["input_revision_id"] == snapshot_id
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
         retry_claim = client.app.state.workbench.claim_queue_item(project_id, retried.json()["queue_item_id"])
         assert retry_claim["simulation_id"] != simulation_id
 
@@ -221,6 +223,7 @@ def test_v3_to_v6_migration_keeps_started_run_snapshot_and_is_idempotent(tmp_pat
             json={"scenario_id": scenario["scenario_id"]},
         )
         assert queued.status_code == 201, queued.text
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
         claim = client.app.state.workbench.claim_queue_item(project_id, queued.json()["queue_item_id"])
         simulation_id = claim["simulation_id"]
         snapshot_id = client.get(f"/api/projects/{project_id}/simulations/{simulation_id}").json()["input_revision_id"]
@@ -235,7 +238,7 @@ def test_v3_to_v6_migration_keeps_started_run_snapshot_and_is_idempotent(tmp_pat
         with database.connect() as connection:
             assert connection.execute(
                 "SELECT value FROM schema_metadata WHERE key='schema_version'"
-            ).fetchone()["value"] == "6"
+            ).fetchone()["value"] == "7"
             assert connection.execute(
                 "SELECT input_revision_id FROM simulation_runs WHERE simulation_id=?", (simulation_id,)
             ).fetchone()["input_revision_id"] == snapshot_id
@@ -260,6 +263,7 @@ def test_scheduler_claim_and_batch_delete_race_is_all_or_nothing(tmp_path: Path)
         )
         assert queued.status_code == 201, queued.text
         queue_item_id = queued.json()["queue_item_id"]
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
         store = client.app.state.workbench
         barrier = threading.Barrier(3)
         outcomes: dict[str, object] = {}
@@ -321,6 +325,7 @@ def test_every_terminal_run_state_releases_logical_asset_deletion(
             json={"scenario_id": scenario["scenario_id"]},
         )
         assert queued.status_code == 201, queued.text
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
         claim = client.app.state.workbench.claim_queue_item(project_id, queued.json()["queue_item_id"])
         simulation_id = claim["simulation_id"]
         snapshot_id = client.get(f"/api/projects/{project_id}/simulations/{simulation_id}").json()["input_revision_id"]

@@ -35,6 +35,7 @@ def test_stop_active_run_then_retry_creates_a_new_queue_item(tmp_path: Path) -> 
             f"/api/projects/{project['project_id']}/queue",
             json={"scenario_id": scenario["scenario_id"]},
         ).json()
+        assert client.post(f"/api/projects/{project['project_id']}/queue/start", json={}).status_code == 200
         _wait_for(lambda: client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]["status"] == "running")
         simulation = client.get(f"/api/projects/{project['project_id']}/simulations").json()["simulations"][0]
 
@@ -46,6 +47,7 @@ def test_stop_active_run_then_retry_creates_a_new_queue_item(tmp_path: Path) -> 
             f"/api/projects/{project['project_id']}/queue/{queued['queue_item_id']}/retry"
         )
         assert retry.status_code == 201
+        assert client.post(f"/api/projects/{project['project_id']}/queue/start", json={}).status_code == 200
         executor.release.set()
         _wait_for(
             lambda: all(

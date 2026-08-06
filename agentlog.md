@@ -887,3 +887,92 @@ vidia-smi observed RTX 3080 Ti activity during the run.
 - production decision: accept the adaptive workspace layout and enable it for the current editor; preserve `edda/`, backend APIs, scenario data, raster semantics, and existing services; at a constrained 1024 effective viewport the library safely compresses an otherwise infeasible sum of minimum widths, while explicit collapse restores a full-width central canvas and wider windows reapply saved sizes
 - cleanup status: temporary browser verification tab closed; retained in-app project tab remains open; no task-owned Electron or test process remains; existing Vite 3000 and API 8000 services were not terminated
 - next usable action: drag any labeled splitter or use the new workspace reset action in the canvas settings; the retained browser page is left on the real project editor
+
+## 2026-08-06T16:43:52.7450547+08:00 - output-boundary telemetry and latest queue selection TDD
+
+- command: run focused RED pytest for scheduler output-boundary persistence and RuntimeSession publication, then run full `tests/test_workbench_scheduler.py` and `tests/test_runtime_session_lifecycle.py`; run focused Vitest `src/pages/Calculate/RunModule.test.ts`.
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\diagnostics\20260806_frontend_backend_acceptance`; live case outputs remain under `C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text\scenarios\scn-9357708b409f4db185c827556612e29d\outputs\sim-9bf20503e29b487fbe9d1139b453d282`.
+- compared case: synthetic 250-step executor with output boundaries at steps 100/200; synthetic RuntimeSession callbacks with output counts `[0,0,1,1,2]`; frontend queue containing an old failed and newest running simulation for one scenario.
+- metric/diff evidence: scheduler RED persisted only first/final progress instead of both output boundaries; RuntimeSession RED published five step snapshots. GREEN: scheduler `2 passed`, runtime-session `3 passed`, RunModule Vitest `1 passed`; persisted output updates are exactly counts `[1,2]` at steps `[100,200]`.
+- production decision: persist progress only when `output_count` increases, while lifecycle transitions and final state remain durable; choose the queue item matching `scenario.latest_simulation_id`; no solver formula, timestep, output generation, or numerical semantics changed.
+- cleanup status: stopped the old managed backend/frontend and exact artifact bridge processes; ports 3000/8000 are free; existing simulation output files were preserved.
+
+## 2026-08-06T16:46:05+08:00 - output-boundary telemetry extended regression
+
+- command: run the focused backend control/realtime/configuration/extensionless-input suites, full frontend Vitest, and frontend production build.
+- metric/diff evidence: backend related total `22 passed` (`2 scheduler + 3 runtime-session + 1 run-controls + 1 realtime + 13 scenario configuration + 2 DEM dispatch`); frontend `22 files / 67 tests passed`; TypeScript/Vite build passed with 1901 modules transformed.
+- warnings: only existing Taichi locale deprecation, non-georeferenced test raster, and Vite large-chunk advisory; no test or build failure.
+- production decision: test gate passed; start the official managed stack next for live API and in-app-browser acceptance; no core solver change.
+
+## 2026-08-06T17:05:36.7277099+08:00 - live GPU recovery and read-only schema gate
+
+- command: retry the newest interrupted queue item from the in-app UI; sample backend PID 381380 GPU Engine for 15 seconds; monitor the project SQLite `data_version`; stop after early outputs; add RED/GREEN coverage for current-schema read-only checks and rerun migration/config suites.
+- compared case: before-fix UI simulation `sim-9bf20503e29b487fbe9d1139b453d282` versus after-fix `sim-000ff6b0eb714426ab0d347876ef7aeb`, same project/scenario/revision and CUDA/f64 inputs.
+- metric/diff evidence: average GPU `20.7273% -> 59.0382%`; pre-output compute samples averaged `72.5128%`; first-output latency `391.8 s -> 125.73 s` (`3.12x` faster). UI retry produced `retry_of=que-33007f2ad3434c15bec66b65e0d45e5c` and displayed the new simulation ID, confirming latest-item selection.
+- hidden-write evidence: persistent SQLite observation still saw pre-output `data_version` changes. Root cause was unconditional `INSERT OR REPLACE` of schema metadata from `ensure_schema()` on every read API call. New TDD RED was `2 -> 3`; GREEN is `1 passed`, plus migration `1 passed` and scenario configuration `13 passed`.
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\diagnostics\20260806_frontend_backend_acceptance\gpu_output_sync_performance.json` and `live_output_boundary_sync.json`; smoke output directory under scenario simulation `sim-000ff6b0eb714426ab0d347876ef7aeb`.
+- production decision: retain output-boundary telemetry and make current-schema checks read-only; no solver or numerical semantics change; restart and re-audit data-version stability next.
+
+## 2026-08-06T17:16:19.2194357+08:00 - output-boundary synchronization final acceptance
+
+- command: run the final related backend pytest selection, focused RunModule Vitest, production frontend build, 20-second SQLite data-version observer during live frontend polling, live health/queue/process checks, and clean in-app-browser verification.
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\diagnostics\20260806_frontend_backend_acceptance\output_boundary_sync_acceptance.md`; supporting JSON files are `gpu_output_sync_performance.json` and `read_api_database_stability.json`.
+- compared case: same `BJ_HXL_Text` project/scenario/revision; before simulation `sim-9bf20503e29b487fbe9d1139b453d282` versus after simulation `sim-000ff6b0eb714426ab0d347876ef7aeb`.
+- metric/diff evidence: average GPU `20.7273% -> 59.0382%`; compute-only segment averaged `72.5128%`; first output `391.8 s -> 125.7295 s` (`3.12x` faster). With the final frontend polling, 21 SQLite samples over 20 seconds stayed at `data_version=2`, with `0` external commits.
+- test result: backend related regression `24 passed, 2 warnings`; RunModule focused Vitest `1 passed`; Vite/TypeScript build passed with `1901` modules transformed; prior full frontend run in this phase was `22 files / 67 tests passed`; diff check had no whitespace error.
+- browser evidence: the final clean in-app-browser tab is open at the target scenario, shows service online/queue idle and `simulation_id: sim-000ff6b0eb714426ab0d347876ef7aeb`, and has zero console errors.
+- live state: backend PID `381224` on port `8000`, Vite listener PID `389628` on port `3000`, health healthy, scheduler enabled, active simulations `0`; no artifact bridge or monitoring process remains.
+- output scope: per the user's updated instruction, the smoke run stopped after output count `2`; five-output convergence is not claimed in this phase and all generated outputs are preserved.
+- production decision: `OUTPUT_BOUNDARY_TELEMETRY_ONLY_NO_SOLVER_CHANGE`; retain lifecycle durability, output-boundary progress persistence, current-schema read-only behavior, queue progress propagation, and latest-simulation UI selection. No solver formulas, timestep, output generation, or numerical semantics changed.
+- self-review / handoff: `C:\Users\Administrator\EDDA-Taichi\artifacts\diagnostics\20260806_frontend_backend_acceptance\work_review.md`; `C:\Users\Administrator\AppData\Local\Temp\handoff-52d6c7.md`.
+- cleanup status: task-owned test/monitor/bridge processes `0`, open FDs `0`, Windows handles `813`, peak/final RSS `131.87/131.87 MB`, managed heap `53.30 MB`, zombies `0`; the backend/frontend listeners are intentionally retained as the deliverable. `[CLEANUP] children=0 fd=0 handles=813 peak_rss=131.87MB rss=131.87MB heap=53.30MB handles_closed=yes zombies=0 persistent_services=2`
+
+## 2026-08-06T17:48:31.0027832+08:00 - full UI-to-backend first-five exact acceptance
+
+- command: requeue the latest stopped scenario from the in-app UI; validate the frozen runtime snapshot; monitor five output boundaries; run the corrected comparator twice; rerun the related backend pytest selection, full frontend Vitest, and production build.
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\diagnostics\20260806_frontend_backend_acceptance\full_frontend_backend_acceptance_report.md`; self-review `full_acceptance_work_review.md`; handoff `C:\Users\Administrator\AppData\Local\Temp\handoff-7731a1.md`.
+- compared case: project/scenario/revision `tf-a03deed9d2844d3d880acefac908459e` / `scn-9357708b409f4db185c827556612e29d` / `rev-81ea3f843cc14ef1aa2216d29746a064`; UI queue/simulation `que-60efda1438f5462b98177c2b6a48dea4` / `sim-53a00843eef549faa1f46a475c1aa4cc`; reference is the user-specified `BJ_HXL_Text\results` directory.
+- input evidence: ready frozen revision with 76 files; live runtime physics/rainfall diff counts are `0`; DEM/zone hashes match; f64, double layer, spatial zones, zfil and zonfil are active/consumed.
+- metric/diff evidence: 11 families x first 5 times = 55 pairs; arrays/header/NoData masks are all exact `55/55`; global max abs/RMSE/relative-L1 are `0`; two comparator runs produced byte-identical metrics CSV SHA-256 `857D9BA8AC5E91E7948062483EFCF23E4A0F6FF32BA914D722B65BD36289BD`.
+- runtime evidence: five target outputs completed in `439.036 s`; sampled GPU was `41/44/41/46/45%`; the run stopped after an extra sixth boundary, with children `0`, active sessions `0`, and Taichi runtime reset.
+- test result: backend related `24 passed`; frontend `22 files / 67 tests passed`; production build passed with 1901 modules transformed.
+- browser/service evidence: final UI shows service online, queue idle, scenario stopped, and latest simulation ID; backend PID `381224` / 8000 and Vite PID `389628` / 3000 remain the deliverable, health is healthy, active simulations `0`.
+- boundary: exact convergence is against the user-specified Taichi-named baseline, not an independent original-EDDA or geographic-overlay claim.
+- production decision: `ACCEPT_FRONTEND_BACKEND_CHAIN_AND_FIRST_FIVE_EXACT_CONVERGENCE_NO_SOLVER_CHANGE`; no solver formula, timestep, output-generation, or numerical-semantics change.
+- cleanup status: task-owned test/comparator/monitor/bridge processes `0`, open FDs `0`, Windows handles `820`, peak/final RSS `131.77/131.77 MB`, managed heap `53.29 MB`, zombies `0`; ports 3000/8000 remain as the deliverable. `[CLEANUP] children=0 fd=0 handles=820 peak_rss=131.77MB rss=131.77MB heap=53.29MB handles_closed=yes zombies=0 persistent_services=2`
+
+## 2026-08-06T19:00:46+08:00 - queue-controls TDD vertical slice
+
+- command: `Python311 -m pytest tests/test_queue_controls.py -q`; `npm.cmd exec -- tsc --noEmit`.
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\tests\test_queue_controls.py`; implementation evidence is `api/services/workbench_store.py`, `api/routes/workbench.py`, and `frontend/taichi-flow/src/pages/Editor/QueueDockPanel.tsx`.
+- compared case: isolated SQLite project with two ready scenarios and a blocking executor; enqueue, explicit batch start, mid-run enqueue, reorder lock, delete preview and batch delete.
+- metric/diff evidence: `2 passed`; enqueue remained `waiting` with zero executor starts until `/queue/start`; mid-run item remained `waiting`; reorder after batch start returned `409 queue_order_locked`; TypeScript no-emit passed.
+- production decision: `QUEUE_CONTROLS_IMPLEMENTED_NO_SOLVER_CHANGE`; scheduler still consumes only `queued`, output-boundary persistence code unchanged.
+
+## 2026-08-06T19:04:43+08:00 - queue-controls backend/frontend regression gate
+
+- command: `Python311 -m pytest tests/test_workbench_domain_api.py tests/test_workbench_scheduler.py tests/test_workbench_run_controls.py tests/test_asset_lifecycle.py tests/test_scenario_configuration_api.py tests/test_workbench_results_exports.py tests/test_workbench_realtime.py tests/test_workbench_config_interface.py tests/test_queue_controls.py -q`; `npm.cmd test -- --run`; `npm.cmd run build`.
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\tests\test_queue_controls.py`; production bundle under `frontend\taichi-flow\dist\`.
+- compared case: isolated queue-control fixtures plus existing scheduler, lifecycle, configuration, realtime and result/export cases; frontend 22 test files.
+- metric/diff evidence: backend `38 passed, 1 warning`; frontend `22 files / 67 tests passed`; production build `1902 modules transformed`, completed successfully (existing chunk-size warning only).
+- caveat: repository-wide `pytest -q` remains collection-blocked by unrelated archived legacy tests requiring removed modules and optional matplotlib/plotly; no queue-control test is in that failure set.
+- production decision: `QUEUE_CONTROLS_REGRESSION_GREEN_NO_SOLVER_CHANGE`; output-boundary persistence and runtime physics files unchanged by this feature.
+
+## 2026-08-06T19:28:00+08:00 - queue-controls isolated browser acceptance GREEN
+
+- command: isolated `Python311 -m uvicorn qa_app:app --app-dir artifacts/diagnostics/queue-controls-20260806-190639 --host 127.0.0.1 --port 8010`; isolated Vite `npm.cmd run dev -- --port 3001 --host 127.0.0.1 --strictPort`; in-app browser DOM/screenshot interaction; read-only SQLite audit; backend focused pytest; frontend Vitest, TypeScript no-emit, and production build.
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\diagnostics\queue-controls-20260806-190639\qa-report.md`, `dom-and-api-evidence.json`, `sqlite-after-delete.json`, and the PNG visual evidence in the same directory.
+- compared case: isolated QA project `tf-f89717c69aa64045a65f71e7aa89b6d4` with `QA Alpha/Beta/Gamma`; live smoke was read-only on `BJ_HXL_Text` project `tf-a03deed9d2844d3d880acefac908459e`.
+- metric/diff evidence: enqueue produced `waiting` with executor starts `0`; explicit batch release produced `running` and locked sorting; mid-run enqueue remained `waiting`; completion left the next item waiting; waiting order persisted across backend restart; reorder endpoint returned `409 queue_order_locked` after release; batch-delete preview preserved result copy and SQLite retained the completed `simulation_runs` row while soft-deleting queue rows; backend `38 passed, 1 warning`; frontend `22 files / 67 tests passed`; TypeScript no-emit passed; Vite `1902 modules transformed` and build passed.
+- production decision: `QUEUE_CONTROLS_BROWSER_QA_GREEN_NO_SOLVER_CHANGE`; accept explicit staged-to-released batches, transactional order lock, shared selection/soft-delete semantics, result preservation, and next-batch isolation. No solver, physics, output-generation, or output-boundary persistence semantics were changed.
+- caveat: the retained live tab had historical Vite HMR/GeoTIFF blocked-source diagnostics from earlier hot reloads; a fresh queue-control error was not observed, and the final live screenshot shows service online with an empty queue. The isolated QA page itself rendered the queue controls and dialog correctly.
+- cleanup status: isolated backend PID `453964` and isolated Vite PID `444824` were still active at this log point and were stopped in the final cleanup phase; live `3000/8000` services and the claimed live browser tab were preserved.
+- cleanup final: task-owned isolated listeners/processes `0`; live listeners remain `127.0.0.1:3000 -> 389628` and `127.0.0.1:8000 -> 381224`; HTTP probes returned `3000=200`, `/api/health=200`; live process RSS snapshot `491.9 MB`, handles `973`, task-owned open FDs `0`, zombies `0`. `[CLEANUP] children=0 fd=0 peak_rss=491.9MB rss=491.9MB heap=unavailable handles_closed=yes zombies=0 persistent_services=2`
+- cleanup refresh: after the final frontend test/build, isolated process count remained `0`, listeners remained `3000/8000` only, HTTP probes remained `200/200`, and the persistent-service snapshot was RSS `498.5 MB`, handles `983`; `[CLEANUP] children=0 fd=0 peak_rss=498.5MB rss=498.5MB heap=unavailable handles_closed=yes zombies=0 persistent_services=2`.
+- live-service activation: verified the old backend command line, restarted only `api.app:app` on `127.0.0.1:8000` with the same Python/Uvicorn command, health returned `200`, and a read-only live queue response now includes `queue_order` and `deletable`; Vite `3000` and the retained in-app browser page were untouched. New backend PID: `463296`.
+- final live cleanup: listeners are `127.0.0.1:8000 -> 463296` and `127.0.0.1:3000 -> 389628`; isolated process count `0`; HTTP `8000/3000=200/200`; persistent RSS `289.6 MB`, handles `911`, task-owned FDs `0`, zombies `0`. `[CLEANUP] children=0 fd=0 peak_rss=289.6MB rss=289.6MB heap=unavailable handles_closed=yes zombies=0 persistent_services=2`
+- final activation refresh: after the active-batch reorder-lock patch, the backend was reloaded on the same command/port (PID `458096`); read-only `/queue` now exposes `queue_order` and `deletable`, health/frontend probes remain `200/200`, and isolated processes remain `0`. Final resource line: `[CLEANUP] children=0 fd=0 peak_rss=288.9MB rss=288.9MB heap=unavailable handles_closed=yes zombies=0 persistent_services=2`.
+- final regression addendum: related backend gate remains `39 passed, 1 warning`; frontend remains `22 files / 68 tests passed`; TypeScript no-emit and Vite production build (`1902` modules) passed after locking reorder during any active released batch.
+- verification addendum: terminal queue deletion now restores the latest retained simulation state even when its queue row is hidden; the focused queue-control suite is `3 passed`, and the full related backend gate is `39 passed, 1 warning`.
+- verification addendum: Run panel item selection now prioritizes a newly staged `waiting/queued` item over a stale terminal `latest_simulation_id`; focused RunModule tests `2 passed`, full frontend `22 files / 68 tests passed`, and the final production build passed with `1902` modules transformed.
+- verification addendum: bottom queue stop control now covers both `starting` and `running` rows while `stopping` remains locked; final TypeScript no-emit, Vitest `22 files / 68 tests`, and Vite build remain green.

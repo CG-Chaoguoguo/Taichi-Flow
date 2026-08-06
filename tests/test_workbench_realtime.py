@@ -13,6 +13,7 @@ def _completed_run(client: TestClient, project: dict, scenario: dict) -> str:
         f"/api/projects/{project['project_id']}/queue",
         json={"scenario_id": scenario["scenario_id"]},
     ).json()
+    client.post(f"/api/projects/{project['project_id']}/queue/start", json={})
     store = client.app.state.workbench
     context = store.claim_queue_item(project["project_id"], queued["queue_item_id"])
     store.finish_run(project["project_id"], context["simulation_id"], {"status": "completed", "progress": 100})

@@ -207,7 +207,7 @@ export type AssetBatchDeleteResult = {
   retained_snapshot_blob_count: number;
 };
 
-export type ScenarioStatus = "draft" | "ready" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "archived";
+export type ScenarioStatus = "draft" | "ready" | "waiting" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "archived";
 export type Scenario = {
   scenario_id: string;
   project_id: string;
@@ -252,13 +252,14 @@ export type SimulationRun = {
   resource_summary?: Record<string, unknown>;
 };
 
-export type QueueItemStatus = "queued" | "starting" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "cancelled" | "waiting" | "canceled";
+export type QueueItemStatus = "queued" | "starting" | "running" | "stopping" | "completed" | "failed" | "stopped" | "interrupted" | "cancelled" | "waiting" | "canceled";
 export type QueueItem = {
   queue_item_id: string;
   project_id: string;
   scenario_id: string;
   scenario_name: string;
   position: number;
+  queue_order?: number | null;
   status: QueueItemStatus;
   simulation_id: string | null;
   scenario_version?: number | null;
@@ -270,6 +271,28 @@ export type QueueItem = {
   finished_at: string | null;
   progress: number;
   summary: string;
+  deletable?: boolean;
+};
+
+export type QueueDeletePreview = {
+  queue_item_ids: string[];
+  items: QueueItem[];
+  active_items: QueueItem[];
+  can_delete: boolean;
+  preserves_results: boolean;
+};
+
+export type QueueBatchDeleteResult = {
+  deleted_ids: string[];
+  cancelled_ids: string[];
+  preserved_result_count: number;
+  items: QueueItem[];
+};
+
+export type QueueStartResult = {
+  started_item_ids: string[];
+  items: QueueItem[];
+  count: number;
 };
 
 export type ResultFile = {

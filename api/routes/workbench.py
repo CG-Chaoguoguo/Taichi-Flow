@@ -113,6 +113,10 @@ class QueueReorder(BaseModel):
     new_position: int = Field(..., ge=1)
 
 
+class QueueDeleteRequest(BaseModel):
+    queue_item_ids: list[str] = Field(..., min_length=1)
+
+
 @router.get("/projects")
 async def list_projects(request: Request):
     projects = request.app.state.workbench.list_projects()
@@ -657,6 +661,11 @@ async def enqueue_scenario(request: Request, project_id: str, payload: QueueCrea
     return request.app.state.workbench.enqueue_scenario(project_id, payload.scenario_id)
 
 
+@router.post("/projects/{project_id}/queue/start")
+async def start_queue(request: Request, project_id: str):
+    return request.app.state.workbench.start_queue_batch(project_id)
+
+
 @router.patch("/projects/{project_id}/queue/order")
 async def reorder_queue(request: Request, project_id: str, payload: QueueReorder):
     items = request.app.state.workbench.reorder_queue(
@@ -665,6 +674,16 @@ async def reorder_queue(request: Request, project_id: str, payload: QueueReorder
         payload.new_position,
     )
     return {"items": items, "count": len(items)}
+
+
+@router.post("/projects/{project_id}/queue/delete-preview")
+async def preview_queue_delete(request: Request, project_id: str, payload: QueueDeleteRequest):
+    return request.app.state.workbench.preview_queue_delete(project_id, payload.queue_item_ids)
+
+
+@router.post("/projects/{project_id}/queue/batch-delete")
+async def batch_delete_queue(request: Request, project_id: str, payload: QueueDeleteRequest):
+    return request.app.state.workbench.batch_delete_queue_items(project_id, payload.queue_item_ids)
 
 
 @router.delete("/projects/{project_id}/queue/{queue_item_id}")

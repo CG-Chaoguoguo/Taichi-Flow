@@ -239,7 +239,7 @@ def test_v2_to_v6_binding_backfill_converts_unrun_legacy_revision_to_idempotent_
         orphan_revision_count = connection.execute(
             "SELECT COUNT(*) FROM input_revisions WHERE revision_id=?", (revision["revision_id"],)
         ).fetchone()[0]
-        assert version == "6"
+        assert version == "7"
     assert binding_rows == [
         ("dem.primary", dem["asset_id"]),
         ("rainfall.period.0001", rain1["asset_id"]),
@@ -340,6 +340,47 @@ def test_edda_parameter_import_preview_ignores_all_file_paths(tmp_path: Path) ->
         assert any(item["key"] == "time.t_end" for item in body["diff"])
 
 
+def test_edda_parameter_import_preview_preserves_path_free_runtime_semantics(tmp_path: Path) -> None:
+    edda_in = _make_reference_case(tmp_path / "legacy-case")
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, edda_in.parent)
+        scenario = client.post(
+            f"/api/projects/{project['project_id']}/scenarios",
+            json={"name": "Semantic import target"},
+        ).json()
+
+        preview = client.post(
+            f"/api/projects/{project['project_id']}/parameter-imports/preview",
+            params={"scenario_id": scenario["scenario_id"]},
+            files={"file": ("edda_in.txt", edda_in.read_bytes(), "text/plain")},
+        )
+
+        assert preview.status_code == 200, preview.text
+        values = preview.json()["values"]
+        assert values["compute.use_double_precision"] is True
+        assert values["time.dt_initial"] == 1.0
+        assert values["hydrology.theta_s"] == 0.43
+        assert values["hydrology.theta_i"] == 0.18
+        assert values["hydrology.psi_f"] == 0.09
+        assert values["hydrology.dfs_infiltration_variant"] == "tol_clipped_fhw"
+        assert values["hydrology.dfs_face_flux_variant"] == "asymmetric_head_guard"
+        assert values["hydrology.dfs_failure_source_variant"] == "live_doublelayer_in_dfs"
+        assert values["hydrology.inflow_denominator_variant"] == "CELLAREA"
+        assert values["soil.double_layer.enabled"] is True
+        assert values["soil.double_layer.zmin"] == 0.001
+        assert values["soil.double_layer.top_layer.c"] == 4000.0
+        assert values["soil.double_layer.bottom_layer.c"] == 5000.0
+        assert values["erosion.tau_c"] == 10.0
+        assert values["erosion.k_erosion"] == 2.0e-6
+        assert values["rheology.Cv_max"] == 0.65
+        assert values["spatial_zones.enabled"] is True
+        assert values["spatial_zones.num_zones"] == 1
+        assert values["boundary_conditions.mode"] == "auto"
+        assert values["boundary_conditions.default_type"] == "outflow"
+        assert values["boundary_conditions.include_nodata"] is True
+        assert not any("path" in key.lower() for key in values)
+
+
 def test_edda_parameter_import_apply_changes_parameters_but_never_bindings(tmp_path: Path) -> None:
     edda_in = _make_reference_case(tmp_path / "legacy-case")
     with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
@@ -361,12 +402,78 @@ def test_edda_parameter_import_apply_changes_parameters_but_never_bindings(tmp_p
         assert applied.status_code == 200, applied.text
         body = applied.json()
         assert body["scenario"]["parameter_template_id"].startswith("pt-import-")
+        assert body["scenario"]["parameter_template_id"].endswith("-params-v2")
+        assert str(body["template"]["version"]) == "2"
         assert body["scenario"]["input_revision_id"] is None
         assert body["scenario"]["input_bindings"] == []
         assert body["scenario"]["effective_parameters"]["time.t_end"] == 7200.0
         assert body["scenario"]["effective_parameters"]["rainfall.timeline"]["period_count"] == 2
         assert body["ignored_file_references"]["count"] > 0
         assert all("path" not in key.lower() for key in body["template"]["values"])
+
+
+def test_imported_scenario_claim_activates_bound_zones_and_path_free_runtime_semantics(tmp_path: Path) -> None:
+    edda_in = _make_reference_case(tmp_path / "legacy-case")
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, edda_in.parent)
+        project_id = project["project_id"]
+        scenario = client.post(
+            f"/api/projects/{project_id}/scenarios",
+            json={"name": "Runtime semantic import"},
+        ).json()
+        imported = client.post(
+            f"/api/projects/{project_id}/parameter-imports/apply",
+            params={"scenario_id": scenario["scenario_id"], "expected_version": scenario["version"]},
+            files={"file": ("edda_in.txt", edda_in.read_bytes(), "text/plain")},
+        ).json()["scenario"]
+        dem = _upload(client, project_id, "dem", "dem.asc", 1)
+        zones = _upload(client, project_id, "zones", "zones.asc", 1)
+        slope = _upload(client, project_id, "slope", "slope.asc", 20)
+        thickness = _upload(client, project_id, "thickness", "thickness.asc", 3)
+        manning = _upload(client, project_id, "manning", "manning.asc", 1)
+
+        saved = client.patch(
+            f"/api/projects/{project_id}/scenarios/{scenario['scenario_id']}",
+            json={
+                "expected_version": imported["version"],
+                "input_bindings": [
+                    {"binding_key": "dem.primary", "asset_id": dem["asset_id"], "family": "dem", "role": "primary"},
+                    {"binding_key": "zones.primary", "asset_id": zones["asset_id"], "family": "zones", "role": "zones"},
+                    {"binding_key": "slope.primary", "asset_id": slope["asset_id"], "family": "slope", "role": "slope"},
+                    {"binding_key": "thickness.primary", "asset_id": thickness["asset_id"], "family": "thickness", "role": "thickness"},
+                    {"binding_key": "manning.raster", "asset_id": manning["asset_id"], "family": "manning", "role": "manning-raster"},
+                ],
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        queued = client.post(
+            f"/api/projects/{project_id}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+        assert queued.status_code == 201, queued.text
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
+        claim = client.app.state.workbench.claim_queue_item(project_id, queued.json()["queue_item_id"])
+
+        prepared = prepare_runtime_from_payload(
+            app_output_dir=tmp_path / "runtime",
+            dem_file=claim["dem_file"],
+            soil_zones_file=claim["soil_zones_file"],
+            output_dir=str(tmp_path / "runtime" / "run"),
+            overrides=claim["overrides"],
+            case_input_files=claim["case_input_files"],
+            runtime_profile_name="cuda_production_default",
+        )
+
+        assert prepared.config.compute.use_double_precision is True
+        assert prepared.config.time.dt_initial == 1.0
+        assert prepared.config.hydrology.theta_i == 0.18
+        assert prepared.config.soil.double_layer is not None
+        assert prepared.config.soil.double_layer.enabled is True
+        assert prepared.config.soil.double_layer.top_layer.c == 4000.0
+        assert prepared.config.erosion.k_erosion == 2.0e-6
+        assert prepared.config.spatial_zones.enabled is True
+        assert prepared.config.spatial_zones.zone_file == claim["soil_zones_file"]
+        assert prepared.config.native_inputs.files["zfil"].path == claim["case_input_files"]["zfil"]
 
 
 def test_regular_rainfall_timeline_is_authoritative_for_period_count_and_boundaries() -> None:
@@ -476,6 +583,7 @@ def test_structured_mixed_rainfall_preflight_and_runtime_need_no_edda_in(tmp_pat
             json={"scenario_id": scenario["scenario_id"]},
         )
         assert queued.status_code == 201, queued.text
+        assert client.post(f"/api/projects/{project_id}/queue/start", json={}).status_code == 200
         claim = client.app.state.workbench.claim_queue_item(project_id, queued.json()["queue_item_id"])
         assert claim["case_config_file"] is None
         assert claim["case_base_dir"] is None

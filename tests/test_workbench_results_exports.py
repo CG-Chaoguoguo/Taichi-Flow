@@ -14,6 +14,7 @@ def _completed_run(client: TestClient, project: dict, scenario: dict, project_ro
         f"/api/projects/{project['project_id']}/queue",
         json={"scenario_id": scenario["scenario_id"]},
     ).json()
+    assert client.post(f"/api/projects/{project['project_id']}/queue/start", json={}).status_code == 200
     store = client.app.state.workbench
     context = store.claim_queue_item(project["project_id"], queued["queue_item_id"])
     output_dir = Path(context["output_dir"])
