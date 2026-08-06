@@ -26,4 +26,25 @@ describe("filenameSort", () => {
     expect(sortAssetsByFilename(assets).map((item) => item.name)).toEqual(["1.asc", "2.asc", "alpha.asc", "zone.asc"]);
     expect(compareFilenamesNatural("ri2.asc", "ri10.asc")).toBeLessThan(0);
   });
+
+  it("sorts by full filename instead of trailing ordinal alone", () => {
+    expect(compareFilenamesNatural("dem2.asc", "rain1.asc")).toBeLessThan(0);
+
+    const mixed = [
+      { name: "ri10.asc" },
+      { name: "bcdem.asc" },
+      { name: "ri1.asc" },
+      { name: "rain1.asc" },
+      { name: "ri2.asc" },
+      { name: "bcslope.asc" },
+    ];
+    expect(sortAssetsByFilename(mixed).map((item) => item.name)).toEqual([
+      "bcdem.asc",
+      "bcslope.asc",
+      "rain1.asc",
+      "ri1.asc",
+      "ri2.asc",
+      "ri10.asc",
+    ]);
+  });
 });

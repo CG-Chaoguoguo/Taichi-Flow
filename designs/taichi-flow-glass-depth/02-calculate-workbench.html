@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taichi-Flow — Calculate Workbench (Glass Depth)</title>
+  <link rel="stylesheet" href="_shared.css" />
+  <style>
+    .workspace { height: 100vh; display: flex; flex-direction: column; }
+    .ws-header {
+      height: 56px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-5); border-bottom: 1px solid var(--glass-border);
+    }
+    .ws-body { flex: 1; display: flex; min-height: 0; }
+    .canvas {
+      flex: 1; min-width: 0; position: relative;
+      background: radial-gradient(circle at 50% 40%, rgba(113,112,255,0.06), transparent 60%);
+      border-right: 1px solid var(--glass-border);
+    }
+    .canvas-grid {
+      position: absolute; inset: 0;
+      background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    .panel-rail {
+      width: 38%; min-width: 360px; max-width: 520px;
+      display: flex; flex-direction: column;
+      background: var(--glass-bg);
+      backdrop-filter: blur(var(--blur-glass));
+      border-left: 1px solid var(--glass-border);
+    }
+    .module-header {
+      height: 48px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 10px;
+      padding: 0 var(--space-4); border: none; width: 100%;
+      background: transparent; color: var(--color-foreground);
+      font-size: 14px; font-weight: 600; cursor: pointer; text-align: left;
+      border-bottom: 1px solid var(--color-border);
+    }
+    .module-header.active {
+      background: var(--color-brand-bg-subtle); color: var(--color-brand);
+      box-shadow: inset 3px 0 0 var(--color-brand);
+    }
+    .module-header .summary { margin-left: auto; font-weight: 400; color: var(--color-foreground-secondary); font-size: 12px; }
+    .module-body { flex: 1; overflow: auto; padding: var(--space-4); }
+    .param-group { margin-bottom: var(--space-4); }
+    .param-group-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--color-foreground-tertiary);
+      margin-bottom: var(--space-2); padding-bottom: var(--space-2);
+      border-bottom: 1px solid var(--glass-border);
+    }
+    .param-row {
+      display: grid; grid-template-columns: 1fr 100px; gap: var(--space-3);
+      align-items: center; padding: var(--space-2) 0;
+    }
+    .param-row label { font-size: 13px; color: var(--color-foreground-secondary); }
+    .param-row input {
+      height: 32px; padding: 0 10px; border-radius: var(--radius-small);
+      background: var(--glass-bg-subtle); border: 1px solid var(--glass-border);
+      color: var(--color-foreground); font-size: 13px;
+    }
+    .banner {
+      padding: 8px var(--space-5); border-bottom: 1px solid var(--glass-border);
+      background: rgba(113,112,255,0.08); color: var(--color-foreground-secondary);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="workspace">
+    <header class="ws-header tf-glass">
+      <div class="tf-row">
+        <button class="btn btn-ghost" style="width:34px;height:34px;padding:0">←</button>
+        <div>
+          <div class="tf-subtitle tf-row" style="gap:8px">
+            2024 汛期方案
+            <span class="badge"><span class="badge-dot" style="background:var(--color-brand)"></span>运行中</span>
+          </div>
+          <p class="tf-caption" style="color:var(--color-foreground-tertiary)">输入版本 v3 · scn_8f2a</p>
+        </div>
+      </div>
+      <button class="btn btn-secondary">💾 保存方案</button>
+    </header>
+
+    <div class="banner">尚未选择方案：可管理项目输入并发布修订；参数、运行与结果暂为只读。</div>
+
+    <div class="ws-body">
+      <div class="canvas">
+        <div class="canvas-grid"></div>
+        <div style="position:absolute;bottom:16px;left:16px" class="tf-panel" style="padding:8px 12px">
+          <span class="tf-caption" style="color:var(--color-foreground-tertiary)">可视化画布 · 65%</span>
+        </div>
+      </div>
+
+      <aside class="panel-rail">
+        <button class="module-header">🗄 输入 <span class="summary">6/8 就绪</span> ▼</button>
+        <button class="module-header active">⚙ 参数 <span class="summary">12 项变更</span> ▼</button>
+        <div class="module-body">
+          <div class="param-group">
+            <div class="param-group-title">时间步长 (timestep)</div>
+            <div class="param-row">
+              <label>时间步长 (dt)</label>
+              <input type="text" value="0.5" />
+            </div>
+            <div class="param-row">
+              <label>输出间隔 (output_interval)</label>
+              <input type="text" value="3600" />
+            </div>
+          </div>
+          <div class="param-group">
+            <div class="param-group-title">边界条件 (boundary)</div>
+            <div class="param-row">
+              <label>上游流量 (upstream_q)</label>
+              <input type="text" value="8500" />
+            </div>
+          </div>
+        </div>
+        <button class="module-header">▶ 运行 <span class="summary">运行中</span> ▼</button>
+        <button class="module-header">📊 结果 <span class="summary">4 个结果族</span> ▼</button>
+      </aside>
+    </div>
+  </div>
+</body>
+</html>

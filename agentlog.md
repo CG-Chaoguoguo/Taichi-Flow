@@ -755,3 +755,135 @@ vidia-smi observed RTX 3080 Ti activity during the run.
 - production decision: public repository created and filtered Taichi-Flow source uploaded; virtual environments, simulation inputs/outputs, runtime state, build output, parity tools, and comparison scripts remain excluded
 - cleanup status: all task-owned git, gh, pytest, and npm processes exited; no simulation process was started
 - next usable action: clone or open `https://github.com/CG-Chaoguoguo/Taichi-Flow`
+
+## 2026-08-04T01:24:24+08:00 - Structured scenario inputs and rainfall timeline GREEN
+
+- phase name: typed project assets, immutable semantic bindings, versioned parameter templates, atomic scenario save, legacy migration, and authoritative rainfall timeline
+- commands:
+  - `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -m pytest -q tests\test_scenario_configuration_api.py tests\test_workbench_domain_api.py tests\test_scenario_config_overrides.py tests\test_parameter_catalog.py tests\test_runtime_session_lifecycle.py tests\test_system_directories.py tests\test_bj_hxl_case_parse.py --junitxml=artifacts\agent_runs\2026-08-03_structured_scenario_inputs\backend_pytest.xml`
+  - `npm.cmd test -- --reporter=default --reporter=junit --outputFile.junit=...\frontend_vitest.xml`
+  - `npm.cmd run build`
+  - `npm.cmd run test:desktop`
+  - `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe artifacts\agent_runs\2026-08-03_structured_scenario_inputs\audit_bj_hxl_rainfall_timeline.py`
+  - in-app browser real flow: invalid `250000 s` -> `72→70→72` timeline -> atomic save -> reload -> run preflight
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-03_structured_scenario_inputs\verification_summary.md`, `api_contract_diff.md`, `bj_hxl_rainfall_timeline_audit.json`, `browser_acceptance.json`, `self_criticism_report.md`, screenshots and JUnit XML in the same directory
+- compared case: `C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text\edda_in.txt`; no Fortran executable and no numerical simulation run
+- metric/diff evidence: backend `30 passed`; frontend `14 files / 36 tests passed`; production build `1653 modules`; desktop smoke `3 passed`; timeline audit `14/14 checks true`; source `nper=72`, rainfall end `259200 s`, `73` exact `capt` boundaries, interval `3600 s`; invalid non-divisible input blocked; browser save version 7 persisted `70` periods then version 8 restored `72`; final active rainfall bindings `71 raster + 1 uniform`; preflight valid; current-run browser error/warning count `0`; page horizontal overflow `0` at 1024/1280/1440 requested viewports
+- visual correction: original 1024 screenshot exposed a multi-line scenario badge despite zero scroll overflow; `.tf-editor-scenario-chip` now uses `nowrap + hidden + ellipsis`, retains full title, and focused tests/build/re-screenshot passed
+- mock/fake audit: no mock, fake-data, or artificial-delay simulation branch; only Electron health polling, toast expiry, and launch-page UI timers matched
+- production decision: accept the structured parameter/input authoring and rainfall timeline scope; `pt-bj-hxl-v1` remains immutable compatibility, new authoring uses `pt-bj-hxl-v2`; no `edda/` solver file, formula, source timing, wet/dry threshold, direction order, time step, or output semantics changed; do not claim new numerical parity without a separate simulation phase
+- cleanup status: test/build/audit processes exited; user-requested frontend `3000` and backend `8000` intentionally remain live; in-app browser remains on the verified scenario pending final handoff cleanup
+- next usable action: edit start/end/interval in the open rainfall workspace, save once, or run a separately scoped BJ_HXL numerical validation if solver-output evidence is required
+
+## 2026-08-04T01:28:00+08:00 - Structured scenario inputs phase cleanup GREEN
+
+- phase name: final browser handoff, transient worker cleanup, and requested service retention
+- command: reset/finalize in-app browser with verified scenario tab as `deliverable`; remove exact task-owned temporary screenshot copies; audit pytest/Vitest/build/Electron/audit processes; probe 3000/8000; capture PowerShell handle/RSS/heap summary
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-03_structured_scenario_inputs\cleanup_summary.md`, `handoff.md`
+- compared case: task-owned validation workers and user-requested Taichi-Flow development stack; no Fortran executable
+- metric/diff evidence: transient children `0`; Windows zombies `0`; frontend HTTP `200`; backend `healthy`; six temp screenshot copies removed after artifact verification; `[CLEANUP] children=0 fd=682 peak_rss=92.9MB rss=92.9MB heap=5.5MB`
+- production decision: accept cleanup gate; keep frontend tree PIDs `27084/27376/12264/27396` and backend venv tree PIDs `185284/184444` intentionally live so the user can continue in the delivered browser tab
+- cleanup status: complete
+- next usable action: use the open rainfall editor; stop the development stack only when the user explicitly asks
+
+## 2026-08-04T04:09:00+08:00 - Electron desktop development launcher GREEN
+
+- phase name: pre-release Electron dev/preview entry, runtime ownership, security contract, and browser verification
+- commands:
+  - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\desktop-dev\Test-DesktopDevLauncher.ps1`
+  - `npm.cmd run test:desktop`, `npm.cmd test`, and `npm.cmd run build` from `frontend\taichi-flow`
+  - `C:\Users\Administrator\AppData\Local\Programs\Python\Python311\python.exe -m pytest tests\test_desktop_runtime_contract.py tests\test_system_directories.py tests\test_workbench_domain_api.py -q`
+  - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\desktop-dev\Start-DesktopDev.ps1 -Mode dev -ApiPort 18500 -FrontendPort 13500 -Smoke`
+  - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\desktop-dev\Start-DesktopDev.ps1 -Mode preview -ApiPort 18501 -Smoke`
+  - Vite HMR WebSocket probe against `ws://127.0.0.1:3000/` with subprotocol `vite-hmr`
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-04_desktop_dev_launcher\desktop-dev-launcher\phase-report.md`, `final-gate-summary.json`, `work-review.md`, final test/build logs, Electron and in-app-browser screenshots in the same directory
+- compared case: live project catalog and current `BJ_HXL_Text` scenario page; no Fortran executable and no numerical simulation run
+- metric/diff evidence: Electron `43.2.0`; launcher selftest `23/23`; desktop policy `9/9`; frontend `14 files / 36 tests`; backend focused `12 passed, 1 upstream warning`; final dev and preview both `success=true`, API contract match, runtime errors `0`, horizontal overflow maximum `0`; in-app browser three-size overflow `0`, clipped visible controls `0`, console warn/error `0`; HMR channel returned `{"type":"connected"}`; single-instance main count `1`; unrelated 13300/18300 listeners preserved while launcher used 13301/18301; abnormal Electron exit cleaned 13200/18200
+- mock/fake audit: production match count `0`; all `mock` matches are test files
+- production decision: accept `scripts\desktop-dev` as the pre-release frontend development entry; keep Forge, ZIP, installer, updater, and external release blocked until formal icon approval, Windows signing, and Python/Taichi/GDAL service compatibility matrix exist; `edda/` diff is empty
+- cleanup status: all task-owned Electron/API/Vite/npm/test/conflict processes exited; `.runtime\desktop-dev\active.json` absent; isolated listener count `0`; original frontend 3000 PID `12264` and backend 8000 PID `184444` preserved; in-app browser scenario tab retained as deliverable
+- next usable action: double-click `scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat` for HMR mode or pass `preview`; use `Stop-DesktopDev.ps1` only for recovery after abnormal launcher termination
+
+## 2026-08-04T04:11:00+08:00 - Electron desktop development launcher cleanup GREEN
+
+- phase name: task-owned process, listener, browser-session, and temporary-evidence cleanup
+- command: finalize in-app browser with the verified scenario tab as `deliverable`; reset viewport; remove the exact browser temp evidence directory; inspect process identities/listeners; probe 3000/8000 HTTP; emit Windows handle/RSS/heap summary
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-04_desktop_dev_launcher\desktop-dev-launcher\cleanup-summary.md`, `cleanup-summary.json`
+- compared case: task-owned dev/preview/conflict/single-instance validation processes plus the user-retained live stack; no numerical simulation
+- metric/diff evidence: task-owned processes `0`; Electron processes `0`; isolated listeners `0`; `.runtime\desktop-dev\active.json` absent; frontend 3000 HTTP `200`; backend 8000 health HTTP `200`; retained PIDs remain 3000=`12264`, 8000=`184444`; browser temp evidence removed; verified scenario tab retained after 1440×900 reset
+- production decision: cleanup gate accepted; development launcher is ready for use, while external packaging remains blocked by the previously recorded release prerequisites
+
+## 2026-08-05T12:05:00+08:00 - Professional raster browser and exact identify GREEN
+
+- phase name: affine-authoritative raster profiles, lossless COG browsing, exact source-pixel identify, map-state viewport safety, and OpenLayers workbench integration
+- commands:
+  - `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -m pytest -q tests\test_raster_engine.py`
+  - `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -m pytest -q tests\test_asset_lifecycle.py tests\test_workbench_domain_api.py tests\test_scenario_configuration_api.py tests\test_workbench_config_interface.py`
+  - `npm.cmd test`, `npm.cmd run build`, and `npm.cmd run test:desktop` from `frontend\taichi-flow`
+  - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\desktop-dev\Test-DesktopDevLauncher.ps1`
+  - isolated Electron smoke: `Start-DesktopDev.ps1 -Mode dev -ApiPort 8010 -FrontendPort 3010 -Smoke`
+  - live API checks for `/api/health`, bcdem `raster-profile`, exact `raster/identify`, and COG `Range: bytes=0-31`
+  - in-app browser identify at the screenshot coordinate and viewport checks at 1024x768, 1280x800, 1440x900
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-05\raster-professionalization\`
+- compared case: `C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text\Data\tutorial\bcdem.asc`; no original EDDA executable or solver run
+- metric/diff evidence: raster engine `8 passed`; asset lifecycle `9 passed`; workbench/domain plus scenario configuration `17 passed`; config interface `1 passed`; frontend `14 files / 37 tests passed`; desktop policy `9/9`; launcher selftest `23/23`; Electron smoke `success=true`, `runtimeErrors=[]`, API contract match, and horizontal/vertical overflow `0` at all three requested sizes; profile `686x676`, `int32`, NoData `-9999`, valid `259465`, NoData `204271`, min `193`, max `1091`; source-to-COG `pixel_difference_count=0`, `max_absolute_difference=0`, shape/dtype/NoData/transform all equal; exact screenshot coordinate `X=493251,Y=4497770` returned `status=nodata`, zero-based `row=523,column=20`, one-based `524/21`, raw `NoData`, 3x3 all `NoData`; COG response `206` with `Content-Range`, `Accept-Ranges`, and hash ETag
+- visual evidence: `browser-final-identify.png`, `browser-final-layout.png`, `browser-1024x768.png`, `browser-1280x800.png`, `browser-1440x900.png`, `desktop-smoke-report.json`, `desktop-smoke.png`, `raster-profile-bcdem.json`, `raster-identify-screenshot-coordinate.json`, `raster-cog-validation.json`, `raster-cog-range.headers.txt`, and `browser-layout-metrics.json` in the phase directory
+- production decision: enable the professional source-raster browser for project input layers; keep the legacy PNG preview endpoint read-only for compatibility and remove it from the new UI path; no `edda/` solver formula, source timing, dry/wet threshold, direction order, time step, or output semantics changed
+- cleanup status: isolated Electron/API/Vite smoke processes exited and ports 3010/8010 are clear; user-requested frontend `3000` PID `315356` and selector-policy backend `8000` PID `319884` remain live; current in-app browser tab remains on the verified BJ_HXL raster identify view for handoff
+- next usable action: reuse the raster engine for result layers after result-output metadata is exposed; keep release packaging blocked until the planned signing, icon, and Python/Taichi/GDAL compatibility gates are completed
+
+## 2026-08-05T00:14:14+08:00 - Asset deletion lifecycle GREEN
+
+- phase name: pre-run draft binding, batch asset deletion, runtime snapshot locking, and live migration verification
+- commands:
+  - C:\Users\Administrator\AppData\Local\Programs\Python\Python311\python.exe -m pytest -q tests\test_asset_lifecycle.py tests\test_scenario_configuration_api.py tests\test_workbench_domain_api.py tests\test_workbench_scheduler.py tests\test_workbench_run_controls.py tests\test_workbench_realtime.py
+  - npm.cmd test -- --run, npm.cmd run build, and npm.cmd run test:desktop from frontend\taichi-flow
+  - verified 8000 restart of the exact python.exe -m uvicorn api.app:app --host 127.0.0.1 --port 8000 process, then live asset/delete-preview HTTP checks
+  - in-app-browser selection, delete-impact-preview, cancel, clean-console, and 1024×768 / 1280×800 / 1440×900 responsive checks
+- artifact path: C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-04_asset-deletion-lifecycle\asset-deletion-lifecycle\phase-report.md, logs, JSON API evidence, pre-migration SQLite copies, and browser screenshots in the same directory
+- compared case: live BJ_HXL_Text project (tf-a03deed9d2844d3d880acefac908459e), plus isolated FastAPI lifecycle fixtures; no Fortran executable and no numerical simulation run
+- metric/diff evidence: focused backend 24 passed, 1 upstream warning; frontend 14 files / 37 tests; desktop policy 9/9; 43 live assets before/after; legacy orphan input revisions 6 → 0; schema version 5; live rainfall assets 38; selected-current-filter count 38; runtime locks 0 for the inactive live project; three viewport checks had horizontal-overflow difference 0; clean fresh editor console warnings/errors 0; delete dialog was cancelled and live asset count remained 43
+- production decision: accept draft bindings as freely deletable until scheduler claim; accept atomic immutable snapshot creation and active-run-only locks; terminal logical asset deletion retains snapshot hashes/blobs; edda/ solver code and physical semantics were not changed
+- cleanup status: the verified backend was restarted as the current source service and intentionally remains live on 8000; Vite remains live on 3000; no test-owned Electron, temporary browser tab, or isolated test process remains; original in-app project tab retained
+- next usable action: create or select a scenario, bind draft assets, then use the new batch-delete selection mode before queuing; once a job reaches starting, the referenced assets show the runtime lock until terminal state
+- verification addendum: after adding a synchronized scheduler-claim versus batch-delete race test, the same focused suite passed 25 tests with only the upstream Taichi locale deprecation warning; the race outcome is asserted all-or-nothing.
+- verification addendum: terminal-state coverage for completed, failed, stopped, and interrupted was added; the focused suite now passes 29 tests with only the same upstream Taichi locale deprecation warning. Every terminal state releases logical deletion while retaining the snapshot hash.
+- verification addendum: the verified 8000 backend was restarted after the final scenario-version increment change; it is healthy on PID 104680 and the live BJ_HXL_Text project remains 43 assets, zero old revisions, with lifecycle fields present.
+- cleanup addendum: task-owned transient pytest, Vitest, desktop-test, Electron, and isolated-service process count is 0; the requested Vite 3000 and Uvicorn 8000 services remain alive. See the asset lifecycle cleanup-summary.md artifact.
+- record note: the subsequent two cleanup lines are the continuation of the preceding 2026-08-04 Electron launcher cleanup record; they are retained unchanged and do not describe this asset lifecycle phase.
+- cleanup status: `[CLEANUP] children=0 fd=616 rss=71.5 MB peak_rss=71.5 MB heap=85.5 MB`
+- next usable action: use the retained browser page or start Electron with `scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat`
+
+## 2026-08-05T19:52:00+08:00 - Parameter inspector display repair GREEN
+
+- phase name: grouped parameter inspector layout, validation issue locations, context-aware inspector height, and legal asset-card controls
+- commands:
+  - `C:\Users\Administrator\AppData\Local\Programs\Python\Python311\python.exe -m pytest -q tests\test_scenario_configuration_api.py`
+  - `frontend\\taichi-flow\\node_modules\\.bin\\vitest.cmd run src/pages/Calculate/ParameterModule.test.tsx src/pages/Editor/AssetContentBrowser.test.tsx src/pages/Editor/InspectorPanel.test.tsx --reporter=verbose --pool=forks --no-file-parallelism`
+  - `npm.cmd test`, `npm.cmd run build`, and `npm.cmd run test:desktop` from `frontend\taichi-flow`
+  - `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\desktop-dev\Start-DesktopDev.ps1 -Mode dev -Smoke -SmokeReportPath artifacts\agent_runs\2026-08-05\parameter-inspector-display\desktop-smoke-report.json -SmokeScreenshotPath artifacts\agent_runs\2026-08-05\parameter-inspector-display\desktop-smoke.png -SkipNpmInstall`
+  - verified and restarted only the exact Taichi-Flow API process on port `8000`, then refreshed the live scenario and fetched `/api/projects/tf-a03deed9d2844d3d880acefac908459e/scenarios/scn-f70b73b3877c4d36b5c3d3425b8ec735/configuration`
+  - in-app browser validation of accordion, search, geometry, screenshots, and fresh console diagnostics
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-05\parameter-inspector-display\`
+- compared case: live `BJ_HXL_Text / 基准工况` (`tf-a03deed9d2844d3d880acefac908459e`, `scn-f70b73b3877c4d36b5c3d3425b8ec735`); no Fortran executable or solver run
+- metric/diff evidence: focused frontend `3 files / 12 tests passed`; full frontend `16 files / 46 tests passed`; desktop policy `9/9`; production build completed successfully; backend scenario configuration `11 passed` with one existing Taichi locale warning; live API `200` returned baseline/effective `41/41` and validation `issues=73` with stable `code`, `parameter_key`, `binding_key`, and `period_id`; browser parameter module `scrollHeight=2144 > clientHeight=358` (post-restart `2168 > 358`), time group height `1322.16px`, rainfall/Manning cards `163.64/183.98px`, all direct children `flexShrink=0`, `39` parameter inputs, `detailsPane=false`, `nestedButtons=0`, and fresh app console error/warn count `0`; accordion click expanded hydrology and search for `拒步` reduced the view to the matching time group; Electron smoke `success=true`, API/renderer/bridge/hash-route checks passed, runtime errors `[]`, and horizontal/vertical overflow was `0` at `1024x768`, `1280x800`, and `1440x900`
+- visual evidence: `browser-scenario-1280x720.png`, `browser-parameter-fields-1280x720.png`, `browser-geometry-1280x720.json`, `scenario-configuration-api.json`, `desktop-smoke-report.json`, `desktop-smoke_1024x768.png`, `desktop-smoke_1280x800.png`, and `desktop-smoke_1440x900.png`
+- production decision: accept the parameter inspector display repair; enable grouped, scrollable scenario parameters with explicit loading/error states and stable validation locations, use the full inspector for scenario/queue contexts, keep asset/result split panes, and keep the existing `edda/` solver semantics unchanged; live frontend `3000` and backend `8000` remain available
+- cleanup status: Electron smoke owned children `0`; original Vite `3000` PID `27352` and Taichi-Flow API `8000` PID `55004` remain intentionally live; no `edda/` files changed
+- next usable action: continue editing the retained `BJ_HXL_Text / 基准工况` scenario; parameter groups can be collapsed/expanded and fields edited without the former horizontal-line clipping
+
+## 2026-08-05T21:12:26+08:00 - Adaptive editor layout GREEN
+
+- phase name: nested resizable editor workspace, global layout preferences, container reflow, and map resize synchronization
+- commands:
+  - `npm.cmd test` from `frontend\taichi-flow`
+  - `npm.cmd run build` from `frontend\taichi-flow`
+  - `npm.cmd run test:desktop` from `frontend\taichi-flow`
+  - live `http://127.0.0.1:3000` and `http://127.0.0.1:8000/api/health` checks
+  - in-app browser visual verification of the real `BJ_HXL_Text / 基准工况` page at 1024×768, 1280×800, and 1440×900, including drag, keyboard, collapse, refresh persistence, and clean-console reload
+- artifact path: `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\agent_runs\2026-08-05\adaptive-editor-layout\`
+- compared case: live `BJ_HXL_Text / 基准工况` (`tf-a03deed9d2844d3d880acefac908459e` / `scn-f70b73b3877c4d36b5c3d3425b8ec735`); no Fortran executable, solver run, or numerical output comparison
+- metric/diff evidence: 18 Vitest files / 49 tests passed; Vite production build passed; Electron smoke 9/9; 3000 HTTP 200 with Vite client; 8000 healthy; 1280/1440 default panes approximately 240/360/220px; separator hit areas approximately 8px; Home kept the pane expanded; Enter produced a 36px rail; refresh restored dragged outliner/family values; all browser viewport checks had horizontal overflow false; clean reload had error/warn=[]; map resize observer only calls `updateSize()`
+- production decision: accept the adaptive workspace layout and enable it for the current editor; preserve `edda/`, backend APIs, scenario data, raster semantics, and existing services; at a constrained 1024 effective viewport the library safely compresses an otherwise infeasible sum of minimum widths, while explicit collapse restores a full-width central canvas and wider windows reapply saved sizes
+- cleanup status: temporary browser verification tab closed; retained in-app project tab remains open; no task-owned Electron or test process remains; existing Vite 3000 and API 8000 services were not terminated
+- next usable action: drag any labeled splitter or use the new workspace reset action in the canvas settings; the retained browser page is left on the real project editor

@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taichi-Flow — Launcher → Editor (Fluent 2)</title>
+  <link rel="stylesheet" href="_shared.css" />
+  <style>
+    .frame-tabs {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 100;
+      display: flex; gap: 4px; padding: 4px; border-radius: var(--radius-flyout);
+      background: var(--acrylic-default); backdrop-filter: blur(20px);
+      border: 1px solid var(--layer-stroke); box-shadow: var(--shadow-16);
+    }
+    .frame-tabs button {
+      border: none; background: transparent; color: var(--color-foreground-secondary);
+      padding: 6px 14px; border-radius: var(--radius-control); font-size: 12px; cursor: pointer;
+    }
+    .frame-tabs button.active { background: var(--color-brand-bg-subtle); color: var(--color-brand); }
+    .frame { display: none; height: 100vh; overflow: hidden; }
+    .frame.active { display: flex; flex-direction: column; }
+
+    /* —— Launcher —— */
+    .launcher-topbar {
+      height: var(--header-height); display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-6); border-bottom: 1px solid var(--layer-stroke); flex-shrink: 0;
+    }
+    .launcher-brand { display: flex; align-items: center; gap: 10px; }
+    .logo {
+      width: 28px; height: 28px; border-radius: var(--radius-control);
+      background: var(--color-brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px;
+    }
+    .launcher-body { flex: 1; overflow: auto; padding: var(--space-page); }
+    .project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-4); margin-top: var(--space-5); }
+    .project-card {
+      padding: var(--space-4); border-radius: var(--radius-card);
+      background: var(--layer-fill-default); border: 1px solid var(--layer-stroke);
+      box-shadow: var(--shadow-2); cursor: pointer; transition: box-shadow var(--motion-fast) var(--ease-standard);
+    }
+    .project-card:hover { box-shadow: var(--shadow-8); outline: 1px solid var(--color-brand); }
+
+    /* —— Launch Loading —— */
+    .launch-screen {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: var(--space-6); padding: var(--space-7);
+    }
+    .launch-steps { width: 360px; display: flex; flex-direction: column; gap: 10px; }
+    .launch-step {
+      display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+      border-radius: var(--radius-control); background: var(--layer-fill-default);
+      border: 1px solid var(--layer-stroke); color: var(--color-foreground-tertiary);
+    }
+    .launch-step.done { color: var(--color-success); }
+    .launch-step.active { color: var(--color-brand); border-color: var(--color-brand); background: var(--color-brand-bg-subtle); }
+    .progress-track {
+      width: 360px; height: 4px; border-radius: 2px; background: var(--layer-on-acrylic); overflow: hidden;
+    }
+    .progress-fill { height: 100%; width: 72%; background: var(--color-brand); border-radius: 2px; }
+
+    /* —— Editor —— */
+    .editor-menubar {
+      height: var(--header-height); display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-4); border-bottom: 1px solid var(--layer-stroke); flex-shrink: 0;
+    }
+    .editor-body { flex: 1; display: flex; min-height: 0; }
+    .outliner {
+      width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+      background: var(--mica-alt); border-right: 1px solid var(--layer-stroke);
+    }
+    .outliner-section { padding: 8px; border-bottom: 1px solid var(--layer-stroke); }
+    .outliner-item {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+      border-radius: var(--radius-control); cursor: pointer; font-size: 13px;
+      color: var(--color-foreground-secondary); border: none; background: transparent; width: 100%; text-align: left;
+    }
+    .outliner-item:hover { background: var(--layer-on-acrylic); color: var(--color-foreground); }
+    .outliner-item.active { background: var(--layer-fill-selected); color: var(--color-brand); }
+    .viewport {
+      flex: 1; position: relative; background: #141414; min-width: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    .inspector {
+      width: 360px; flex-shrink: 0; display: flex; flex-direction: column;
+      background: var(--acrylic-default); border-left: 1px solid var(--layer-stroke); overflow: auto;
+    }
+    .inspector-header {
+      height: 40px; display: flex; align-items: center; padding: 0 16px;
+      border-bottom: 1px solid var(--layer-stroke); font-weight: 600; font-size: 13px; flex-shrink: 0;
+    }
+    .inspector-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .dock {
+      height: 200px; flex-shrink: 0; display: flex; flex-direction: column;
+      border-top: 1px solid var(--layer-stroke); background: var(--mica-alt);
+    }
+    .dock-tabs {
+      height: 36px; display: flex; align-items: center; gap: 2px; padding: 0 8px;
+      border-bottom: 1px solid var(--layer-stroke); flex-shrink: 0;
+    }
+    .dock-tab {
+      border: none; background: transparent; color: var(--color-foreground-secondary);
+      padding: 6px 12px; border-radius: var(--radius-control); font-size: 12px; cursor: pointer;
+    }
+    .dock-tab.active { background: var(--color-brand-bg-subtle); color: var(--color-brand); }
+    .dock-body { flex: 1; overflow: auto; padding: 12px; }
+    .chip {
+      padding: 2px 8px; border-radius: var(--radius-control);
+      background: var(--layer-on-acrylic); border: 1px solid var(--layer-stroke);
+      font-size: 12px; color: var(--color-foreground-secondary);
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
+      border-radius: var(--radius-control); border: 1px solid transparent; font-size: 13px; cursor: pointer;
+    }
+    .btn-primary { background: var(--color-brand); color: #fff; }
+    .btn-secondary { background: var(--layer-fill-default); color: var(--color-foreground); border-color: var(--layer-stroke); }
+    .queue-row {
+      display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
+      border-radius: var(--radius-control); background: var(--layer-fill-default);
+      border: 1px solid var(--layer-stroke); margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame-tabs">
+    <button class="active" data-frame="launcher">1 · Launcher</button>
+    <button data-frame="loading">2 · Loading</button>
+    <button data-frame="editor">3 · Editor</button>
+  </div>
+
+  <!-- Frame 1: Launcher -->
+  <div id="launcher" class="frame active tf-mica">
+    <header class="launcher-topbar">
+      <div class="launcher-brand">
+        <div class="logo">TF</div>
+        <span class="tf-subtitle">Taichi-Flow</span>
+        <span class="chip">启动器</span>
+      </div>
+      <button class="btn btn-secondary">⚙ 设置</button>
+    </header>
+    <div class="launcher-body">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end">
+        <div>
+          <h1 class="tf-title" style="font-size:28px;margin-bottom:8px">项目</h1>
+          <p class="tf-caption">选择或创建项目，启动后进入一体化编辑器。</p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary">+ 新建项目</button>
+          <button class="btn btn-secondary">打开本地项目</button>
+        </div>
+      </div>
+      <div class="project-grid">
+        <div class="project-card">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+            <strong>三峡库区洪水演进</strong>
+            <span class="chip" style="color:var(--color-success);border-color:var(--color-success)">最近</span>
+          </div>
+          <div class="tf-caption" style="margin-bottom:12px">D:\Projects\sanxia-flood</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+            <div><div class="tf-caption">方案</div><div>4</div></div>
+            <div><div class="tf-caption">输入版本</div><div>v3</div></div>
+            <div><div class="tf-caption">队列</div><div>空闲</div></div>
+          </div>
+        </div>
+        <div class="project-card">
+          <strong>山区暴雨径流</strong>
+          <div class="tf-caption" style="margin:8px 0 12px">D:\Projects\mountain-runoff</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+            <div><div class="tf-caption">方案</div><div>2</div></div>
+            <div><div class="tf-caption">输入版本</div><div>v1</div></div>
+            <div><div class="tf-caption">队列</div><div>空闲</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Frame 2: Loading -->
+  <div id="loading" class="frame tf-mica">
+    <div class="launch-screen">
+      <div class="logo" style="width:48px;height:48px;font-size:16px">TF</div>
+      <div style="text-align:center">
+        <h1 class="tf-title" style="font-size:24px;margin-bottom:4px">三峡库区洪水演进</h1>
+        <p class="tf-caption">D:\Projects\sanxia-flood</p>
+      </div>
+      <div class="launch-steps">
+        <div class="launch-step done">✓ 打开项目目录</div>
+        <div class="launch-step done">✓ 加载输入文件</div>
+        <div class="launch-step active">◌ 加载参数方案</div>
+        <div class="launch-step">○ 同步模拟队列</div>
+        <div class="launch-step">○ 准备编辑器</div>
+      </div>
+      <div class="progress-track"><div class="progress-fill"></div></div>
+      <p class="tf-caption">正在启动项目编辑器…</p>
+    </div>
+  </div>
+
+  <!-- Frame 3: Editor -->
+  <div id="editor" class="frame tf-mica">
+    <header class="editor-menubar">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0">
+        <button class="btn btn-secondary">← 返回启动器</button>
+        <div class="logo">TF</div>
+        <div style="min-width:0">
+          <div class="tf-subtitle" style="font-size:14px">三峡库区洪水演进</div>
+          <div class="tf-caption">D:\Projects\sanxia-flood</div>
+        </div>
+        <span class="chip">方案：基准工况</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="tf-caption">CPU 18% · GPU 12%</span>
+        <span class="chip" style="color:var(--color-success)">服务在线</span>
+      </div>
+    </header>
+    <div class="editor-body">
+      <aside class="outliner">
+        <div class="outliner-section">
+          <div class="tf-caption" style="padding:4px 8px;margin-bottom:4px">项目输入</div>
+          <button class="outliner-item">📁 输入文件 <span class="chip" style="margin-left:auto">4/4</span></button>
+          <button class="outliner-item">🗂 DEM</button>
+          <button class="outliner-item">🌧 降雨</button>
+        </div>
+        <div class="outliner-section" style="flex:1;overflow:auto">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;margin-bottom:4px">
+            <span class="tf-caption">方案</span>
+            <button class="btn btn-secondary" style="height:24px;padding:0 8px;font-size:11px">+</button>
+          </div>
+          <button class="outliner-item active">◆ 基准工况 <span class="chip" style="margin-left:auto;color:var(--color-success)">就绪</span></button>
+          <button class="outliner-item">◇ 高雨强工况</button>
+          <button class="outliner-item">◇ 低曼宁工况</button>
+        </div>
+      </aside>
+      <div class="viewport">
+        <div style="position:absolute;top:16px;left:16px;display:flex;gap:4px;padding:4px;border-radius:8px;background:var(--acrylic-default);border:1px solid var(--layer-stroke)">
+          <button class="btn btn-secondary" style="width:32px;padding:0">✋</button>
+          <button class="btn btn-secondary" style="width:32px;padding:0">＋</button>
+          <button class="btn btn-secondary" style="width:32px;padding:0">－</button>
+        </div>
+        <div style="position:absolute;bottom:16px;left:16px;padding:8px 12px;border-radius:8px;background:var(--acrylic-default);border:1px solid var(--layer-stroke);font-size:12px">
+          图例 · DEM · 边界 · 监测点
+        </div>
+      </div>
+      <aside class="inspector">
+        <div class="inspector-header">属性 · 基准工况</div>
+        <div class="inspector-body">
+          <div class="tf-layer" style="padding:12px">
+            <div class="tf-caption" style="margin-bottom:8px">参数变更</div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>曼宁系数</span><span class="tf-mono">0.035</span></div>
+            <div style="display:flex;justify-content:space-between"><span>雨强倍率</span><span class="tf-mono">1.2</span></div>
+          </div>
+          <div class="tf-layer" style="padding:12px">
+            <div class="tf-caption" style="margin-bottom:8px">运行控制</div>
+            <button class="btn btn-primary" style="width:100%">▶ 加入模拟队列</button>
+          </div>
+          <div class="tf-layer" style="padding:12px">
+            <div class="tf-caption" style="margin-bottom:8px">结果</div>
+            <div class="tf-caption">暂无结果族 · 完成后可在此查看与导出</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <div class="dock">
+      <div class="dock-tabs">
+        <button class="dock-tab active">队列</button>
+        <button class="dock-tab">终端</button>
+        <button class="dock-tab">导出</button>
+      </div>
+      <div class="dock-body">
+        <div class="queue-row">
+          <span>基准工况 · 等待中 · 位置 #1</span>
+          <span class="chip">queued</span>
+        </div>
+        <div class="queue-row">
+          <span>高雨强工况 · 已完成</span>
+          <span class="chip" style="color:var(--color-success)">completed</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.querySelectorAll(".frame-tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".frame-tabs button").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".frame").forEach((f) => f.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById(btn.dataset.frame).classList.add("active");
+      });
+    });
+  </script>
+</body>
+</html>

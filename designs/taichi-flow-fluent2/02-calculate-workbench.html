@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taichi-Flow — Calculate Workbench (Fluent 2)</title>
+  <link rel="stylesheet" href="_shared.css" />
+  <style>
+    .app { display: flex; height: 100vh; overflow: hidden; background: var(--mica-base); }
+    .nav-pane {
+      width: var(--nav-width); flex-shrink: 0; display: flex; flex-direction: column;
+      background: var(--mica-alt); border-right: 1px solid var(--layer-stroke);
+    }
+    .nav-brand {
+      height: var(--header-height); display: flex; align-items: center; gap: 10px;
+      padding: 0 12px; border-bottom: 1px solid var(--layer-stroke);
+    }
+    .logo {
+      width: 28px; height: 28px; border-radius: var(--radius-control);
+      background: var(--color-brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px;
+    }
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .topbar {
+      height: var(--header-height); display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-5); background: var(--mica-base); border-bottom: 1px solid var(--layer-stroke);
+    }
+    .workbench { flex: 1; display: flex; min-height: 0; }
+    .canvas {
+      flex: 1; position: relative; background: #141414;
+      border-right: 1px solid var(--layer-stroke);
+    }
+    .canvas-grid {
+      position: absolute; inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    .float-toolbar {
+      position: absolute; top: 16px; left: 16px;
+      display: flex; gap: 4px; padding: 4px;
+      border-radius: var(--radius-flyout);
+    }
+    .float-toolbar button {
+      width: 32px; height: 32px; border: none; border-radius: var(--radius-control);
+      background: transparent; color: var(--color-foreground-secondary); cursor: pointer;
+    }
+    .float-toolbar button:hover { background: var(--layer-on-acrylic); color: var(--color-foreground); }
+    .rail {
+      width: 360px; display: flex; flex-direction: column; min-height: 0;
+      background: var(--acrylic-default);
+      backdrop-filter: blur(var(--blur-acrylic));
+      border-left: 1px solid var(--layer-stroke);
+    }
+    .command-bar {
+      height: 48px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 16px; border-bottom: 1px solid var(--layer-stroke);
+    }
+    .modules { flex: 1; overflow: auto; }
+    .module-header {
+      width: 100%; height: 44px; display: flex; align-items: center; gap: 10px;
+      padding: 0 16px; border: none; border-bottom: 1px solid var(--layer-stroke);
+      background: transparent; color: var(--color-foreground); font-size: 14px; font-weight: 600;
+      cursor: pointer; text-align: left; position: relative;
+    }
+    .module-header:hover { background: var(--layer-on-acrylic); }
+    .module-header.active {
+      background: var(--layer-fill-selected); color: var(--color-foreground);
+    }
+    .module-header.active::before {
+      content: ""; position: absolute; left: 0; top: 10px; bottom: 10px;
+      width: 3px; background: var(--color-brand); border-radius: 0 2px 2px 0;
+    }
+    .module-body { padding: 16px; border-bottom: 1px solid var(--layer-stroke); }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; color: var(--color-foreground-secondary); margin-bottom: 4px; }
+    .field input, .field select {
+      width: 100%; height: 32px; padding: 0 10px;
+      border-radius: var(--radius-control); border: 1px solid var(--color-border-strong);
+      background: var(--layer-fill-alt); color: var(--color-foreground); font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app tf-animate-in">
+    <aside class="nav-pane">
+      <div class="nav-brand"><div class="logo">TF</div><span class="tf-subtitle">Taichi-Flow</span></div>
+      <nav style="flex:1;padding:8px 0">
+        <button class="nav-item">📁 项目</button>
+        <button class="nav-item">📋 方案</button>
+        <button class="nav-item active">🧮 计算</button>
+        <button class="nav-item">📜 队列</button>
+        <button class="nav-item">⬇ 导出</button>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="tf-row">
+          <span class="tf-subtitle">计算工作台</span>
+          <span class="tf-caption">方案 · 基线洪水 · rev-03</span>
+        </div>
+        <div class="tf-row">
+          <button class="tf-btn tf-btn-secondary">保存草稿</button>
+          <button class="tf-btn tf-btn-primary">提交运行</button>
+        </div>
+      </header>
+      <div class="workbench">
+        <div class="canvas">
+          <div class="canvas-grid"></div>
+          <div class="float-toolbar tf-acrylic">
+            <button title="平移">✥</button>
+            <button title="缩放">＋</button>
+            <button title="复位">⌂</button>
+            <button title="图层">▦</button>
+          </div>
+        </div>
+        <aside class="rail">
+          <div class="command-bar">
+            <span class="tf-subtitle" style="font-size:14px">模块</span>
+            <div class="tf-segmented">
+              <button class="active">全部</button>
+              <button>运行</button>
+            </div>
+          </div>
+          <div class="modules">
+            <button class="module-header active">输入数据 <span class="tf-caption" style="margin-left:auto">3 / 4 就绪</span></button>
+            <div class="module-body">
+              <div class="field"><label>地形 DEM</label><input value="dem_10m.tif" readonly /></div>
+              <div class="field"><label>边界条件</label><select><option>upstream_q.csv</option></select></div>
+              <button class="tf-btn tf-btn-secondary" style="width:100%">浏览本机文件…</button>
+            </div>
+            <button class="module-header">参数配置 <span class="tf-caption" style="margin-left:auto">默认值</span></button>
+            <button class="module-header">运行控制 <span class="tf-caption" style="margin-left:auto">空闲</span></button>
+            <button class="module-header">结果预览 <span class="tf-caption" style="margin-left:auto">—</span></button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

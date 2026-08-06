@@ -1,4 +1,4 @@
-/** Win11/Explorer-style filename ordinal + natural sort helpers. */
+/** Win11/Explorer-style filename helpers: full-string natural sort and trailing ordinal for rainfall binding. */
 
 export function filenameOrdinal(name: string): number | null {
   const matches = name.match(/\d+/g);
@@ -8,13 +8,6 @@ export function filenameOrdinal(name: string): number | null {
 }
 
 export function compareFilenamesNatural(a: string, b: string): number {
-  const leftOrdinal = filenameOrdinal(a);
-  const rightOrdinal = filenameOrdinal(b);
-  if (leftOrdinal != null && rightOrdinal != null && leftOrdinal !== rightOrdinal) {
-    return leftOrdinal - rightOrdinal;
-  }
-  if (leftOrdinal != null && rightOrdinal == null) return -1;
-  if (leftOrdinal == null && rightOrdinal != null) return 1;
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
