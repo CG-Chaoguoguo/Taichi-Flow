@@ -101,6 +101,28 @@ describe("InspectorPanel structured scenario flow", () => {
     expect(screen.queryByLabelText("图层数据")).not.toBeInTheDocument();
   });
 
+  it("keeps a single queue entry point and no queue-position explanation", () => {
+    render(
+      <InspectorPanel
+        scenarioId={scenario.scenario_id}
+        onFocusLayer={() => undefined}
+        draftPatch={{}}
+        draftBindings={[]}
+        dirty={false}
+        saving={false}
+        onDraftChange={() => undefined}
+        onBindingsChange={() => undefined}
+        onSave={async () => undefined}
+        onOpenRainfall={() => undefined}
+      />,
+    );
+    const runTab = document.querySelector<HTMLButtonElement>(".tf-inspector-tabs button:nth-child(3)");
+    expect(runTab).not.toBeNull();
+    fireEvent.click(runTab as HTMLButtonElement);
+    expect(document.querySelectorAll(".tf-link-button")).toHaveLength(1);
+    expect(screen.queryByText(/队列位置/)).not.toBeInTheDocument();
+  });
+
   it("shows explicit binding controls and validation instead of legacy paths", () => {
     render(
       <InspectorPanel

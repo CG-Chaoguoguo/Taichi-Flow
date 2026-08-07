@@ -136,6 +136,13 @@ def test_scheduler_serializes_each_project_and_runs_two_projects_concurrently(tm
         assert executor.max_global == 2
         assert max(executor.max_by_project.values()) == 1
 
+        blocked = client.patch(
+            f"/api/projects/{project_a['project_id']}/scenarios/{scenario_a1['scenario_id']}",
+            json={"name": "must remain locked while running"},
+        )
+        assert blocked.status_code == 409, blocked.text
+        assert blocked.json()["code"] == "scenario_run_active"
+
         executor.release.set()
         _wait_for(
             lambda: all(
@@ -145,11 +152,66 @@ def test_scheduler_serializes_each_project_and_runs_two_projects_concurrently(tm
             )
         )
 
-        immutable = client.patch(
+        editable = client.patch(
             f"/api/projects/{project_a['project_id']}/scenarios/{scenario_a1['scenario_id']}",
-            json={"name": "must not mutate"},
+            json={"name": "edited after completion"},
         )
-        assert immutable.status_code == 409
+        assert editable.status_code == 200, editable.text
+        edited = editable.json()
+        assert edited["name"] == "edited after completion"
+        assert edited["status"] == "draft"
+        assert edited["input_revision_id"] is None
+        assert edited["latest_simulation_id"]
+
+
+def test_editing_unclaimed_queue_item_updates_its_version_and_keeps_order(tmp_path: Path) -> None:
+    app = create_app(state_dir=tmp_path / "state", scheduler_enabled=False)
+    with TestClient(app) as client:
+        project = _create_project(client, tmp_path / "project")
+        first = _create_ready_scenario(client, project, "First")
+        second = _create_ready_scenario(client, project, "Second")
+        first_item = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": first["scenario_id"]},
+        ).json()
+        second_item = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": second["scenario_id"]},
+        ).json()
+
+        saved = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{first['scenario_id']}",
+            json={
+                "expected_version": first["version"],
+                "name": "First edited while waiting",
+                "parameter_patch": {"time.t_end": 7200},
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["status"] == "waiting"
+
+        items = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
+        first_after = next(item for item in items if item["queue_item_id"] == first_item["queue_item_id"])
+        second_after = next(item for item in items if item["queue_item_id"] == second_item["queue_item_id"])
+        assert first_after["status"] == "waiting"
+        assert first_after["scenario_version"] == saved.json()["version"]
+        assert first_after["input_revision_id"] is None
+        assert first_after["queue_order"] < second_after["queue_order"]
+
+        assert client.post(f"/api/projects/{project['project_id']}/queue/start", json={}).status_code == 200
+        queued_edit = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{first['scenario_id']}",
+            json={
+                "expected_version": saved.json()["version"],
+                "parameter_patch": {"time.t_end": 10800},
+            },
+        )
+        assert queued_edit.status_code == 200, queued_edit.text
+        queued_items = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
+        first_queued = next(item for item in queued_items if item["queue_item_id"] == first_item["queue_item_id"])
+        assert first_queued["status"] == "queued"
+        assert first_queued["scenario_version"] == queued_edit.json()["version"]
+        assert first_queued["queue_order"] < next(item for item in queued_items if item["queue_item_id"] == second_item["queue_item_id"])["queue_order"]
 
 
 def test_scheduler_persists_progress_only_at_output_boundaries(tmp_path: Path) -> None:

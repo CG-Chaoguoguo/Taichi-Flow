@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, Database, Play, Settings2, BarChart3, Save } from "lucide-react";
-import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { isActiveScenario, useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { isVisualizableInput } from "../../constants/visualizableInputs";
 import { VisualizationCanvas } from "./VisualizationCanvas";
 import { InputModule } from "./InputModule";
@@ -12,6 +12,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
 import type { Scenario } from "../../types";
+import { canEditScenario } from "../../utils/scenarioEditability";
 
 export type WorkspaceModule = "input" | "parameter" | "run" | "result";
 
@@ -35,6 +36,7 @@ export function CalculateWorkspace() {
   const { projectId, scenarioId } = useParams<{ projectId?: string; scenarioId?: string }>();
   const navigate = useNavigate();
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
+  const queue = useTaichiFlowStore((state) => state.queue);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
   const layerVisibility = useTaichiFlowStore((state) => state.layerVisibility);
@@ -55,12 +57,12 @@ export function CalculateWorkspace() {
   }, [inputFiles, layerVisibility, layerOrder]);
 
   const scenario = useMemo(
-    () => (scenarioId ? scenarios.find((item) => item.scenario_id === scenarioId) : undefined),
+    () => (scenarioId ? scenarios.find((item) => item.scenario_id === scenarioId && isActiveScenario(item)) : undefined),
     [scenarios, scenarioId],
   );
   const hasBoundScenario = Boolean(activeProject && scenario);
   const displayScenario = scenario ?? PREVIEW_SCENARIO;
-  const readOnly = !hasBoundScenario;
+  const readOnly = !hasBoundScenario || !canEditScenario(scenario, queue);
 
   useEffect(() => {
     setDraftPatch({ ...(scenario?.parameter_patch || {}) });
@@ -125,10 +127,7 @@ export function CalculateWorkspace() {
             icon={<Save size={14} />}
             disabled={
               readOnly ||
-              displayScenario.status === "completed" ||
-              displayScenario.status === "archived" ||
-              displayScenario.status === "running" ||
-              displayScenario.status === "queued"
+              displayScenario.status === "archived"
             }
             onClick={() => void handleSave()}
           >

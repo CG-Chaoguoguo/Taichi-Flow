@@ -37,15 +37,15 @@ describe("rainfall timeline", () => {
     expect(timeline).toMatchObject({ mode: "custom", period_count: 2, boundaries_s: [0, 1800, 5400] });
   });
 
-  it("deactivates truncated bindings and reactivates them when the timeline expands again", () => {
+  it("deactivates truncated bindings and does not resurrect them when the timeline expands again", () => {
     const shrunk = resizeRainfallTimeline(periods, bindings, regularTimeline(0, 7200, 3600));
     expect(shrunk.periods).toHaveLength(2);
     expect(shrunk.bindings.find((binding) => binding.ordinal === 3)?.active).toBe(false);
 
     const expanded = resizeRainfallTimeline(shrunk.periods, shrunk.bindings, regularTimeline(0, 10800, 3600));
     expect(expanded.periods).toHaveLength(3);
-    expect(expanded.periods[2]).toMatchObject({ source: "raster", asset_id: "rain-3" });
-    expect(expanded.bindings.find((binding) => binding.ordinal === 3)?.active).toBe(true);
+    expect(expanded.periods[2]).toMatchObject({ source: "raster", asset_id: null });
+    expect(expanded.bindings.find((binding) => binding.ordinal === 3)?.active).toBe(false);
   });
 
   it("applies a new timeline and explicitly synchronizes the simulation end", () => {

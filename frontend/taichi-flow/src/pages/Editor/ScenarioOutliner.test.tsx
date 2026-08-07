@@ -59,4 +59,37 @@ describe("ScenarioOutliner create dialog", () => {
     expect(screen.queryByText("项目输入")).not.toBeInTheDocument();
     expect(screen.getByText("方案")).toBeInTheDocument();
   });
+
+  it("opens the archive manager and restores a scenario", async () => {
+    const archived = {
+      scenario_id: "sc-archived",
+      project_id: "p1",
+      name: "历史方案",
+      input_revision_id: null,
+      parameter_template_id: "pt-bj-hxl-v1",
+      parameter_baseline: {},
+      parameter_patch: {},
+      effective_parameters: {},
+      input_bindings: [],
+      version: 1,
+      status: "archived" as const,
+      archived: true,
+      progress: 100,
+      latest_simulation_id: "sim-1",
+      result_family_count: 1,
+      file_count: 2,
+      created_at: "2026-08-02T00:00:00Z",
+      updated_at: "2026-08-02T00:00:00Z",
+    };
+    const restoreScenario = vi.fn(async () => ({ ...archived, status: "completed" as const, archived: false }));
+    const onSelectScenario = vi.fn();
+    useTaichiFlowStore.setState({ scenarios: [archived], restoreScenario });
+
+    render(<ScenarioOutliner onSelectScenario={onSelectScenario} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看归档方案（1）" }));
+    expect(screen.getByRole("dialog", { name: "归档方案" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "恢复" }));
+    await waitFor(() => expect(restoreScenario).toHaveBeenCalledWith("sc-archived"));
+    await waitFor(() => expect(onSelectScenario).toHaveBeenCalledWith("sc-archived"));
+  });
 });

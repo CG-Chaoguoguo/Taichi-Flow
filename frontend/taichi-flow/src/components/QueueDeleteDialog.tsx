@@ -46,7 +46,6 @@ export function QueueDeleteDialog({ open, preview, busy = false, onClose, onConf
             {preview.items.map((item) => (
               <li key={item.queue_item_id}>
                 <span className="tf-ellipsis">{item.scenario_name}</span>
-                <span className="tf-caption tf-text-secondary">#{item.position}</span>
               </li>
             ))}
           </ul>

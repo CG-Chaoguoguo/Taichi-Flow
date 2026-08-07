@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
-import { GripVertical, ListPlus, RotateCcw, Square, Trash2 } from "lucide-react";
+import { ListPlus, RotateCcw, Square, Trash2 } from "lucide-react";
 import { AssetSelectionToolbar } from "../../components/AssetSelectionToolbar";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
@@ -170,6 +170,7 @@ export function QueueDockPanel() {
         <QueueRow
           key={item.queue_item_id}
           item={item}
+          displayIndex={index + 1}
           selectionMode={selectionMode}
           selected={selectedIds.has(item.queue_item_id)}
           onSelectionClick={(event) => toggleSelected(item, index, event)}
@@ -181,6 +182,7 @@ export function QueueDockPanel() {
         <QueueRow
           key={item.queue_item_id}
           item={item}
+          displayIndex={running.length + index + 1}
           selectionMode={selectionMode}
           selected={selectedIds.has(item.queue_item_id)}
           canDrag={!selectionMode && !queueOrderLocked && item.status === "waiting"}
@@ -209,6 +211,7 @@ export function QueueDockPanel() {
         <QueueRow
           key={item.queue_item_id}
           item={item}
+          displayIndex={running.length + waiting.length + index + 1}
           selectionMode={selectionMode}
           selected={selectedIds.has(item.queue_item_id)}
           onSelectionClick={(event) => toggleSelected(item, running.length + waiting.length + index, event)}
@@ -230,6 +233,7 @@ export function QueueDockPanel() {
 
 function QueueRow({
   item,
+  displayIndex,
   selectionMode,
   selected,
   canDrag = false,
@@ -245,6 +249,7 @@ function QueueRow({
   onSelect,
 }: {
   item: QueueItem;
+  displayIndex: number;
   selectionMode: boolean;
   selected: boolean;
   canDrag?: boolean;
@@ -262,7 +267,7 @@ function QueueRow({
   const selectable = isSelectable(item);
   return (
     <div
-      className={`tf-dock-queue-row${isDragging ? " is-dragging" : ""}${isDropTarget ? " is-drop-target" : ""}${!selectable ? " is-locked" : ""}`}
+      className={`tf-dock-queue-row${canDrag ? " is-draggable" : ""}${isDragging ? " is-dragging" : ""}${isDropTarget ? " is-drop-target" : ""}${!selectable ? " is-locked" : ""}`}
       draggable={canDrag}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
@@ -282,11 +287,7 @@ function QueueRow({
           onClick={(event) => event.stopPropagation()}
           aria-label={`选择 ${item.scenario_name}`}
         />
-      ) : canDrag ? (
-        <span className="tf-drag-handle tf-dock-queue-drag-handle" aria-label="拖拽排序"><GripVertical size={16} /></span>
-      ) : (
-        <span className="tf-dock-queue-leading" aria-hidden="true" />
-      )}
+      ) : null}
       <button
         type="button"
         className="tf-dock-queue-main"
@@ -296,7 +297,7 @@ function QueueRow({
           else onSelect?.();
         }}
       >
-        <span className="tf-caption tf-text-tertiary">#{item.position}</span>
+        <span className="tf-caption tf-text-tertiary" aria-label={`队列序号 ${displayIndex}`}>{displayIndex}</span>
         <StatusBadge variant={item.status} dot />
         <span className="tf-body tf-ellipsis">{item.scenario_name}</span>
         {item.status === "running" ? (

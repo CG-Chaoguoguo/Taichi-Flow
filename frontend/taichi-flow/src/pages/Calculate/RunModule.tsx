@@ -26,7 +26,6 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
   const metrics = useTaichiFlowStore((state) => state.metrics);
   const enqueueScenario = useTaichiFlowStore((state) => state.enqueueScenario);
   const retryQueueItem = useTaichiFlowStore((state) => state.retryQueueItem);
-  const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const scenarioConfiguration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
@@ -37,16 +36,16 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
 
   useEffect(() => {
     if (readOnly) return;
-    if (scenario.latest_simulation_id && activeProject && ["starting", "running", "stopping", "completed", "failed", "stopped", "interrupted"].includes(scenario.status)) {
+    if (item?.simulation_id && activeProject && ["starting", "running", "stopping", "completed", "failed", "stopped", "interrupted"].includes(scenario.status)) {
       const interval = setInterval(() => {
-        void runApi.terminal(activeProject.project_id, scenario.latest_simulation_id as string)
+        void runApi.terminal(activeProject.project_id, item.simulation_id as string)
           .then((response) => setLogs(response.entries.slice(-200)))
           .catch(() => undefined);
       }, 1000);
-      void runApi.terminal(activeProject.project_id, scenario.latest_simulation_id).then((response) => setLogs(response.entries.slice(-200))).catch(() => undefined);
+      void runApi.terminal(activeProject.project_id, item.simulation_id).then((response) => setLogs(response.entries.slice(-200))).catch(() => undefined);
       return () => clearInterval(interval);
     }
-  }, [activeProject, readOnly, scenario.latest_simulation_id, scenario.status]);
+  }, [activeProject, item?.queue_item_id, item?.simulation_id, readOnly, scenario.status]);
 
   useEffect(() => {
     if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
@@ -87,6 +86,31 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
     );
   }
 
+  if (!item) {
+    return (
+      <div className="tf-module-body tf-stack tf-module-scroll">
+        <div className="tf-card">
+          <div className="tf-body tf-font-semibold">{scenario.name}</div>
+          <div className="tf-caption tf-text-secondary">当前方案不在模拟队列中</div>
+        </div>
+        <div className="tf-stack-md">
+          <h4 className="tf-subtitle">运行预检</h4>
+          <div className="tf-stack-sm">
+            <CheckItem ok={Boolean(scenarioConfiguration?.validation?.valid)} text="草稿输入已通过预检" />
+            <CheckItem ok={scenario.binding_state !== "runtime_snapshot" || Boolean(scenario.input_revision_id)} text="运行输入将在计算开始时冻结" />
+            <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
+          </div>
+          {!scenarioConfiguration?.validation?.valid ? (
+            <div className="tf-caption tf-text-secondary">请补齐输入绑定或参数校验项后再加入模拟队列。</div>
+          ) : null}
+          <Button icon={<ListPlus size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid}>
+            加入模拟队列
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="tf-module-body tf-stack tf-module-scroll">
       {/* 状态摘要 */}
@@ -97,12 +121,14 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
           </span>
           <StatusBadge variant={scenario.status} dot />
         </div>
-        <div className="tf-caption tf-text-secondary">
+        {item.status !== "waiting" ? (
+          <div className="tf-caption tf-text-secondary">
           {scenario.binding_state === "runtime_snapshot"
             ? `运行输入快照 ${scenario.input_revision_id || "已冻结"}`
             : "草稿输入绑定（开始计算时冻结）"}
           · {Object.keys(scenario.parameter_patch || {}).length} 项参数变更
-        </div>
+          </div>
+        ) : null}
       </div>
 
       {/* 预检 */}
@@ -124,23 +150,6 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
           </Button>
         </div>
       ) : null}
-
-      {/* 等待中 */}
-      {(scenario.status === "waiting" || scenario.status === "queued") && item && (item.status === "waiting" || item.status === "queued") && (
-        <div className="tf-stack-md">
-          <h4 className="tf-subtitle">队列位置</h4>
-          <div className="tf-display tf-text-brand">
-            #{item.queue_order ?? item.position}
-          </div>
-          <p className="tf-body tf-text-secondary">
-            {item.status === "waiting" ? "已加入待运行批次；请在底部队列点击“运行队列”。" : "当前批次已释放给调度器，排序已锁定。"}
-          </p>
-          <p className="tf-caption tf-text-warning">计算开始前输入仍可修改；开始后将冻结运行快照。</p>
-          <Button variant="secondary" icon={<List size={16} />} onClick={() => setDockTab("queue")}>
-            打开队列
-          </Button>
-        </div>
-      )}
 
       {/* 运行中 */}
       {scenario.status === "running" && item && (
