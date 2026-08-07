@@ -12,6 +12,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
+from api.services.edda_switch_registry import snapshot_config_payload
 from api.services.native_sidecar_loader import (
     find_precomputed_unsfin_artifacts,
     load_inflow_runtime_payload,
@@ -1076,6 +1077,10 @@ def build_reference_runtime_metadata(
             "num_zones": len(zone_ids),
             "zones": zones_cfg,
         },
+        "edda": snapshot_config_payload(
+            parsed.switch_snapshot,
+            extension_controls=parsed.extension_flags,
+        ),
         "native_inputs": {
             "enabled": True,
             "source_mode": "reference_config",
@@ -1108,6 +1113,7 @@ def build_reference_runtime_metadata(
         "period_source_map": parsed.period_source_map,
         "reference_case_activation": _reference_case_activation_snapshot(parsed, input_source_registry),
         "reference_output_expectations": parsed.reference_output_expectations,
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "sidecar_output_parity": sidecar_output_parity,
         "inputs": [
             _native_file_entry("reference_config", parsed.reference_config_file, "reference_config", "production-reachable", "parse.reference_config", consumed=True),
@@ -1212,6 +1218,7 @@ def build_reference_runtime_metadata(
         "input_source_registry": input_source_registry,
         "reference_case_activation": _reference_case_activation_snapshot(parsed, input_source_registry),
         "reference_output_expectations": parsed.reference_output_expectations,
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "sidecar_output_parity": sidecar_output_parity,
         "reference_config_sidecars": {
             family: native_files[family]["structure_summary"]
@@ -1231,6 +1238,7 @@ def build_reference_runtime_metadata(
         "helper_fallback_used": False,
         "reference_config_file": parsed.reference_config_file,
         "reference_config_audit": parsed.to_audit_dict(),
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "reference_output_expectations": parsed.reference_output_expectations,
         "sidecar_output_parity": sidecar_output_parity,
         "input_source_registry": input_source_registry,

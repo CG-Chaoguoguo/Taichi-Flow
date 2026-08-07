@@ -755,3 +755,123 @@ vidia-smi observed RTX 3080 Ti activity during the run.
 - production decision: public repository created and filtered Taichi-Flow source uploaded; virtual environments, simulation inputs/outputs, runtime state, build output, parity tools, and comparison scripts remain excluded
 - cleanup status: all task-owned git, gh, pytest, and npm processes exited; no simulation process was started
 - next usable action: clone or open `https://github.com/CG-Chaoguoguo/Taichi-Flow`
+
+## 2026-08-07T17:58:08.7910182+08:00 - EDDA canonical 45-switch registry tracer RED
+
+- phase name: canonical EDDA switch registry and immutable parser snapshot, RED
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_red.md`
+- compared case: `C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text\edda_in.txt`; no EDDA.exe or Fortran executable was run
+- metric/diff evidence: expected RED, `1 failed`; current parser exposed 43 entries and omitted `background_flux_offset`, `simulate_barrier`, and `save_max_solid_depth`, while mixing the later `save_hydrograph_cells` extension into the core dictionary
+- return code: `1` (expected, non-blocking TDD RED)
+- production decision: no production implementation change yet; proceed to the minimal source-backed registry/parser repair
+- cleanup status: pytest process exited; no simulation or child worker remains
+- next usable action: implement the versioned 45-switch registry and rebuild the parser snapshot from it
+
+## 2026-08-07T18:04:17.1282251+08:00 - EDDA canonical registry implementation RED 2
+
+- phase name: canonical EDDA switch registry implementation, syntax feedback
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_red_2.md`
+- compared case: registry/parser test collection; no numerical case or EDDA.exe run
+- metric/diff evidence: `1 error`; raw audit-path literal ended with a backslash and caused a collection-time `SyntaxError`
+- return code: `1` (blocking implementation RED)
+- production decision: implementation not accepted; fix the literal and rerun the same public-interface tracer
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: rerun `tests\test_edda_switch_registry.py`
+
+## 2026-08-07T18:05:15.3799570+08:00 - EDDA canonical 45-switch parser tracer GREEN
+
+- phase name: canonical EDDA switch registry and immutable parser snapshot, GREEN
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_green.md`
+- compared case: `C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text\edda_in.txt`; no EDDA.exe run
+- metric/diff evidence: `1 passed, 1 warning` in `2.70 s`; exact 45-entry source order, False preservation, three missing core values restored, hydrosave kept outside the core contract
+- return code: `0`
+- production decision: focused parser behavior accepted; broader parser/mapper regression remains pending
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: add registry completeness/immutability/dependency and mapper snapshot tests, then run the existing native-input suite
+
+## 2026-08-07T18:07:50.2590186+08:00 - Deep EDDA controls tracer RED
+
+- phase name: parser snapshot to `SimulationConfig.edda` and runtime metadata, RED
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py::test_reference_runtime_config_carries_the_same_snapshot_in_deep_edda_controls -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_deep_config_red.md`
+- compared case: exact BJ_HXL reference config mapped through `build_reference_runtime_metadata`; no executable case run
+- metric/diff evidence: expected RED, `1 failed, 1 warning` in `5.90 s`; `SimulationConfig` raised `AttributeError: no attribute edda`
+- return code: `1` (expected TDD RED)
+- production decision: authorize only the deep config/snapshot propagation seam; solver physics remain unchanged
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: implement `edda.run_controls`, `edda.output_controls`, and identical metadata snapshots
+
+## 2026-08-07T18:09:39.6201383+08:00 - Deep EDDA controls tracer GREEN
+
+- phase name: parser snapshot to `SimulationConfig.edda` and runtime metadata, GREEN
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py::test_reference_runtime_config_carries_the_same_snapshot_in_deep_edda_controls -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_deep_config_green.md`
+- compared case: exact BJ_HXL reference config mapped through the production mapper; no EDDA.exe run
+- metric/diff evidence: `1 passed, 1 warning` in `5.83 s`; identical 45-value snapshot present in deep config, effective config, runtime manifest, and provenance
+- return code: `0`
+- production decision: configuration propagation seam accepted; no solver physics changed
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: close structured Scenario and queue snapshot parity
+
+## 2026-08-07T18:10:50.8556951+08:00 - Canonical 45-switch registry contract GREEN
+
+- phase name: canonical registry completeness and dependency contract
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_edda_switch_registry.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_registry_contract_green.md`
+- compared case: exact BJ_HXL reference parser plus production metadata mapper; no EDDA.exe run
+- metric/diff evidence: `3 passed, 1 warning` in `5.96 s`; 45/45 ordered entries, 9/9 trace fields per entry, allowed status vocabulary and dependency references verified
+- return code: `0`
+- production decision: focused registry contract accepted; broader regression gate still pending
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: run existing native parser/mapper and catalog tests
+
+## 2026-08-07T18:12:23.7833029+08:00 - Native parser/mapper regression status migration RED
+
+- phase name: existing native input-chain regression after canonical status vocabulary
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_native_input_chain.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_native_chain_red.md`
+- compared case: native parser/mapper fixtures including BJ_HXL-style flags; no EDDA.exe run
+- metric/diff evidence: `1 failed, 13 passed, 1 warning` in `2.77 s`; sole failure was four deprecated status-label expectations, while parsing, mapping, source variants and output expectations passed
+- return code: `1`
+- production decision: update only status assertions to the mandated enum; no runtime behavior change required
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: rerun the complete native input-chain file
+
+## 2026-08-07T18:13:02.6937755+08:00 - Native parser/mapper regression GREEN
+
+- phase name: existing native input-chain regression after canonical registry integration
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_native_input_chain.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_native_chain_green.md`
+- compared case: native parser/mapper fixture suite; no EDDA.exe run
+- metric/diff evidence: `14 passed, 1 warning` in `2.79 s`
+- return code: `0`
+- production decision: native parser/mapper regression gate accepted
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: validate parameter catalog and runmode capability compatibility
+
+## 2026-08-07T18:13:43.7715009+08:00 - Parameter catalog compatibility RED
+
+- phase name: parameter catalog compatibility before registry-backed catalog integration
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_parameter_catalog.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_parameter_catalog_red.md`
+- compared case: static and runtime parameter catalog public interfaces; no EDDA.exe run
+- metric/diff evidence: `1 failed, 2 passed, 1 warning` in `2.43 s`; failing assertion requires every static entry editable although the current catalog already includes read-only entries and the approved contract requires them
+- return code: `1`
+- production decision: retain visible read-only controls; migrate the obsolete test during the catalog slice
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: inspect and replace the catalog source with the canonical 45-switch registry
+
+## 2026-08-07T18:15:00.7608859+08:00 - Runmode capability compatibility GREEN
+
+- phase name: legacy runmode capability compatibility after registry integration
+- command: `C:\Users\Administrator\EDDA-Taichi\.venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests\test_runmode_capabilities.py -q`
+- artifact path: `C:\Users\Administrator\EDDA-Taichi\artifacts\agent_runs\2026-08-07_17-57-51_edda_switch_backend_parity\01_registry\pytest_runmode_green.md`
+- compared case: capability API unit fixtures; no EDDA.exe run
+- metric/diff evidence: `2 passed, 1 warning` in `2.29 s`
+- return code: `0`
+- production decision: legacy capability aliases remain compatible
+- cleanup status: pytest process exited; no solver or child process remains
+- next usable action: complete registry-backed catalog and Scenario contract

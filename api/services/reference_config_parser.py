@@ -7,6 +7,11 @@ from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from api.services.edda_switch_registry import (
+    EDDA_SWITCH_REGISTRY,
+    EddaSwitchSnapshot,
+    build_switch_snapshot,
+)
 from api.services.native_sidecar_loader import parse_case_sidecar
 
 
@@ -108,6 +113,8 @@ class ReferenceConfigParseResult:
     zones: Dict[int, ZoneParamsParsed]
     file_inputs: Dict[str, NativeInputFileRef]
     flags: Dict[str, Any]
+    switch_snapshot: EddaSwitchSnapshot
+    extension_flags: Dict[str, Any]
     flag_closure: List[Dict[str, Any]]
     unsupported_flags: List[Dict[str, Any]]
     supported_fields: List[str]
@@ -138,6 +145,8 @@ class ReferenceConfigParseResult:
             "recognized_unsupported_fields": self.recognized_unsupported_fields,
             "unrecognized_fields": self.unrecognized_fields,
             "flags": self.flags,
+            "switch_snapshot": self.switch_snapshot.to_dict(),
+            "extension_flags": self.extension_flags,
             "flag_closure": self.flag_closure,
             "rainfall_mode": self.rainfall_mode,
             "rainfall_period_sources": self.rainfall_period_sources,
@@ -989,17 +998,19 @@ def _parse_optional_string(
 
 def _build_unsupported_flags(flags: Dict[str, Any]) -> List[Dict[str, Any]]:
     unsupported_flags: List[Dict[str, Any]] = []
-    for flag_name, spec in UNSUPPORTED_FLAG_SPECS.items():
-        value = flags.get(flag_name)
+    for spec in EDDA_SWITCH_REGISTRY:
+        value = flags.get(spec.key)
         if value is None:
+            continue
+        if spec.status in {"production_consumed", "config_fallback_consumed"}:
             continue
         unsupported_flags.append(
             {
-                "flag": flag_name,
+                "flag": spec.key,
                 "configured_value": value,
-                "current_status": spec["current_status"],
-                "blocked_reason": spec["blocked_reason"],
-                "status_basis": spec["status_basis"],
+                "current_status": spec.status,
+                "blocked_reason": spec.status_reason,
+                "status_basis": spec.fortran_runtime_consumer,
             }
         )
     return unsupported_flags
@@ -1007,22 +1018,22 @@ def _build_unsupported_flags(flags: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _build_flag_closure(flags: Dict[str, Any]) -> List[Dict[str, Any]]:
     closure: List[Dict[str, Any]] = []
-    for flag_name, spec in UNSUPPORTED_FLAG_SPECS.items():
-        value = flags.get(flag_name)
+    for spec in EDDA_SWITCH_REGISTRY:
+        value = flags.get(spec.key)
         if value is None:
             continue
         closure.append(
             {
-                "flag": flag_name,
-                "canonical_key": (
-                    f"flag.{flag_name}"
-                    if flag_name != "use_background_flux_offset"
-                    else "hydrology.use_background_flux_offset"
-                ),
+                "flag": spec.key,
+                "canonical_key": spec.taichi_config_path,
                 "configured_value": value,
-                "current_status": spec["current_status"],
-                "blocked_reason": spec["blocked_reason"],
-                "status_basis": spec["status_basis"],
+                "current_status": spec.status,
+                "blocked_reason": spec.status_reason,
+                "status_basis": spec.fortran_runtime_consumer,
+                "source_index": spec.source_index,
+                "consumption_stage": spec.consumption_stage,
+                "dependencies": list(spec.dependencies),
+                "affected_output_families": list(spec.affected_output_families),
             }
         )
     return closure
@@ -1401,6 +1412,14 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
             ],
             start=whole_process_section_start,
         ),
+        "simulate_barrier": _parse_optional_bool_any(
+            lines,
+            [
+                "Simulte barrier? Enter T (.true.) or F (.false.)",
+                "Simulate barrier? Enter T (.true.) or F (.false.)",
+            ],
+            start=whole_process_section_start,
+        ),
         "save_runoff_grids": _parse_optional_bool(
             lines,
             "Save grid files of runoff? Enter T (.true.) or F (.false.)",
@@ -1511,6 +1530,11 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
             "Save grid of total depth of flow depth and deposit depth? Enter T (.true.) or F (.false.)",
             start=whole_process_section_start,
         ),
+        "save_max_solid_depth": _parse_optional_bool(
+            lines,
+            "Save grid of maximum depth of solid material? Enter T (.true.) or F (.false.)",
+            start=whole_process_section_start,
+        ),
         "save_volumetric_sediment_concentration": _parse_optional_bool(
             lines,
             "Save grid of volumetric sediment concentration? Enter T (.true.) or F (.false.)",
@@ -1537,12 +1561,25 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
             start=whole_process_section_start,
         ),
     }
+    extension_flags = {
+        "save_hydrograph_cells": flags.pop("save_hydrograph_cells"),
+    }
+    flags["background_flux_offset"] = background_flux_offset
+    switch_snapshot = build_switch_snapshot(
+        flags,
+        source=str(reference_path.resolve()),
+    )
+    flags = dict(switch_snapshot.values)
+    all_flags = {
+        **flags,
+        **{key: value for key, value in extension_flags.items() if value is not None},
+    }
     flag_closure = _build_flag_closure(flags)
     unsupported_flags = _build_unsupported_flags(flags)
-    reference_output_expectations = _build_reference_output_expectations(flags)
+    reference_output_expectations = _build_reference_output_expectations(all_flags)
     _annotate_reference_case_activation(
         file_inputs,
-        flags=flags,
+        flags=all_flags,
         ltstar_raw=ltstar_raw,
         zmax=zmax,
         depth=depth,
@@ -1776,6 +1813,8 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         zones=zones,
         file_inputs=file_inputs,
         flags=flags,
+        switch_snapshot=switch_snapshot,
+        extension_flags=extension_flags,
         flag_closure=flag_closure,
         unsupported_flags=unsupported_flags,
         supported_fields=supported_fields,

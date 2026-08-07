@@ -334,6 +334,15 @@ class NativeInputConfig(BaseModel):
     files: Dict[str, NativeInputFileConfig] = Field(default_factory=dict, description="Resolved native input families and their production status")
 
 
+class EddaControlsConfig(BaseModel):
+    """Frozen effective EDDA switch controls carried into one Simulation Run."""
+
+    registry_version: str = Field("1.0.0", description="Canonical EDDA switch registry version")
+    run_controls: Dict[str, Any] = Field(default_factory=dict, description="User and process controls keyed by canonical switch name")
+    output_controls: Dict[str, Any] = Field(default_factory=dict, description="Legacy and whole-process output controls keyed by canonical switch name")
+    extension_controls: Dict[str, Any] = Field(default_factory=dict, description="Version-specific non-core controls such as later hydrosave extensions")
+
+
 class SimulationConfig(BaseModel):
     """Complete simulation configuration."""
     # Input files
@@ -369,6 +378,9 @@ class SimulationConfig(BaseModel):
 
     # Native/reference input-chain metadata
     native_inputs: Optional[NativeInputConfig] = Field(None, description="Formal S1 native input-chain descriptors and provenance")
+
+    # Original EDDA run/output controls
+    edda: EddaControlsConfig = Field(default_factory=EddaControlsConfig)
 
     @classmethod
     def from_yaml(cls, yaml_file: str) -> "SimulationConfig":
