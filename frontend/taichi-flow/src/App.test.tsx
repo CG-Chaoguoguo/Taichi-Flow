@@ -1,47 +1,32 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
-import { EditorRouteGuard } from "./App";
+import { ProjectRouteGuard } from "./App";
 import { useTaichiFlowStore } from "./stores/taichiFlowStore";
 
 function renderGuard(projectId = "project-1") {
   return render(
-    <MemoryRouter initialEntries={[`/editor/${projectId}/scenarios/scn-1`]}>
+    <MemoryRouter initialEntries={[`/projects/${projectId}/queue`]}>
       <Routes>
-        <Route path="/projects" element={<div>项目列表</div>} />
-        <Route path="/launch/:projectId" element={<div>启动页</div>} />
+        <Route path="projects" element={<div>项目列表</div>} />
         <Route
-          path="/editor/:projectId/scenarios/:scenarioId"
-          element={
-            <EditorRouteGuard>
-              <div>编辑器页面</div>
-            </EditorRouteGuard>
-          }
+          path="projects/:projectId/queue"
+          element={<ProjectRouteGuard><div>队列页面</div></ProjectRouteGuard>}
         />
       </Routes>
     </MemoryRouter>,
   );
 }
 
-describe("EditorRouteGuard", () => {
+describe("ProjectRouteGuard", () => {
   beforeEach(() => {
     useTaichiFlowStore.setState({ activeProject: null, activeProjectId: null });
   });
 
-  it("redirects to projects when no project context exists", async () => {
+  it("redirects a direct project URL when no project is active", async () => {
     renderGuard();
     expect(await screen.findByText("项目列表")).toBeInTheDocument();
-    expect(screen.queryByText("编辑器页面")).not.toBeInTheDocument();
-  });
-
-  it("redirects to launch when a persisted project id needs reopening", async () => {
-    useTaichiFlowStore.setState({
-      activeProject: null,
-      activeProjectId: "project-1",
-      fetchProjectList: async () => [],
-    });
-    renderGuard();
-    expect(await screen.findByText("启动页")).toBeInTheDocument();
+    expect(screen.queryByText("队列页面")).not.toBeInTheDocument();
   });
 
   it("allows the matching active project", () => {
@@ -57,6 +42,6 @@ describe("EditorRouteGuard", () => {
       activeProjectId: "project-1",
     });
     renderGuard();
-    expect(screen.getByText("编辑器页面")).toBeInTheDocument();
+    expect(screen.getByText("队列页面")).toBeInTheDocument();
   });
 });

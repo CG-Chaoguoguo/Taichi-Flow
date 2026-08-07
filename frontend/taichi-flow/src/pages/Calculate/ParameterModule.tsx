@@ -8,7 +8,6 @@ import { ParameterGroupSection } from "../../components/ParameterGroupSection";
 import { deriveRainfallTimeline, regularTimeline, resizeRainfallTimeline } from "../../rainfallTimeline";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import type { InputBinding, ParameterCatalogEntry, ParameterImportPreview, RainfallPeriod, RainfallTimeline, Scenario, ValidationIssue, ValidationState } from "../../types";
-import { hasHistoricalSnapshot } from "../../utils/scenarioEditability";
 
 const EMPTY_VALIDATION_ISSUES: ValidationIssue[] = [];
 
@@ -110,7 +109,7 @@ export function ParameterModule({
     });
   }, [catalog, search]);
 
-  const canEdit = !readOnly;
+  const canEdit = !readOnly && (scenario.status === "draft" || scenario.status === "ready");
   const groups = useMemo(() => {
     const grouped = new Map<string, ParameterCatalogEntry[]>();
     for (const entry of entries) {
@@ -168,26 +167,26 @@ export function ParameterModule({
     onDraftChange({ ...draftPatch, [entry.key]: value });
   };
 
-  const confirmEndTime = () => {
+  const confirmEndTime = (mode: "sync" | "simulation-only") => {
     if (pendingEndTime == null) return;
-    if (!reconciledTimeline.value) return;
-    const resized = resizeRainfallTimeline(periods, draftBindings, reconciledTimeline.value);
+    if (mode === "sync") {
+      if (!reconciledTimeline.value) return;
+      const resized = resizeRainfallTimeline(periods, draftBindings, reconciledTimeline.value);
+      onDraftChange({
+        ...draftPatch,
+        "time.t_end": pendingEndTime,
+        "rainfall.timeline": reconciledTimeline.value,
+        "rainfall.periods": resized.periods,
+      });
+      onBindingsChange(resized.bindings);
+      setPendingEndTime(null);
+      return;
+    }
     onDraftChange({
       ...draftPatch,
       "time.t_end": pendingEndTime,
-      "rainfall.timeline": reconciledTimeline.value,
-      "rainfall.periods": resized.periods,
     });
-    onBindingsChange(resized.bindings);
     setPendingEndTime(null);
-  };
-
-  const resetAllOverrides = () => {
-    if (!canEdit) return;
-    onDraftChange({});
-    // Rainfall raster rows are template structure; reset only removes their
-    // asset bindings and deliberately leaves DEM/terrain/soil bindings intact.
-    onBindingsChange(draftBindings.filter((binding) => binding.role !== "rainfall-period"));
   };
 
   const previewImport = async (file: File) => {
@@ -226,9 +225,8 @@ export function ParameterModule({
         <input ref={importInput} hidden type="file" accept=".txt,.in" onChange={(event) => { const file = event.target.files?.[0]; if (file) void previewImport(file); event.target.value = ""; }} />
         <Button size="small" icon={<Upload size={14} />} disabled={!canEdit || importing} onClick={() => importInput.current?.click()}>导入参数</Button>
       </div>
-      <Button variant="ghost" size="small" icon={<RotateCcw size={14} />} disabled={!canEdit} onClick={resetAllOverrides}>重置全部覆盖</Button>
-      {!canEdit ? <div className="tf-caption tf-text-tertiary">当前计算正在进行，参数与输入绑定暂时锁定。</div> : null}
-      {canEdit && hasHistoricalSnapshot(scenario) ? <div className="tf-caption tf-text-tertiary">修改将形成新草稿，历史运行快照与结果不会改变。</div> : null}
+      <Button variant="ghost" size="small" icon={<RotateCcw size={14} />} disabled={!canEdit} onClick={() => onDraftChange({})}>重置全部覆盖</Button>
+      {!canEdit ? <div className="tf-caption tf-text-tertiary">当前方案不可变；请复制为新方案后再修改。</div> : null}
 
       {importPreview ? (
         <section className="tf-import-preview">
@@ -254,9 +252,10 @@ export function ParameterModule({
             <div className="tf-caption tf-text-danger">{reconciledTimeline.error}</div>
           )}
           <div className="tf-row tf-gap-2">
-            <Button size="small" disabled={!reconciledTimeline.value} onClick={() => confirmEndTime()}>
+            <Button size="small" disabled={!reconciledTimeline.value} onClick={() => confirmEndTime("sync")}>
               {pendingEndTime > Number(rainfallTimeline.end_s || 0) ? "扩展并重算时段" : "截断并重算时段"}
             </Button>
+            <Button variant="ghost" size="small" onClick={() => confirmEndTime("simulation-only")}>仅修改模拟终点</Button>
             <Button variant="ghost" size="small" onClick={() => setPendingEndTime(null)}>取消</Button>
           </div>
         </section>

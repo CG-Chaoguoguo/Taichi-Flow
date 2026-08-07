@@ -5,16 +5,12 @@ from api.services.parameter_catalog import (
 )
 
 
-def test_static_parameter_catalog_exposes_edda_aligned_fields():
+def test_static_parameter_catalog_exposes_only_editable_consumed_fields():
     catalog = build_static_parameter_catalog()
 
     assert catalog["status_counts"]["production_consumed"] >= 1
-    editable = [entry for entry in catalog["parameters"] if entry["editable"]]
-    assert editable
-    assert all(entry.get("label_zh") for entry in editable)
-    assert all(entry.get("abbrev") for entry in editable)
-    assert any(entry["abbrev"] == "manning" for entry in editable)
-    assert any(entry["abbrev"] == "simul" for entry in editable)
+    assert all(entry["editable"] for entry in catalog["parameters"])
+    assert {entry["runtime_status"] for entry in catalog["parameters"]} == {"production_consumed"}
 
 
 def test_parameter_catalog_classifies_consumed_fallback_and_unsupported():

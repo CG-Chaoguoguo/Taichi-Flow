@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taichi-Flow — Shell + Projects (Glass Depth)</title>
+  <link rel="stylesheet" href="_shared.css" />
+  <style>
+    .app { display: flex; height: 100vh; overflow: hidden; }
+    .sidebar {
+      width: var(--sidebar-width); flex-shrink: 0;
+      display: flex; flex-direction: column;
+      border-right: 1px solid var(--glass-border);
+    }
+    .sidebar-brand {
+      height: 56px; display: flex; align-items: center; gap: 10px;
+      padding: 0 14px; border-bottom: 1px solid var(--glass-border);
+    }
+    .logo {
+      width: 32px; height: 32px; border-radius: var(--radius-medium);
+      background: linear-gradient(135deg, var(--color-brand), #9aa4ff);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 11px; color: #fff;
+      box-shadow: 0 4px 16px var(--color-brand-glow);
+    }
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .topbar {
+      height: 56px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--space-5); border-bottom: 1px solid var(--glass-border);
+    }
+    .status-pill {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: var(--radius-medium);
+      font-size: 12px; background: var(--color-success-bg); color: var(--color-success);
+      border: 1px solid rgba(16,185,129,0.25);
+    }
+    .content { flex: 1; overflow: auto; padding: var(--space-page); }
+    .page-header { margin-bottom: var(--space-6); }
+    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-section); margin-bottom: var(--space-6); }
+    .metric { font-size: 28px; font-weight: 600; letter-spacing: -0.5px; }
+    .chip {
+      padding: 2px 8px; border-radius: var(--radius-small);
+      background: var(--glass-bg-subtle); border: 1px solid var(--glass-border);
+      font-size: 12px; color: var(--color-foreground-secondary);
+    }
+  </style>
+</head>
+<body>
+  <div class="app tf-animate-in">
+    <aside class="sidebar tf-glass">
+      <div class="sidebar-brand">
+        <div class="logo">TF</div>
+        <span class="tf-subtitle">Taichi-Flow</span>
+      </div>
+      <nav style="flex:1;padding:8px 0;display:flex;flex-direction:column;gap:2px">
+        <button class="nav-item active">📁 项目</button>
+        <button class="nav-item">📋 方案</button>
+        <button class="nav-item">🧮 计算</button>
+        <button class="nav-item">📜 队列</button>
+        <button class="nav-item">⬇ 导出</button>
+      </nav>
+      <div style="border-top:1px solid var(--glass-border);padding:8px 0">
+        <button class="nav-item">⚙ 设置</button>
+        <button class="nav-item">◀ 收起侧栏</button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar tf-glass">
+        <div class="tf-row" style="min-width:0;flex:1">
+          <span class="tf-subtitle">三峡库区洪水演进</span>
+          <span class="tf-caption" style="color:var(--color-foreground-tertiary)">D:\Projects\sanxia-flood</span>
+          <span class="chip">输入版本由当前场景修订决定</span>
+        </div>
+        <div class="tf-row">
+          <span class="tf-caption" style="color:var(--color-foreground-secondary)">CPU 12% · GPU 4%</span>
+          <div class="status-pill"><span class="badge-dot" style="background:var(--color-success)"></span>服务在线</div>
+          <span class="tf-caption" style="color:var(--color-foreground-tertiary)">22:45:08</span>
+        </div>
+      </header>
+
+      <main class="content">
+        <div class="page-header tf-stack" style="gap:8px">
+          <h1 class="tf-title">项目概览</h1>
+          <p class="tf-caption" style="color:var(--color-foreground-secondary)">管理输入文件、发布修订并进入方案工作流</p>
+        </div>
+
+        <div class="card-grid">
+          <div class="tf-panel">
+            <p class="tf-caption" style="color:var(--color-foreground-tertiary);margin-bottom:8px">输入文件</p>
+            <p class="metric">8</p>
+            <p class="tf-caption" style="color:var(--color-success);margin-top:4px">6 就绪</p>
+          </div>
+          <div class="tf-panel">
+            <p class="tf-caption" style="color:var(--color-foreground-tertiary);margin-bottom:8px">活跃方案</p>
+            <p class="metric">3</p>
+            <p class="tf-caption" style="color:var(--color-foreground-secondary);margin-top:4px">1 运行中</p>
+          </div>
+        </div>
+
+        <div class="tf-panel tf-elevated">
+          <div class="tf-row" style="justify-content:space-between;margin-bottom:var(--space-4)">
+            <h2 class="tf-subtitle">输入管理</h2>
+            <div class="tf-row">
+              <button class="btn btn-secondary">从本机路径导入</button>
+              <button class="btn btn-primary">发布修订</button>
+            </div>
+          </div>
+          <table class="data">
+            <thead>
+              <tr><th>文件名</th><th>族</th><th>状态</th><th>大小</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="tf-body">dem_30m.tif</td>
+                <td><span class="chip">dem</span></td>
+                <td><span class="badge"><span class="badge-dot" style="background:var(--color-success)"></span>就绪</span></td>
+                <td class="tf-caption" style="color:var(--color-foreground-tertiary)">128 MB</td>
+                <td><button class="btn btn-ghost" style="height:28px;padding:0 10px;font-size:12px">查看</button></td>
+              </tr>
+              <tr>
+                <td class="tf-body">boundary.shp</td>
+                <td><span class="chip">boundary</span></td>
+                <td><span class="badge"><span class="badge-dot" style="background:var(--color-warning)"></span>处理中</span></td>
+                <td class="tf-caption" style="color:var(--color-foreground-tertiary)">4.2 MB</td>
+                <td><button class="btn btn-ghost" style="height:28px;padding:0 10px;font-size:12px">查看</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

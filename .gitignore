@@ -52,24 +52,3 @@ tests/comparison/
 tests/benchmark.py
 tests/run_all_tests.py
 tools/
-
-# Local agent evidence, generated design previews, and retired handoff material
-agentlog.md
-frontend/taichi-flow/AGENTS.md
-designs/
-docs/backend_alignment_matrix.md
-docs/backend_repair_roadmap.md
-docs/context_snapshot_*.md
-docs/current_alignment_status.md
-docs/current_development_issues.md
-docs/current_development_status.md
-docs/github_workflow.md
-docs/native_input_chain_status.md
-docs/reference_config_production_chain_audit.md
-docs/runtime_input_manifest_spec.md
-
-# One-off local acceptance helpers and their unpublished raster inputs
-scripts/seed_bj_hxl_project.py
-tests/data/
-tests/test_2h_rainfall.py
-tests/test_physics.py

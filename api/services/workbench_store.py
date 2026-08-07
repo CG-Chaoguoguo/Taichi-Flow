@@ -14,11 +14,10 @@ from uuid import uuid4
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 6
 
 
 class WorkbenchError(Exception):
@@ -270,7 +269,6 @@ class ProjectDatabase:
                     scenario_version INTEGER,
                     input_revision_id TEXT REFERENCES input_revisions(revision_id),
                     position INTEGER NOT NULL,
-                    queue_order INTEGER,
                     status TEXT NOT NULL,
                     simulation_id TEXT REFERENCES simulation_runs(simulation_id),
                     retry_of TEXT REFERENCES queue_items(queue_item_id),
@@ -279,11 +277,8 @@ class ProjectDatabase:
                     finished_at TEXT,
                     progress REAL NOT NULL DEFAULT 0,
                     summary TEXT NOT NULL,
-                    cancel_reason TEXT,
-                    deleted_at TEXT
+                    cancel_reason TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_queue_items_order
-                    ON queue_items(status, queue_order, enqueued_at, queue_item_id);
                 CREATE TABLE IF NOT EXISTS result_families (
                     family_id TEXT PRIMARY KEY,
                     simulation_id TEXT NOT NULL REFERENCES simulation_runs(simulation_id),
@@ -683,58 +678,9 @@ class ProjectDatabase:
                 );
                 """
             )
-        if version < 7:
-            # Queue position is historical (the public #N identifier); the
-            # mutable queue_order is the only ordering key used by the
-            # scheduler-facing queue.  Existing records which were queued but
-            # never claimed must not auto-start after this migration.
-            queue_columns = {
-                str(column["name"])
-                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
-            }
-            if "queue_order" not in queue_columns:
-                connection.execute("ALTER TABLE queue_items ADD COLUMN queue_order INTEGER")
-            if "deleted_at" not in queue_columns:
-                connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
-            connection.execute(
-                "UPDATE queue_items SET queue_order=position WHERE queue_order IS NULL"
-            )
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET status='waiting', summary=CASE
-                    WHEN summary IS NULL OR summary='' OR summary='等待调度'
-                    THEN '待运行' ELSE summary END
-                WHERE status='queued' AND simulation_id IS NULL
-                """
-            )
-            waiting_rows = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
-            ).fetchall()
-            for order, row in enumerate(waiting_rows, start=1):
-                connection.execute(
-                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                    (order, row["queue_item_id"]),
-                )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_queue_items_order ON queue_items(status, queue_order, enqueued_at, queue_item_id)"
-            )
         from api.services.parameter_templates import builtin_parameter_templates
 
-        templates = builtin_parameter_templates()
-        existing_template_ids = {
-            str(row["template_id"])
-            for row in connection.execute(
-                "SELECT template_id FROM parameter_templates WHERE source_kind='bundled_case'"
-            ).fetchall()
-        }
-        for template in templates:
-            if template["template_id"] in existing_template_ids:
-                continue
+        for template in builtin_parameter_templates():
             connection.execute(
                 """
                 INSERT OR IGNORE INTO parameter_templates(
@@ -754,11 +700,10 @@ class ProjectDatabase:
                     utc_now(),
                 ),
             )
-        if version < SCHEMA_VERSION:
-            connection.execute(
-                "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+        connection.execute(
+            "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
 
     def metadata(self) -> Optional[Dict[str, Any]]:
         if not self.database_path.exists():
@@ -1005,8 +950,6 @@ class WorkbenchStore:
         stream: BinaryIO,
     ) -> Dict[str, Any]:
         """Confirm a path-free parameter import without touching input bindings."""
-        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION
-
         preview = self.preview_parameter_import(
             project_id,
             scenario_id,
@@ -1014,7 +957,7 @@ class WorkbenchStore:
             stream=stream,
         )
         source_hash = str(preview["source_hash"])
-        template_id = f"pt-import-{source_hash[:16]}-params-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
+        template_id = f"pt-import-{source_hash[:16]}-params"
         values = dict(preview["values"])
         now = utc_now()
         database = self.project_database(project_id)
@@ -1028,11 +971,10 @@ class WorkbenchStore:
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, ?, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
+                ) VALUES(?, 1, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
-                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported parameters {source_hash[:8]}",
                     "Path-free parameter import; all legacy file references were intentionally ignored.",
                     source_hash,
@@ -1130,7 +1072,7 @@ class WorkbenchStore:
     ) -> Dict[str, Any]:
         """Collect confirmed legacy files and replace path coupling with semantic bindings."""
         from api.services.legacy_migration import build_legacy_migration_plan
-        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION, normalized_parameter_values
+        from api.services.parameter_templates import normalized_parameter_values
 
         scenario, config_item, parsed = self._legacy_scenario_config(project_id, scenario_id)
         current_version = int(scenario["version"] or 1)
@@ -1170,7 +1112,7 @@ class WorkbenchStore:
             )
 
         values = normalized_parameter_values(parsed)
-        template_id = f"pt-import-{source_hash[:16]}-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
+        template_id = f"pt-import-{source_hash[:16]}"
         database = self.project_database(project_id)
         now = utc_now()
         provenance = {
@@ -1183,11 +1125,10 @@ class WorkbenchStore:
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, ?, ?, ?, 'legacy_migration', ?, ?, ?, ?)
+                ) VALUES(?, 1, ?, ?, 'legacy_migration', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
-                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported edda_in {source_hash[:8]}",
                     "Path-free parameter template produced by the explicit legacy migration wizard.",
                     source_hash,
@@ -1543,9 +1484,7 @@ class WorkbenchStore:
             SELECT b.asset_id, COUNT(DISTINCT q.queue_item_id) AS count
             FROM scenario_draft_bindings b
             JOIN queue_items q ON q.scenario_id=b.scenario_id
-            WHERE b.asset_id IN ({placeholders})
-              AND q.deleted_at IS NULL
-              AND q.status IN ('waiting', 'queued')
+            WHERE b.asset_id IN ({placeholders}) AND q.status='queued'
             GROUP BY b.asset_id
             """,
             tuple(normalized),
@@ -1604,9 +1543,7 @@ class WorkbenchStore:
             SELECT DISTINCT q.queue_item_id, q.scenario_id
             FROM queue_items q
             JOIN scenario_draft_bindings b ON b.scenario_id=q.scenario_id
-            WHERE q.deleted_at IS NULL
-              AND q.status IN ('waiting', 'queued')
-              AND b.asset_id IN ({placeholders})
+            WHERE q.status='queued' AND b.asset_id IN ({placeholders})
             ORDER BY q.queue_item_id
             """,
             tuple(normalized),
@@ -1716,9 +1653,7 @@ class WorkbenchStore:
                     UPDATE queue_items
                     SET status='cancelled', finished_at=?, summary='Draft input deleted; queue item cancelled.',
                         cancel_reason='asset_deleted'
-                    WHERE queue_item_id IN ({queue_placeholders})
-                      AND status IN ('waiting', 'queued')
-                      AND deleted_at IS NULL
+                    WHERE queue_item_id IN ({queue_placeholders}) AND status='queued'
                     """,
                     (now, *impact["cancelled_queue_item_ids"]),
                 )
@@ -1733,7 +1668,7 @@ class WorkbenchStore:
                     UPDATE scenarios
                     SET status='draft', version=version+1, updated_at=?
                     WHERE scenario_id IN ({scenario_placeholders})
-                      AND archived=0 AND status IN ('draft', 'ready', 'queued', 'waiting')
+                      AND archived=0 AND status IN ('draft', 'ready', 'queued')
                     """,
                     (now, *impact["affected_scenario_ids"]),
                 )
@@ -2613,7 +2548,6 @@ class WorkbenchStore:
             "binding_state": binding_state,
             "version": int(data.get("version") or 1),
             "status": data["status"],
-            "archived": bool(data.get("archived")),
             "progress": float(progress_row["progress"]) if progress_row else 0.0,
             "latest_simulation_id": data.get("latest_simulation_id"),
             "result_family_count": int(family_count),
@@ -2887,6 +2821,9 @@ class WorkbenchStore:
             row = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not row:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
+            history_count = connection.execute(
+                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0]
             active_queue_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM queue_items
@@ -2894,17 +2831,10 @@ class WorkbenchStore:
                 """,
                 (scenario_id,),
             ).fetchone()[0]
-            active_simulation_count = connection.execute(
-                """
-                SELECT COUNT(*) FROM simulation_runs
-                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
-                """,
-                (scenario_id,),
-            ).fetchone()[0]
-            if row["archived"] or active_queue_count or active_simulation_count:
+            if row["archived"] or history_count or active_queue_count:
                 raise WorkbenchError(
-                    "scenario_run_active",
-                    "方案正在计算中，计算结束后才能修改参数或输入绑定。",
+                    "scenario_immutable",
+                    "Scenarios with started run history are immutable; duplicate one to edit it.",
                     status_code=409,
                 )
             current_version = int(row["version"] or 1)
@@ -2924,13 +2854,9 @@ class WorkbenchStore:
             baseline = self._parameter_template_values(connection, next_template_id)
             effective_parameters = merge_parameter_values(baseline, patch)
 
-            draft_row_count = connection.execute(
-                "SELECT COUNT(*) FROM scenario_draft_bindings WHERE scenario_id=?",
-                (scenario_id,),
-            ).fetchone()[0]
             current_draft = self._bindings_for_draft_connection(connection, scenario_id)
             legacy_bindings = self._bindings_for_revision_connection(connection, row["input_revision_id"])
-            current_bindings = current_draft if draft_row_count or not row["input_revision_id"] else legacy_bindings
+            current_bindings = current_draft or legacy_bindings
             if input_bindings is not None:
                 next_bindings, _ = self._resolve_binding_assets(connection, input_bindings)
             elif input_revision_id:
@@ -2955,16 +2881,6 @@ class WorkbenchStore:
                 or row["parameter_template_id"] != next_template_id
                 or row["input_revision_id"] is not None
             )
-            unclaimed_queue_rows = connection.execute(
-                """
-                SELECT queue_item_id, status
-                FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('waiting', 'queued')
-                ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, queue_order, enqueued_at, queue_item_id
-                """,
-                (scenario_id,),
-            ).fetchall()
-            next_scenario_status = str(unclaimed_queue_rows[0]["status"]) if unclaimed_queue_rows else "draft"
             self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
             now = utc_now()
             next_version = current_version + 1
@@ -2973,7 +2889,7 @@ class WorkbenchStore:
                 UPDATE scenarios
                 SET name=?, input_revision_id=NULL, parameter_template_id=?,
                     parameter_patch_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
-                    status=?, updated_at=?
+                    status='draft', updated_at=?
                 WHERE scenario_id=?
                 """,
                 (
@@ -2982,7 +2898,6 @@ class WorkbenchStore:
                     json.dumps(patch, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
-                    next_scenario_status,
                     now,
                     scenario_id,
                 ),
@@ -2991,11 +2906,11 @@ class WorkbenchStore:
                 connection.execute(
                     """
                     UPDATE queue_items
-                    SET scenario_version=?, input_revision_id=NULL, summary='配置已更新，待运行。',
-                        retry_of=NULL
-                    WHERE scenario_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
+                    SET status='cancelled', finished_at=?, summary='Draft changed; queue item cancelled.',
+                        cancel_reason='draft_changed'
+                    WHERE scenario_id=? AND status='queued'
                     """,
-                    (next_version, scenario_id),
+                    (now, scenario_id),
                 )
         self.ensure_scenario_workspace(
             project_id,
@@ -3040,454 +2955,31 @@ class WorkbenchStore:
             expected_version=duplicate.get("version"),
         )
 
-    def preview_delete_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
-        """Describe whether a scenario can be removed or must be archived.
-
-        Soft-deleted queue rows still count as history, while only visible rows
-        block the action. This keeps result retention separate from membership.
-        """
+    def archive_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
         database = self.project_database(project_id)
         self._scenario_row(project_id, scenario_id)
         with database.connect() as connection:
-            visible_queue = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                ORDER BY position, enqueued_at, queue_item_id
-                """,
-                (scenario_id,),
-            ).fetchall()
-            active_simulations = connection.execute(
-                """
-                SELECT simulation_id FROM simulation_runs
-                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
-                ORDER BY created_at, simulation_id
-                """,
-                (scenario_id,),
-            ).fetchall()
-            active_queue = connection.execute(
-                """SELECT queue_item_id FROM queue_items
-                   WHERE scenario_id=? AND status IN ('starting', 'running', 'stopping')""",
-                (scenario_id,),
-            ).fetchall()
-            run_count = int(connection.execute(
-                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0])
-            result_family_count = int(connection.execute(
-                """
-                SELECT COUNT(*) FROM result_families
-                WHERE simulation_id IN (SELECT simulation_id FROM simulation_runs WHERE scenario_id=?)
-                """,
-                (scenario_id,),
-            ).fetchone()[0])
-            queue_reference_count = int(connection.execute(
-                "SELECT COUNT(*) FROM queue_items WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0])
-            output_count = int(connection.execute(
-                "SELECT COALESCE(SUM(output_count), 0) FROM simulation_runs WHERE scenario_id=?",
-                (scenario_id,),
-            ).fetchone()[0])
-            export_count = int(connection.execute(
-                "SELECT COUNT(*) FROM export_jobs WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0])
-            derived_reference_count = int(connection.execute(
-                """
-                SELECT COUNT(*) FROM scenarios
-                WHERE base_scenario_id=? AND scenario_id<>?
-                """,
-                (scenario_id, scenario_id),
-            ).fetchone()[0])
-        blocking_queue_item_ids = [str(row["queue_item_id"]) for row in visible_queue]
-        active_simulation_ids = [str(row["simulation_id"]) for row in active_simulations]
-        preserves_history = (
-            queue_reference_count > 0
-            or run_count > 0
-            or result_family_count > 0
-            or derived_reference_count > 0
-        )
-        can_archive = not blocking_queue_item_ids and not active_simulation_ids
-        # The permanent-delete capability intentionally ignores waiting,
-        # released-but-unclaimed and terminal rows.  Only active scheduler
-        # work or an active simulation can make the irreversible action unsafe.
-        can_permanently_delete = not active_queue and not active_simulation_ids
-        return {
-            "scenario_id": scenario_id,
-            "disposition": "archive" if preserves_history else "delete",
-            "can_remove": can_archive,
-            "can_archive": can_archive,
-            "can_permanently_delete": can_permanently_delete,
-            "blocking_queue_item_ids": blocking_queue_item_ids,
-            "active_simulation_ids": active_simulation_ids,
-            "run_count": run_count,
-            "result_family_count": result_family_count,
-            "queue_item_count": queue_reference_count,
-            "output_count": output_count,
-            "export_count": export_count,
-            "derived_scenario_count": derived_reference_count,
-            "preserves_history": preserves_history,
-        }
-
-    def archive_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT scenario_id FROM scenarios WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()
-            if not current:
-                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
-            visible_queue = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                ORDER BY position, enqueued_at, queue_item_id
-                """,
-                (scenario_id,),
-            ).fetchall()
-            if visible_queue:
-                raise WorkbenchError(
-                    "scenario_in_queue",
-                    "方案仍有队列记录，请先在底部队列移除。",
-                    status_code=409,
-                    details={"blocking_queue_item_ids": [str(row["queue_item_id"]) for row in visible_queue]},
-                )
-            active_runs = connection.execute(
-                """
-                SELECT simulation_id FROM simulation_runs
-                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
-                ORDER BY created_at, simulation_id
-                """,
-                (scenario_id,),
-            ).fetchall()
-            if active_runs:
-                raise WorkbenchError(
-                    "scenario_run_active",
-                    "方案仍有活动计算，无法归档。",
-                    status_code=409,
-                    details={"active_simulation_ids": [str(row["simulation_id"]) for row in active_runs]},
-                )
             connection.execute(
                 "UPDATE scenarios SET archived=1, status='archived', updated_at=? WHERE scenario_id=?",
-                (now, scenario_id),
+                (utc_now(), scenario_id),
             )
         return self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
 
-    def restore_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()
-            if not current:
-                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
-            if bool(current["archived"]):
-                connection.execute(
-                    "UPDATE scenarios SET archived=0, updated_at=? WHERE scenario_id=?",
-                    (now, scenario_id),
-                )
-                self._restore_scenario_status_connection(connection, scenario_id, now)
-        return self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
-
-    @staticmethod
-    def _scenario_delete_path_candidates(
-        database: ProjectDatabase,
-        scenario_id: str,
-        simulation_rows: list[sqlite3.Row],
-        export_rows: list[sqlite3.Row],
-    ) -> list[Path]:
-        """Return validated, project-owned paths that belong to a scenario.
-
-        The database stores paths produced by older runtime versions as well as
-        the current scenario workspace paths.  Resolve each path before moving
-        it so a malformed or symlinked record cannot escape the project/state
-        roots during an irreversible delete.
-        """
-        allowed_roots = (database.root, database.state_dir)
-        raw_paths: list[Path] = [database.scenario_dir(scenario_id)]
-        for row in simulation_rows:
-            simulation_id = str(row["simulation_id"])
-            raw_output = row["output_dir"]
-            if raw_output:
-                output_path = Path(str(raw_output)).expanduser()
-                raw_paths.append(output_path if output_path.is_absolute() else database.root / output_path)
-            # Older runs wrote directly below the project-level outputs dir.
-            raw_paths.append(database.output_dir / simulation_id)
-        for row in export_rows:
-            if row["archive_path"]:
-                archive_path = Path(str(row["archive_path"])).expanduser()
-                raw_paths.append(archive_path if archive_path.is_absolute() else database.root / archive_path)
-
-        resolved: list[Path] = []
-        for candidate in raw_paths:
-            path = candidate.resolve(strict=False)
-            if not any(path == root or root in path.parents for root in allowed_roots):
-                raise WorkbenchError(
-                    "scenario_path_invalid",
-                    "方案包含越界的输出或导出路径，已阻止永久删除。",
-                    status_code=409,
-                    details={"path": str(candidate)},
-                )
-            if path in {database.root, database.state_dir, database.output_dir, database.scenarios_dir}:
-                raise WorkbenchError(
-                    "scenario_path_invalid",
-                    "方案路径指向项目保护目录，已阻止永久删除。",
-                    status_code=409,
-                    details={"path": str(candidate)},
-                )
-            if path not in resolved:
-                resolved.append(path)
-
-        # If the scenario workspace contains an output directory, moving the
-        # workspace once is enough; do not attempt to move nested paths twice.
-        minimal: list[Path] = []
-        for path in sorted(resolved, key=lambda value: (len(value.parts), str(value))):
-            if any(parent == path or parent in path.parents for parent in minimal):
-                continue
-            minimal.append(path)
-        return minimal
-
-    @staticmethod
-    def _move_scenario_paths_to_quarantine(
-        paths: list[Path],
-        quarantine: Path,
-    ) -> list[tuple[Path, Path]]:
-        quarantine.mkdir(parents=True, exist_ok=True)
-        moved: list[tuple[Path, Path]] = []
-        try:
-            for index, source in enumerate(paths, start=1):
-                if not source.exists():
-                    continue
-                target = quarantine / f"{index:03d}_{source.name or 'path'}"
-                try:
-                    shutil.move(str(source), str(target))
-                except OSError as exc:
-                    raise WorkbenchError(
-                        "scenario_files_busy",
-                        "方案输出或导出文件当前被占用，无法永久删除。",
-                        status_code=409,
-                        details={"path": str(source), "error": str(exc)},
-                    ) from exc
-                moved.append((source, target))
-        except Exception:
-            for source, target in reversed(moved):
-                try:
-                    source.parent.mkdir(parents=True, exist_ok=True)
-                    if target.exists():
-                        shutil.move(str(target), str(source))
-                except OSError:
-                    # Preserve the original exception; the quarantine remains
-                    # for an operator to recover if Windows still holds a lock.
-                    pass
-            raise
-        return moved
-
-    @staticmethod
-    def _restore_scenario_paths_from_quarantine(moved: list[tuple[Path, Path]]) -> None:
-        for source, target in reversed(moved):
-            if not target.exists():
-                continue
-            source.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(target), str(source))
-
-    def permanently_delete_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
-        """Permanently remove one scenario and its private history.
-
-        Scheduler claims, queue mutations, and this operation all acquire the
-        same SQLite ``BEGIN IMMEDIATE`` lock.  Waiting/released/terminal queue
-        rows are purgeable; active work is rejected with a conflict.
-        """
-        database = self.project_database(project_id)
-        quarantine = database.staging_dir / f"scenario-delete-{uuid4().hex}"
-        moved: list[tuple[Path, Path]] = []
-        summary: Dict[str, Any] = {}
-        try:
-            with database.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                scenario = connection.execute(
-                    "SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)
-                ).fetchone()
-                if not scenario:
-                    raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
-                queue_rows = connection.execute(
-                    "SELECT * FROM queue_items WHERE scenario_id=? ORDER BY position, queue_item_id",
-                    (scenario_id,),
-                ).fetchall()
-                simulation_rows = connection.execute(
-                    "SELECT * FROM simulation_runs WHERE scenario_id=? ORDER BY created_at, simulation_id",
-                    (scenario_id,),
-                ).fetchall()
-                export_rows = connection.execute(
-                    "SELECT * FROM export_jobs WHERE scenario_id=? ORDER BY created_at, export_id",
-                    (scenario_id,),
-                ).fetchall()
-                active_queue = [
-                    str(row["queue_item_id"])
-                    for row in queue_rows
-                    if row["status"] in {"starting", "running", "stopping"}
-                ]
-                active_runs = [
-                    str(row["simulation_id"])
-                    for row in simulation_rows
-                    if row["status"] in {"pending", "starting", "running", "stopping"}
-                ]
-                if active_queue or active_runs:
-                    raise WorkbenchError(
-                        "scenario_run_active",
-                        "方案仍有活动计算，请先停止后再永久删除。",
-                        status_code=409,
-                        details={
-                            "active_queue_item_ids": active_queue,
-                            "active_simulation_ids": active_runs,
-                        },
-                    )
-
-                revision_ids = {
-                    str(value)
-                    for row in queue_rows + simulation_rows
-                    for value in (row["input_revision_id"],)
-                    if value
-                }
-                if scenario["input_revision_id"]:
-                    revision_ids.add(str(scenario["input_revision_id"]))
-                derived_count = int(connection.execute(
-                    "SELECT COUNT(*) FROM scenarios WHERE base_scenario_id=? AND scenario_id<>?",
-                    (scenario_id, scenario_id),
-                ).fetchone()[0])
-                result_family_count = int(connection.execute(
-                    "SELECT COUNT(*) FROM result_families WHERE simulation_id IN "
-                    "(SELECT simulation_id FROM simulation_runs WHERE scenario_id=?)",
-                    (scenario_id,),
-                ).fetchone()[0])
-                output_count = int(connection.execute(
-                    "SELECT COALESCE(SUM(output_count), 0) FROM simulation_runs WHERE scenario_id=?",
-                    (scenario_id,),
-                ).fetchone()[0])
-                paths = self._scenario_delete_path_candidates(database, scenario_id, simulation_rows, export_rows)
-                moved = self._move_scenario_paths_to_quarantine(paths, quarantine)
-
-                queue_ids = [str(row["queue_item_id"]) for row in queue_rows]
-                simulation_ids = [str(row["simulation_id"]) for row in simulation_rows]
-                if queue_ids:
-                    placeholders = ",".join("?" for _ in queue_ids)
-                    # Retry chains may be referenced by a later item; sever
-                    # those references before deleting this scenario's rows.
-                    connection.execute(
-                        f"UPDATE queue_items SET retry_of=NULL WHERE retry_of IN ({placeholders})",
-                        tuple(queue_ids),
-                    )
-                connection.execute(
-                    "UPDATE scenarios SET base_scenario_id=NULL WHERE base_scenario_id=?",
-                    (scenario_id,),
-                )
-                connection.execute("DELETE FROM scenario_draft_bindings WHERE scenario_id=?", (scenario_id,))
-                connection.execute("DELETE FROM export_jobs WHERE scenario_id=?", (scenario_id,))
-                if simulation_ids:
-                    placeholders = ",".join("?" for _ in simulation_ids)
-                    connection.execute(
-                        f"DELETE FROM result_families WHERE simulation_id IN ({placeholders})",
-                        tuple(simulation_ids),
-                    )
-                connection.execute("DELETE FROM queue_items WHERE scenario_id=?", (scenario_id,))
-                connection.execute("DELETE FROM simulation_runs WHERE scenario_id=?", (scenario_id,))
-                connection.execute("DELETE FROM scenarios WHERE scenario_id=?", (scenario_id,))
-
-                deleted_revision_count = 0
-                for revision_id in revision_ids:
-                    still_referenced = connection.execute(
-                        """SELECT 1 FROM scenarios WHERE input_revision_id=?
-                           UNION SELECT 1 FROM simulation_runs WHERE input_revision_id=?
-                           UNION SELECT 1 FROM queue_items WHERE input_revision_id=?
-                           LIMIT 1""",
-                        (revision_id, revision_id, revision_id),
-                    ).fetchone()
-                    if not still_referenced:
-                        connection.execute("DELETE FROM input_revisions WHERE revision_id=?", (revision_id,))
-                        deleted_revision_count += 1
-                connection.commit()
-                summary = {
-                    "scenario_id": scenario_id,
-                    "queue_item_count": len(queue_rows),
-                    "run_count": len(simulation_rows),
-                    "result_family_count": result_family_count,
-                    "output_count": output_count,
-                    "export_count": len(export_rows),
-                    "derived_scenario_count": derived_count,
-                    "input_revision_count": deleted_revision_count,
-                }
-        except Exception:
-            if moved:
-                try:
-                    self._restore_scenario_paths_from_quarantine(moved)
-                except OSError as restore_error:
-                    raise WorkbenchError(
-                        "scenario_files_restore_failed",
-                        "永久删除失败且原文件恢复失败，请保留隔离目录后联系管理员。",
-                        status_code=500,
-                        details={"quarantine": str(quarantine), "error": str(restore_error)},
-                    ) from restore_error
-            shutil.rmtree(quarantine, ignore_errors=True)
-            raise
-        else:
-            shutil.rmtree(quarantine, ignore_errors=True)
-            return summary
-
     def delete_scenario(self, project_id: str, scenario_id: str) -> None:
         database = self.project_database(project_id)
+        self._scenario_row(project_id, scenario_id)
         with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT scenario_id FROM scenarios WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()
-            if not current:
-                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
-            visible_queue = connection.execute(
-                "SELECT queue_item_id FROM queue_items WHERE scenario_id=? AND deleted_at IS NULL",
-                (scenario_id,),
-            ).fetchall()
-            active_runs = connection.execute(
-                """
-                SELECT simulation_id FROM simulation_runs
-                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
-                """,
-                (scenario_id,),
-            ).fetchall()
-            run_count = int(connection.execute(
+            history_count = connection.execute(
                 "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0])
-            queue_count = int(connection.execute(
+            ).fetchone()[0]
+            queue_count = connection.execute(
                 "SELECT COUNT(*) FROM queue_items WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0])
-            derived_reference_count = int(connection.execute(
-                "SELECT COUNT(*) FROM scenarios WHERE base_scenario_id=? AND scenario_id<>?",
-                (scenario_id, scenario_id),
-            ).fetchone()[0])
-            if visible_queue:
-                raise WorkbenchError(
-                    "scenario_in_queue",
-                    "方案仍有队列记录，请先在底部队列移除。",
-                    status_code=409,
-                    details={"blocking_queue_item_ids": [str(row["queue_item_id"]) for row in visible_queue]},
-                )
-            if active_runs:
-                raise WorkbenchError(
-                    "scenario_run_active",
-                    "方案仍有活动计算，无法删除。",
-                    status_code=409,
-                    details={"active_simulation_ids": [str(row["simulation_id"]) for row in active_runs]},
-                )
-            if queue_count or run_count or derived_reference_count:
+            ).fetchone()[0]
+            if history_count or queue_count:
                 raise WorkbenchError(
                     "scenario_has_history",
-                    "已有运行历史或派生引用的方案只能移入归档。",
+                    "已有运行或队列历史的方案只能归档。",
                     status_code=409,
-                    details={
-                        "queue_reference_count": queue_count,
-                        "run_count": run_count,
-                        "derived_reference_count": derived_reference_count,
-                    },
                 )
             connection.execute("DELETE FROM scenarios WHERE scenario_id=?", (scenario_id,))
 
@@ -3514,7 +3006,6 @@ class WorkbenchStore:
             "scenario_id": data["scenario_id"],
             "scenario_name": scenario["name"] if scenario else data["scenario_id"],
             "position": data["position"],
-            "queue_order": int(data["queue_order"]) if data.get("queue_order") is not None else None,
             "status": data["status"],
             "simulation_id": data.get("simulation_id"),
             "scenario_version": int(data["scenario_version"]) if data.get("scenario_version") is not None else None,
@@ -3526,21 +3017,13 @@ class WorkbenchStore:
             "finished_at": data.get("finished_at"),
             "progress": float(data["progress"]),
             "summary": data["summary"],
-            "deletable": data.get("status") not in {"starting", "running", "stopping"},
         }
 
     def list_queue(self, project_id: str) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
         with database.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM queue_items
-                WHERE deleted_at IS NULL
-                ORDER BY
-                    CASE WHEN status IN ('waiting', 'queued', 'starting', 'running', 'stopping') THEN 0 ELSE 1 END,
-                    CASE WHEN status IN ('waiting', 'queued') THEN queue_order ELSE NULL END,
-                    position, enqueued_at, queue_item_id
-                """
+                "SELECT * FROM queue_items ORDER BY position, enqueued_at, queue_item_id"
             ).fetchall()
         return [self._public_queue_item(project_id, row) for row in rows]
 
@@ -3662,35 +3145,25 @@ class WorkbenchStore:
             current = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not current:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
-            if bool(current["archived"]):
-                raise WorkbenchError("scenario_archived", "归档方案不能加入模拟队列。", status_code=409)
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                  AND status IN ('waiting', 'queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND status IN ('queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
             if duplicate:
                 raise WorkbenchError("scenario_already_queued", "Scenario is already queued.", status_code=409)
             position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
-            queue_order = connection.execute(
-                """
-                SELECT COALESCE(MAX(queue_order), 0) + 1
-                FROM queue_items
-                WHERE deleted_at IS NULL AND status='waiting'
-                """
-            ).fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             connection.execute(
                 """
                 INSERT INTO queue_items(
                     queue_item_id, scenario_id, scenario_version, input_revision_id,
-                    position, queue_order, status, simulation_id, retry_of, enqueued_at,
+                    position, status, simulation_id, retry_of, enqueued_at,
                     started_at, finished_at, progress, summary, cancel_reason
-                ) VALUES(?, ?, ?, ?, ?, ?, 'waiting', NULL, ?, ?, NULL, NULL, 0, '待运行', NULL)
+                ) VALUES(?, ?, ?, ?, ?, 'queued', NULL, ?, ?, NULL, NULL, 0, 'Draft input preflight passed.', NULL)
                 """,
                 (
                     queue_item_id,
@@ -3698,311 +3171,54 @@ class WorkbenchStore:
                     int(current["version"] or 1),
                     frozen_revision_id,
                     position,
-                    queue_order,
                     retry_of,
                     now,
                 ),
             )
             connection.execute(
-                "UPDATE scenarios SET status='waiting', updated_at=? WHERE scenario_id=?",
+                "UPDATE scenarios SET status='queued', updated_at=? WHERE scenario_id=?",
                 (now, scenario_id),
             )
         return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
 
-    @staticmethod
-    def _normalize_waiting_queue_order_connection(connection: sqlite3.Connection) -> None:
-        rows = connection.execute(
-            """
-            SELECT queue_item_id FROM queue_items
-            WHERE status='waiting' AND deleted_at IS NULL
-            ORDER BY queue_order, enqueued_at, queue_item_id
-            """
-        ).fetchall()
-        for order, row in enumerate(rows, start=1):
-            connection.execute(
-                "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                (order, row["queue_item_id"]),
-            )
-
-    def start_queue_batch(self, project_id: str) -> Dict[str, Any]:
-        """Release the currently staged waiting rows as one scheduler batch."""
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
-            ).fetchall()
-            started_item_ids = [str(row["queue_item_id"]) for row in rows]
-            if started_item_ids:
-                placeholders = ",".join("?" for _ in started_item_ids)
-                connection.execute(
-                    f"""
-                    UPDATE queue_items
-                    SET status='queued', summary='已加入当前运行批次'
-                    WHERE queue_item_id IN ({placeholders})
-                      AND status='waiting' AND deleted_at IS NULL
-                    """,
-                    tuple(started_item_ids),
-                )
-                connection.execute(
-                    f"""
-                    UPDATE scenarios
-                    SET status='queued', updated_at=?
-                    WHERE scenario_id IN (
-                        SELECT scenario_id FROM queue_items
-                        WHERE queue_item_id IN ({placeholders})
-                    )
-                    """,
-                    (now, *started_item_ids),
-                )
-        return {
-            "started_item_ids": started_item_ids,
-            "items": self.list_queue(project_id),
-            "count": len(started_item_ids),
-        }
-
     def reorder_queue(self, project_id: str, queue_item_id: str, new_position: int) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
+        row = self._queue_row(project_id, queue_item_id)
+        if row["status"] != "queued":
+            raise WorkbenchError("queue_item_not_reorderable", "只有等待中的队列项可以重排。", status_code=409)
         with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
-                (queue_item_id,),
-            ).fetchone()
-            if not row:
-                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
-            if row["status"] != "waiting":
-                raise WorkbenchError(
-                    "queue_order_locked",
-                    "运行批次已启动，队列排序已锁定。",
-                    status_code=409,
-                )
-            active_batch = connection.execute(
-                """
-                SELECT 1 FROM queue_items
-                WHERE deleted_at IS NULL
-                  AND status IN ('queued', 'starting', 'running', 'stopping')
-                LIMIT 1
-                """
-            ).fetchone()
-            if active_batch:
-                raise WorkbenchError(
-                    "queue_order_locked",
-                    "Queue order is locked while a released batch is active.",
-                    status_code=409,
-                )
-            waiting = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
+            queued = connection.execute(
+                "SELECT queue_item_id FROM queue_items WHERE status='queued' ORDER BY position, enqueued_at"
             ).fetchall()
-            ordered_ids = [str(item["queue_item_id"]) for item in waiting]
-            if queue_item_id not in ordered_ids:
-                raise WorkbenchError("queue_item_not_reorderable", "只有待运行项可以重排。", status_code=409)
+            ordered_ids = [str(item["queue_item_id"]) for item in queued]
             ordered_ids.remove(queue_item_id)
             index = max(0, min(len(ordered_ids), new_position - 1))
             ordered_ids.insert(index, queue_item_id)
-            for queue_order, item_id in enumerate(ordered_ids, start=1):
+            for position, item_id in enumerate(ordered_ids, start=1):
                 connection.execute(
-                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                    (queue_order, item_id),
+                    "UPDATE queue_items SET position=? WHERE queue_item_id=?", (position, item_id)
                 )
         return self.list_queue(project_id)
 
     def cancel_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         database = self.project_database(project_id)
+        row = self._queue_row(project_id, queue_item_id)
+        if row["status"] != "queued":
+            raise WorkbenchError("queue_item_not_cancelable", "只有等待中的队列项可以取消。", status_code=409)
         now = utc_now()
         with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
-                (queue_item_id,),
-            ).fetchone()
-            if not row:
-                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
-            if row["status"] not in {"waiting", "queued"}:
-                raise WorkbenchError("queue_item_not_cancelable", "只有尚未启动的队列项可以取消。", status_code=409)
             connection.execute(
                 """
                 UPDATE queue_items SET status='cancelled', finished_at=?, summary='已取消'
-                WHERE queue_item_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
+                WHERE queue_item_id=?
                 """,
                 (now, queue_item_id),
             )
-            self._restore_scenario_status_connection(connection, str(row["scenario_id"]), now)
-        return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
-
-    @staticmethod
-    def _restore_scenario_status_connection(
-        connection: sqlite3.Connection,
-        scenario_id: str,
-        now: str,
-    ) -> str:
-        active = connection.execute(
-            """
-            SELECT status FROM queue_items
-            WHERE scenario_id=? AND deleted_at IS NULL
-              AND status IN ('starting', 'running', 'stopping')
-            ORDER BY started_at DESC, enqueued_at DESC LIMIT 1
-            """,
-            (scenario_id,),
-        ).fetchone()
-        if active:
-            status = str(active["status"])
-        else:
-            staged = connection.execute(
-                """
-                SELECT status FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                  AND status IN ('waiting', 'queued')
-                ORDER BY queue_order, enqueued_at DESC LIMIT 1
-                """,
-                (scenario_id,),
-            ).fetchone()
-            if staged:
-                status = str(staged["status"])
-            else:
-                latest = connection.execute(
-                    """
-                    SELECT COALESCE(r.status, q.status) AS status
-                    FROM queue_items q
-                    LEFT JOIN simulation_runs r ON r.simulation_id=q.simulation_id
-                    WHERE q.scenario_id=?
-                      AND q.status IN ('completed', 'failed', 'interrupted', 'stopped', 'cancelled', 'canceled')
-                      AND (q.deleted_at IS NULL OR q.simulation_id IS NOT NULL)
-                    ORDER BY COALESCE(q.finished_at, q.enqueued_at) DESC, q.position DESC
-                    LIMIT 1
-                    """,
-                    (scenario_id,),
-                ).fetchone()
-                if latest:
-                    status = str(latest["status"])
-                else:
-                    row = connection.execute(
-                        "SELECT input_revision_id, archived FROM scenarios WHERE scenario_id=?",
-                        (scenario_id,),
-                    ).fetchone()
-                    status = "ready" if row and row["input_revision_id"] else "draft"
-        connection.execute(
-            "UPDATE scenarios SET status=?, updated_at=? WHERE scenario_id=?",
-            (status, now, scenario_id),
-        )
-        return status
-
-    def preview_queue_delete(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
-        normalized = self._normalize_queue_item_ids(queue_item_ids)
-        database = self.project_database(project_id)
-        with database.connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
-                tuple(normalized),
-            ).fetchall()
-            found = {str(row["queue_item_id"]): row for row in rows}
-            missing = [item_id for item_id in normalized if item_id not in found]
-            if missing:
-                raise WorkbenchError(
-                    "queue_item_not_found",
-                    "一个或多个队列项不存在或已移除。",
-                    status_code=404,
-                    details={"queue_item_ids": missing},
-                )
-            active = [
-                self._public_queue_item(project_id, row)
-                for row in rows
-                if row["status"] in {"starting", "running", "stopping"}
-            ]
-            removable = [
-                self._public_queue_item(project_id, row)
-                for row in rows
-                if row["status"] not in {"starting", "running", "stopping"}
-            ]
-        return {
-            "queue_item_ids": normalized,
-            "items": removable,
-            "active_items": active,
-            "can_delete": not active,
-            "preserves_results": True,
-        }
-
-    @staticmethod
-    def _normalize_queue_item_ids(queue_item_ids: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for item_id in queue_item_ids:
-            value = str(item_id or "").strip()
-            if value and value not in seen:
-                normalized.append(value)
-                seen.add(value)
-        if not normalized:
-            raise WorkbenchError("queue_item_ids_required", "请至少选择一个队列项。", status_code=422)
-        return normalized
-
-    def batch_delete_queue_items(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
-        normalized = self._normalize_queue_item_ids(queue_item_ids)
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
-                tuple(normalized),
-            ).fetchall()
-            found = {str(row["queue_item_id"]): row for row in rows}
-            missing = [item_id for item_id in normalized if item_id not in found]
-            if missing:
-                raise WorkbenchError(
-                    "queue_item_not_found",
-                    "一个或多个队列项不存在或已移除。",
-                    status_code=404,
-                    details={"queue_item_ids": missing},
-                )
-            active = [
-                str(row["queue_item_id"])
-                for row in rows
-                if row["status"] in {"starting", "running", "stopping"}
-            ]
-            if active:
-                raise WorkbenchError(
-                    "queue_item_active",
-                    "活动计算不能删除，请先停止后再删除。",
-                    status_code=409,
-                    details={"active_queue_item_ids": active},
-                )
-            waiting_or_queued = [
-                str(row["queue_item_id"])
-                for row in rows
-                if row["status"] in {"waiting", "queued"}
-            ]
-            placeholders = ",".join("?" for _ in normalized)
             connection.execute(
-                f"""
-                UPDATE queue_items
-                SET deleted_at=?,
-                    status=CASE WHEN status IN ('waiting', 'queued') THEN 'cancelled' ELSE status END,
-                    finished_at=CASE WHEN status IN ('waiting', 'queued') THEN COALESCE(finished_at, ?) ELSE finished_at END,
-                    summary=CASE WHEN status IN ('waiting', 'queued') THEN '已从队列移除' ELSE summary END,
-                    cancel_reason=CASE WHEN status IN ('waiting', 'queued') THEN 'queue_deleted' ELSE cancel_reason END
-                WHERE queue_item_id IN ({placeholders}) AND deleted_at IS NULL
-                """,
-                (now, now, *normalized),
+                "UPDATE scenarios SET status='ready', updated_at=? WHERE scenario_id=?",
+                (now, row["scenario_id"]),
             )
-            scenario_ids = sorted({str(row["scenario_id"]) for row in rows})
-            for scenario_id in scenario_ids:
-                self._restore_scenario_status_connection(connection, scenario_id, now)
-            self._normalize_waiting_queue_order_connection(connection)
-        return {
-            "deleted_ids": normalized,
-            "cancelled_ids": waiting_or_queued,
-            "preserved_result_count": sum(1 for row in rows if row["simulation_id"]),
-            "items": self.list_queue(project_id),
-        }
+        return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
 
     def _legacy_retry_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         row = self._queue_row(project_id, queue_item_id)
@@ -4032,7 +3248,6 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
-            database.ensure_schema()
             with database.connect() as connection:
                 queue_rows = connection.execute(
                     "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE status IN ('starting', 'running', 'stopping')"
@@ -4069,8 +3284,8 @@ class WorkbenchStore:
                            s.effective_parameters_json, s.name AS scenario_name
                     FROM queue_items q
                     JOIN scenarios s ON s.scenario_id=q.scenario_id
-                    WHERE q.status='queued' AND q.deleted_at IS NULL
-                    ORDER BY q.queue_order, q.enqueued_at, q.queue_item_id
+                    WHERE q.status='queued'
+                    ORDER BY q.position, q.enqueued_at, q.queue_item_id
                     LIMIT 1
                     """
                 ).fetchone()
@@ -4250,10 +3465,6 @@ class WorkbenchStore:
         output_dir = str(Path(self.get_project(project_id)["root_path"]) / "outputs" / simulation_id)
         now = utc_now()
         with database.connect() as connection:
-            # Claiming and permanent deletion must serialize at the same
-            # transaction boundary; a queued row can otherwise be deleted
-            # between the preflight read and this state transition.
-            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 UPDATE queue_items SET status='starting', simulation_id=?, started_at=?, summary='准备运行'
@@ -4334,19 +3545,11 @@ class WorkbenchStore:
                         simulation_id,
                     ),
                 )
-            elif "progress" in values:
-                connection.execute(
-                    """
-                    UPDATE queue_items SET progress=?
-                    WHERE simulation_id=? AND status IN ('starting', 'running', 'stopping')
-                    """,
-                    (float(values["progress"] or 0), simulation_id),
-                )
 
     def finish_run(self, project_id: str, simulation_id: str, result: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
         status = str(result.get("status") or "failed")
-        if status not in {"completed", "failed", "stopped", "interrupted", "cancelled"}:
+        if status not in {"completed", "failed", "stopped", "interrupted"}:
             status = "failed"
         now = utc_now()
         with database.connect() as connection:
@@ -4429,7 +3632,6 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
-            database.ensure_schema()
             with database.connect() as connection:
                 row = connection.execute(
                     "SELECT * FROM simulation_runs WHERE simulation_id=?", (simulation_id,)

@@ -6,7 +6,7 @@ import { ProjectList } from "./pages/Projects/ProjectList";
 import { ProjectLaunchScreen } from "./pages/Launch/ProjectLaunchScreen";
 import { EditorIndexRedirect, ProjectEditor } from "./pages/Editor/ProjectEditor";
 import { Settings } from "./pages/Settings/Settings";
-import { isActiveScenario, useTaichiFlowStore } from "./stores/taichiFlowStore";
+import { useTaichiFlowStore } from "./stores/taichiFlowStore";
 
 const Router =
   typeof window !== "undefined" && (window as Window & { taichiFlowDesktop?: unknown }).taichiFlowDesktop
@@ -16,9 +16,7 @@ const Router =
 function LegacyEditorRedirect({ dock }: { dock?: "queue" | "export" }) {
   const { projectId = "", scenarioId } = useParams();
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
-  const targetScenario = scenarioId && scenarios.some((scenario) => scenario.scenario_id === scenarioId && isActiveScenario(scenario))
-    ? scenarioId
-    : scenarios.find(isActiveScenario)?.scenario_id;
+  const targetScenario = scenarioId || scenarios[0]?.scenario_id;
   if (!projectId) return <Navigate to="/projects" replace />;
   if (!targetScenario) return <Navigate to={`/launch/${projectId}`} replace />;
   const query = dock ? `?dock=${dock}` : "";

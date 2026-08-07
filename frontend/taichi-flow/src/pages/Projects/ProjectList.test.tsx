@@ -44,7 +44,6 @@ describe("ProjectList directory selection", () => {
           parent_path: null,
           roots: [{ name: "C:", path: "C:\\Projects", writable: true }],
           directories: [],
-          files: [],
           can_select: false,
         };
       }
@@ -53,7 +52,6 @@ describe("ProjectList directory selection", () => {
         parent_path: null,
         roots: [{ name: "C:", path: "C:\\Projects", writable: true }],
         directories: [{ name: "mountain-flood", path: "C:\\Projects\\mountain-flood", writable: true }],
-        files: [],
         can_select: true,
       };
     });

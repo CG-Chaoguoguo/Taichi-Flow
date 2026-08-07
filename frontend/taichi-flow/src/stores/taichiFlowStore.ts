@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueBatchDeleteResult, QueueDeletePreview, QueueItem, QueueStartResult, ResultFamily, Scenario, ScenarioConfiguration, ScenarioDeletePreview, ScenarioPermanentDeleteResult, SimulationRun, SystemMetrics, Toast } from "../types";
+import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueItem, ResultFamily, Scenario, ScenarioConfiguration, SimulationRun, SystemMetrics, Toast } from "../types";
 import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
@@ -116,10 +116,7 @@ interface TaichiFlowStore {
   updateScenario: (scenarioId: string, updates: ScenarioUpdateDraft) => Promise<Scenario>;
   duplicateScenario: (scenarioId: string) => Promise<Scenario>;
   archiveScenario: (scenarioId: string) => Promise<void>;
-  restoreScenario: (scenarioId: string) => Promise<Scenario | null>;
-  previewScenarioDeletion: (scenarioId: string) => Promise<ScenarioDeletePreview | null>;
   deleteScenario: (scenarioId: string) => Promise<void>;
-  permanentlyDeleteScenario: (scenarioId: string) => Promise<ScenarioPermanentDeleteResult | null>;
   fetchInputFiles: () => Promise<void>;
   fetchInputRevisions: () => Promise<void>;
   uploadInput: (family: string, file: File) => Promise<InputFile>;
@@ -133,10 +130,7 @@ interface TaichiFlowStore {
   createInputRevision: (uploadIds: string[], versionTag?: string) => Promise<InputRevision>;
   fetchQueue: () => Promise<void>;
   enqueueScenario: (scenarioId: string) => Promise<void>;
-  startQueueBatch: () => Promise<QueueStartResult | null>;
   reorderQueue: (itemId: string, newPosition: number) => Promise<void>;
-  previewQueueDeletion: (itemIds: string[]) => Promise<QueueDeletePreview | null>;
-  deleteQueueItems: (itemIds: string[]) => Promise<QueueBatchDeleteResult | null>;
   cancelQueueItem: (itemId: string) => Promise<void>;
   stopRunningItem: (itemId: string) => Promise<void>;
   retryQueueItem: (itemId: string) => Promise<void>;
@@ -166,17 +160,6 @@ const safeStorage = createJSONStorage(() => {
 });
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : "请求失败");
-const errorCode = (error: unknown) => (typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code || "") : "");
-const conflictMessage = (error: unknown, fallback = "操作与当前队列状态冲突，请刷新后重试") => {
-  const messages: Record<string, string> = {
-    scenario_in_queue: "方案仍在队列中，请先在底部队列移除",
-    scenario_run_active: "方案仍有活动计算，请等待计算结束",
-    scenario_archived: "归档方案不能加入模拟队列",
-    queue_order_locked: "运行批次已启动，队列排序已锁定",
-  };
-  return messages[errorCode(error)] || fallback;
-};
-export const isActiveScenario = (scenario: Scenario) => !scenario.archived && scenario.status !== "archived";
 const id = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
 export const useTaichiFlowStore = create<TaichiFlowStore>()(
@@ -367,9 +350,9 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
 
           setStep(4, "ready");
           await get().fetchExports();
-           const scenarios = get().scenarios.filter(isActiveScenario);
-           if (scenarios[0]) {
-             set({ editorSelection: { kind: "scenario", scenarioId: scenarios[0].scenario_id } });
+          const scenarios = get().scenarios;
+          if (scenarios[0]) {
+            set({ editorSelection: { kind: "scenario", scenarioId: scenarios[0].scenario_id } });
           } else {
             set({ editorSelection: { kind: "input", family: DEFAULT_INPUT_FAMILY } });
           }
@@ -427,8 +410,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
         if (!project) return;
         set((state) => ({ loading: { ...state.loading, scenarios: true }, errors: { ...state.errors, scenarios: null } }));
         try {
-           const scenarios = await scenarioApi.listScenarios(project.project_id);
-           set({ scenarios: scenarios.map((scenario) => ({ ...scenario, archived: Boolean(scenario.archived ?? scenario.status === "archived") })) });
+          set({ scenarios: await scenarioApi.listScenarios(project.project_id) });
         } catch (error) {
           set((state) => ({ errors: { ...state.errors, scenarios: errorMessage(error) } }));
         } finally {
@@ -474,62 +456,14 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       archiveScenario: async (scenarioId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          const scenario = await scenarioApi.archiveScenario(project.project_id, scenarioId);
-          set((state) => ({ scenarios: state.scenarios.map((item) => (item.scenario_id === scenarioId ? { ...scenario, archived: true } : item)) }));
-        } catch (error) {
-          if (errorCode(error)) await Promise.all([get().fetchQueue(), get().fetchScenarios()]);
-          throw error;
-        }
-      },
-      restoreScenario: async (scenarioId) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          const scenario = await scenarioApi.restoreScenario(project.project_id, scenarioId);
-          set((state) => ({ scenarios: state.scenarios.map((item) => (item.scenario_id === scenarioId ? { ...scenario, archived: false } : item)) }));
-          return scenario;
-        } catch (error) {
-          if (errorCode(error)) await Promise.all([get().fetchQueue(), get().fetchScenarios()]);
-          throw error;
-        }
-      },
-      previewScenarioDeletion: async (scenarioId) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          return await scenarioApi.previewDelete(project.project_id, scenarioId);
-        } catch (error) {
-          if (errorCode(error)) await Promise.all([get().fetchQueue(), get().fetchScenarios()]);
-          throw error;
-        }
+        const scenario = await scenarioApi.archiveScenario(project.project_id, scenarioId);
+        set((state) => ({ scenarios: state.scenarios.map((item) => (item.scenario_id === scenarioId ? scenario : item)) }));
       },
       deleteScenario: async (scenarioId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await scenarioApi.deleteScenario(project.project_id, scenarioId);
-          set((state) => ({ scenarios: state.scenarios.filter((item) => item.scenario_id !== scenarioId) }));
-        } catch (error) {
-          if (errorCode(error)) await Promise.all([get().fetchQueue(), get().fetchScenarios()]);
-          throw error;
-        }
-      },
-      permanentlyDeleteScenario: async (scenarioId) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          const result = await scenarioApi.permanentlyDelete(project.project_id, scenarioId);
-          set((state) => ({
-            scenarios: state.scenarios.filter((item) => item.scenario_id !== scenarioId),
-            queue: state.queue.filter((item) => item.scenario_id !== scenarioId),
-          }));
-          await Promise.all([get().fetchQueue(), get().fetchScenarios(), get().fetchInputRevisions()]);
-          return result;
-        } catch (error) {
-          if (errorCode(error)) await Promise.all([get().fetchQueue(), get().fetchScenarios()]);
-          throw error;
-        }
+        await scenarioApi.deleteScenario(project.project_id, scenarioId);
+        set((state) => ({ scenarios: state.scenarios.filter((item) => item.scenario_id !== scenarioId) }));
       },
 
       fetchInputFiles: async () => {
@@ -676,134 +610,36 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       enqueueScenario: async (scenarioId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.enqueueScenario(project.project_id, scenarioId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-          set({ dockTab: "queue" });
-          get().addToast({ type: "success", message: "已加入待运行队列" });
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "error", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-        }
-      },
-      startQueueBatch: async () => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          const result = await queueApi.startQueue(project.project_id);
-          set({ queue: result.items, dockTab: "queue" });
-          await get().fetchScenarios();
-          get().addToast({
-            type: "success",
-            message: result.count ? `已启动 ${result.count} 项当前批次` : "当前没有待运行项目",
-          });
-          return result;
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "error", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-          return null;
-        }
+        await queueApi.enqueueScenario(project.project_id, scenarioId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
+        set({ dockTab: "queue" });
       },
       reorderQueue: async (itemId, newPosition) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          const code = errorCode(error);
-          get().addToast({
-            type: "warning",
-            message: code ? conflictMessage(error) : errorMessage(error),
-          });
-        }
-      },
-      previewQueueDeletion: async (itemIds) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          return await queueApi.previewDelete(project.project_id, itemIds);
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "error", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-          return null;
-        }
-      },
-      deleteQueueItems: async (itemIds) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        const deletedSet = new Set(itemIds);
-        const selectionBeforeDelete = get().editorSelection;
-        const selectedQueueItem = selectionBeforeDelete?.kind === "queue"
-          ? get().queue.find((item) => item.queue_item_id === selectionBeforeDelete.queueItemId)
-          : undefined;
-        try {
-          const result = await queueApi.batchDelete(project.project_id, itemIds);
-          set({ queue: result.items });
-          await get().fetchScenarios();
-          if (selectedQueueItem && deletedSet.has(selectedQueueItem.queue_item_id)) {
-            const scenarioStillVisible = get().scenarios.some((scenario) => scenario.scenario_id === selectedQueueItem.scenario_id && isActiveScenario(scenario));
-            set({
-              editorSelection: scenarioStillVisible
-                ? { kind: "scenario", scenarioId: selectedQueueItem.scenario_id }
-                : { kind: "input", family: DEFAULT_INPUT_FAMILY },
-            });
-          }
-          get().addToast({
-            type: "success",
-            message: result.preserved_result_count ? `已移除队列项，保留 ${result.preserved_result_count} 条运行结果` : "已移除所选队列项",
-          });
-          return result;
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "error", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-          return null;
-        }
+        set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
       },
       cancelQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.cancelQueueItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "warning", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-        }
+        await queueApi.cancelQueueItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
       stopRunningItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.stopRunningItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "warning", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-        }
+        await queueApi.stopRunningItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
       retryQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.retryQueueItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          if (errorCode(error)) await get().fetchScenarios();
-          get().addToast({ type: "warning", message: errorCode(error) ? conflictMessage(error) : errorMessage(error) });
-        }
+        await queueApi.retryQueueItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
 
       fetchResultFamilies: async (simulationId) => {

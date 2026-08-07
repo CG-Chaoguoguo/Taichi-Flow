@@ -311,21 +311,6 @@ class SimulationCoordinator:
     async def _execute_claimed(self, context: Dict[str, Any], signature: str, stop_event: Event) -> None:
         project_id = str(context["project_id"])
         simulation_id = str(context["simulation_id"])
-        pending_update: Dict[str, Any] = {}
-        last_persisted_output_count = 0
-
-        def persist_pending() -> None:
-            nonlocal last_persisted_output_count
-            if not pending_update:
-                return
-            payload = dict(pending_update)
-            self.store.update_run(project_id, simulation_id, payload)
-            pending_update.clear()
-            if "output_count" in payload:
-                last_persisted_output_count = max(
-                    last_persisted_output_count,
-                    int(payload.get("output_count") or 0),
-                )
 
         def on_update(update: Dict[str, Any]) -> None:
             safe: Dict[str, Any] = {}
@@ -342,19 +327,8 @@ class SimulationCoordinator:
             ):
                 if key in update:
                     safe[key] = update[key]
-            if not safe:
-                return
-            pending_update.update(safe)
-            lifecycle_update = any(
-                key in safe
-                for key in ("status", "start_time", "end_time_actual", "error")
-            )
-            output_boundary = (
-                "output_count" in safe
-                and int(safe.get("output_count") or 0) > last_persisted_output_count
-            )
-            if lifecycle_update or output_boundary:
-                persist_pending()
+            if safe:
+                self.store.update_run(project_id, simulation_id, safe)
 
         try:
             self.store.update_run(
@@ -373,9 +347,6 @@ class SimulationCoordinator:
             result = {"status": "failed", "error": str(exc)}
         finally:
             try:
-                # Progress between output boundaries is intentionally not
-                # persisted. finish_run stores the executor's final snapshot.
-                pending_update.clear()
                 self.store.finish_run(project_id, simulation_id, locals().get("result", {"status": "failed"}))
             except Exception:
                 logger.exception("Could not finalize queued simulation %s", simulation_id)

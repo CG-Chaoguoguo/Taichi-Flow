@@ -88,25 +88,6 @@ describe("RainfallProcessEditor", () => {
     expect(nextBindings).toContainEqual(expect.objectContaining({ binding_key: "rainfall.period.0001", asset_id: "rain-2" }));
   });
 
-  it("clears all rainfall assets without changing raster period structure", () => {
-    const onChange = vi.fn();
-    render(
-      <RainfallProcessEditor
-        periods={periods}
-        bindings={bindings}
-        assets={assets}
-        canEdit
-        onChange={onChange}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "取消全部降雨绑定" }));
-    const [nextPeriods, nextBindings] = onChange.mock.calls[onChange.mock.calls.length - 1] as [RainfallPeriod[], InputBinding[]];
-    expect(nextPeriods[0]).toMatchObject({ source: "uniform", cri_mps: 1e-6 });
-    expect(nextPeriods[1]).toMatchObject({ source: "raster", asset_id: null });
-    expect(nextBindings.filter((binding) => binding.role === "rainfall-period")).toHaveLength(0);
-  });
-
   it("sorts batch files by numeric ordinal instead of lexicographic order", () => {
     const files = [new File([""], "ri10.asc"), new File([""], "ri2.asc"), new File([""], "ri1.asc")];
     expect(sortRainfallFiles(files).map((file) => file.name)).toEqual(["ri1.asc", "ri2.asc", "ri10.asc"]);

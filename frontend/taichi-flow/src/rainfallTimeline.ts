@@ -64,11 +64,7 @@ export function resizeRainfallTimeline(
     const index = offset + 1;
     const id = periodId(index);
     const existing = periods[offset];
-    const retainedBinding = bindings.find((binding) =>
-      binding.active !== false
-      && Boolean(binding.asset_id)
-      && (binding.binding_key === bindingKey(index) || binding.period_id === id),
-    );
+    const retainedBinding = bindings.find((binding) => binding.binding_key === bindingKey(index) || binding.period_id === id);
     const raster = existing ? isRaster(existing.source) : Boolean(retainedBinding?.asset_id) || fallbackRaster;
     return {
       ...existing,
@@ -87,7 +83,7 @@ export function resizeRainfallTimeline(
     if (binding.role !== "rainfall-period") return binding;
     const id = binding.period_id || (binding.ordinal ? periodId(binding.ordinal) : null);
     const period = id ? nextById.get(id) : undefined;
-    return { ...binding, active: binding.active !== false && Boolean(period && isRaster(period.source)) };
+    return { ...binding, active: Boolean(period && isRaster(period.source)) };
   });
   for (const period of nextPeriods) {
     if (!isRaster(period.source) || !period.asset_id) continue;

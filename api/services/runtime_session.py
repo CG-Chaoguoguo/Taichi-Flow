@@ -276,16 +276,6 @@ def prepare_runtime_from_payload(
         raw_overrides["rainfall"] = _write_frontend_uniform_rainfall(rainfall_payload, run_output_dir)
     run_flags = raw_overrides.get("run_flags") if isinstance(raw_overrides, dict) else None
     raw_overrides = _deep_merge(raw_overrides, _case_input_overrides(case_input_files, run_flags if isinstance(run_flags, dict) else None))
-    if soil_zones_file:
-        raw_overrides = _deep_merge(
-            raw_overrides,
-            {
-                "spatial_zones": {
-                    "enabled": True,
-                    "zone_file": soil_zones_file,
-                }
-            },
-        )
     if not dem_file and isinstance(raw_overrides.get("dem_file"), str):
         dem_file = str(raw_overrides["dem_file"])
     if not soil_zones_file and isinstance(raw_overrides.get("soil_zones_file"), str):
@@ -479,35 +469,17 @@ class RuntimeSession:
     def run_to_completion(self, app_state: Dict[str, Any]) -> None:
         sim_data = app_state["simulations"][self.simulation_id]
         try:
-            sim_data.update(
-                {
-                    "status": "running",
-                    "start_time": datetime.now().isoformat(),
-                }
-            )
-            last_published_output_count = int(sim_data.get("output_count") or 0)
+            sim_data["status"] = "running"
+            sim_data["start_time"] = datetime.now().isoformat()
 
             def progress_callback(time_info: Dict[str, Any]) -> None:
-                nonlocal last_published_output_count
                 if self.stop_requested or sim_data.get("stop_requested"):
                     raise SimulationStopRequested()
+                sim_data["progress"] = time_info["progress"]
+                sim_data["current_time"] = time_info["t_current"]
+                sim_data["step_count"] = time_info["step_count"]
                 solver = self.solver
-                output_count = (
-                    int(getattr(solver.time_stepper, "output_count", 0))
-                    if solver
-                    else int(sim_data.get("output_count") or 0)
-                )
-                if output_count <= last_published_output_count:
-                    return
-                last_published_output_count = output_count
-                sim_data.update(
-                    {
-                        "progress": time_info["progress"],
-                        "current_time": time_info["t_current"],
-                        "step_count": time_info["step_count"],
-                        "output_count": output_count,
-                    }
-                )
+                sim_data["output_count"] = getattr(solver.time_stepper, "output_count", 0) if solver else sim_data.get("output_count", 0)
 
             self.solver.set_progress_callback(progress_callback)
             self.solver.run()

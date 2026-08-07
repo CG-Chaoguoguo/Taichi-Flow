@@ -29,25 +29,7 @@ def _create_ready_scenario(client: TestClient, project: dict, name: str) -> dict
     assert revision.status_code == 201
     scenario = client.post(
         f"/api/projects/{project['project_id']}/scenarios",
-        json={
-            "name": name,
-            "input_revision_id": revision.json()["revision_id"],
-            "parameter_patch": {
-                "time.t_end": 3600,
-                "rainfall.mode": "uniform",
-                "rainfall.periods": [
-                    {
-                        "period_id": "period-0001",
-                        "index": 1,
-                        "start_s": 0,
-                        "end_s": 3600,
-                        "source": "uniform",
-                        "cri_mps": 0,
-                    }
-                ],
-                "manning.source": "global",
-            },
-        },
+        json={"name": name, "input_revision_id": revision.json()["revision_id"]},
     )
     assert scenario.status_code == 201
     return scenario.json()
@@ -83,83 +65,6 @@ def test_project_catalog_survives_application_restart(tmp_path: Path) -> None:
 
         assert client.get("/api/projects/list").status_code == 404
         assert client.get("/api/simulation/list").status_code == 404
-
-
-def test_draft_scenario_allowed_without_input_revision(tmp_path: Path) -> None:
-    project_root = tmp_path / "draft-project"
-    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
-        project = _create_project(client, project_root, name="Draft first")
-        created = client.post(
-            f"/api/projects/{project['project_id']}/scenarios",
-            json={"name": "Early draft"},
-        )
-        assert created.status_code == 201
-        scenario = created.json()
-        assert scenario["status"] == "draft"
-        assert scenario["input_revision_id"] is None
-
-        blocked = client.post(
-            f"/api/projects/{project['project_id']}/queue",
-            json={"scenario_id": scenario["scenario_id"]},
-        )
-        assert blocked.status_code == 422
-        assert blocked.json()["code"] == "scenario_configuration_invalid"
-
-        dem = client.post(
-            f"/api/projects/{project['project_id']}/uploads/dem",
-            files={"file": ("dem.asc", b"ncols 1\nnrows 1\ncellsize 1\n1\n", "text/plain")},
-        )
-        assert dem.status_code == 201
-        revision = client.post(
-            f"/api/projects/{project['project_id']}/input-revisions",
-            json={"upload_ids": [dem.json()["upload_id"]]},
-        )
-        assert revision.status_code == 201
-        assert revision.json()["status"] == "ready"
-
-        refreshed = client.get(
-            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}"
-        )
-        assert refreshed.status_code == 200
-        assert refreshed.json()["status"] == "draft"
-        assert refreshed.json()["input_revision_id"] is None
-
-        configured = client.patch(
-            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
-            json={
-                "expected_version": refreshed.json()["version"],
-                "parameter_patch": {
-                    "time.t_end": 3600,
-                    "rainfall.mode": "uniform",
-                    "rainfall.periods": [
-                        {
-                            "period_id": "period-0001",
-                            "index": 1,
-                            "start_s": 0,
-                            "end_s": 3600,
-                            "source": "uniform",
-                            "cri_mps": 0,
-                        }
-                    ],
-                    "manning.source": "global",
-                },
-                "input_bindings": [
-                    {
-                        "binding_key": "dem.primary",
-                        "asset_id": dem.json()["upload_id"],
-                        "family": "dem",
-                        "role": "primary",
-                    }
-                ],
-            },
-        )
-        assert configured.status_code == 200
-
-        queued = client.post(
-            f"/api/projects/{project['project_id']}/queue",
-            json={"scenario_id": scenario["scenario_id"]},
-        )
-        assert queued.status_code == 201
 
 
 def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) -> None:
@@ -199,9 +104,7 @@ def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) 
         )
         assert scenario_response.status_code == 201
         scenario = scenario_response.json()
-        assert scenario["parameter_patch"] == {"rheology.n_manning": 0.04}
-        assert scenario["effective_parameters"]["rheology.n_manning"] == 0.04
-        assert scenario["effective_parameters"]["time.t_end"] == 259200.0
+        assert scenario["effective_parameters"] == {"rheology.n_manning": 0.04}
 
         rejected = client.patch(
             f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
@@ -209,149 +112,6 @@ def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) 
         )
         assert rejected.status_code == 422
         assert rejected.json()["code"] == "parameter_not_editable"
-
-
-def test_delete_upload_removes_from_list_and_allows_revision_bound(tmp_path: Path) -> None:
-    project_root = tmp_path / "delete-upload-project"
-    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
-        project = _create_project(client, project_root, name="Delete upload")
-        project_id = project["project_id"]
-        payload = b"ncols 1\nnrows 1\ncellsize 1\n1\n"
-
-        orphan = client.post(
-            f"/api/projects/{project_id}/uploads/slope",
-            files={"file": ("orphan.asc", payload, "text/plain")},
-        )
-        assert orphan.status_code == 201
-        orphan_id = orphan.json()["upload_id"]
-
-        deleted = client.delete(f"/api/projects/{project_id}/uploads/{orphan_id}")
-        assert deleted.status_code == 204
-        listed = client.get(f"/api/projects/{project_id}/uploads")
-        assert listed.status_code == 200
-        assert all(item["upload_id"] != orphan_id for item in listed.json()["uploads"])
-
-        dem = client.post(
-            f"/api/projects/{project_id}/uploads/dem",
-            files={"file": ("dem.asc", payload + b"2\n", "text/plain")},
-        )
-        assert dem.status_code == 201
-        dem_id = dem.json()["upload_id"]
-        revision = client.post(
-            f"/api/projects/{project_id}/input-revisions",
-            json={"upload_ids": [dem_id]},
-        )
-        assert revision.status_code == 201
-        revision_id = revision.json()["revision_id"]
-
-        bound_delete = client.delete(f"/api/projects/{project_id}/uploads/{dem_id}")
-        assert bound_delete.status_code == 204
-        assert all(
-            item["upload_id"] != dem_id
-            for item in client.get(f"/api/projects/{project_id}/uploads").json()["uploads"]
-        )
-        validated = client.post(f"/api/projects/{project_id}/input-revisions/{revision_id}/validate")
-        assert validated.status_code == 200
-        assert validated.json()["valid"] is True
-
-        missing = client.delete(f"/api/projects/{project_id}/uploads/upl-missing")
-        assert missing.status_code == 404
-        assert missing.json()["code"] == "upload_not_found"
-
-
-def test_upload_raster_preview_png(tmp_path: Path) -> None:
-    project_root = tmp_path / "preview-project"
-    asc = (
-        b"ncols 2\n"
-        b"nrows 2\n"
-        b"xllcorner 100\n"
-        b"yllcorner 200\n"
-        b"cellsize 10\n"
-        b"NODATA_value -9999\n"
-        b"1 2\n"
-        b"3 4\n"
-    )
-    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
-        project = _create_project(client, project_root, name="Preview")
-        project_id = project["project_id"]
-        uploaded = client.post(
-            f"/api/projects/{project_id}/uploads/dem",
-            files={"file": ("tiny.asc", asc, "text/plain")},
-        )
-        assert uploaded.status_code == 201
-        upload_id = uploaded.json()["upload_id"]
-
-        preview = client.get(
-            f"/api/projects/{project_id}/uploads/{upload_id}/preview",
-            params={"mode": "downsample"},
-        )
-        assert preview.status_code == 200
-        assert preview.headers["content-type"].startswith("image/png")
-        assert preview.content[:8] == b"\x89PNG\r\n\x1a\n"
-        assert preview.headers["X-Raster-Width"] == "2"
-        assert preview.headers["X-Raster-Height"] == "2"
-        assert "100" in preview.headers["X-Raster-Bounds"]
-        assert preview.headers["X-Value-Min"] == "1.0"
-        assert preview.headers["X-Value-Max"] == "4.0"
-
-        missing = client.get(f"/api/projects/{project_id}/uploads/upl-missing/preview")
-        assert missing.status_code == 404
-        assert missing.json()["code"] == "upload_not_found"
-
-
-def test_chinese_scenario_name_round_trip(tmp_path: Path) -> None:
-    project_root = tmp_path / "chinese-name-project"
-    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
-        project = _create_project(client, project_root, name="中文项目")
-        created = client.post(
-            f"/api/projects/{project['project_id']}/scenarios",
-            json={"name": "基准工况"},
-        )
-        assert created.status_code == 201
-        assert created.json()["name"] == "基准工况"
-
-        listed = client.get(f"/api/projects/{project['project_id']}/scenarios")
-        assert listed.status_code == 200
-        assert listed.json()["scenarios"][0]["name"] == "基准工况"
-
-        detail = client.get(
-            f"/api/projects/{project['project_id']}/scenarios/{created.json()['scenario_id']}"
-        )
-        assert detail.status_code == 200
-        assert detail.json()["name"] == "基准工况"
-
-
-def test_corrupted_scenario_name_repaired_from_scenario_json(tmp_path: Path) -> None:
-    from api.services.workbench_store import WorkbenchStore
-
-    project_root = tmp_path / "repair-name-project"
-    state_dir = tmp_path / "state"
-    with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
-        project = _create_project(client, project_root, name="Repair study")
-        created = client.post(
-            f"/api/projects/{project['project_id']}/scenarios",
-            json={"name": "基准工况"},
-        )
-        assert created.status_code == 201
-        scenario_id = created.json()["scenario_id"]
-
-    store = WorkbenchStore(state_dir=state_dir)
-    database = store.project_database(project["project_id"])
-    with database.connect() as connection:
-        connection.execute(
-            "UPDATE scenarios SET name=? WHERE scenario_id=?",
-            ("????", scenario_id),
-        )
-        connection.commit()
-
-    with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
-        listed = client.get(f"/api/projects/{project['project_id']}/scenarios")
-        assert listed.status_code == 200
-        assert listed.json()["scenarios"][0]["name"] == "基准工况"
-
-        detail = client.get(f"/api/projects/{project['project_id']}/scenarios/{scenario_id}")
-        assert detail.status_code == 200
-        assert detail.json()["name"] == "基准工况"
 
 
 def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> None:
@@ -382,9 +142,9 @@ def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> Non
         retried = client.post(f"{queue_url}/{first.json()['queue_item_id']}/retry")
         assert retried.status_code == 201
         assert retried.json()["retry_of"] == first.json()["queue_item_id"]
-        assert retried.json()["status"] == "waiting"
+        assert retried.json()["status"] == "queued"
 
     with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
         persisted = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
-        assert {item["status"] for item in persisted} == {"waiting", "cancelled"}
+        assert {item["status"] for item in persisted} == {"queued", "cancelled"}
         assert any(item["retry_of"] == first.json()["queue_item_id"] for item in persisted)

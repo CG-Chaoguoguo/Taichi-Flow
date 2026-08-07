@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import type { Layout, LayoutChangedMeta } from "react-resizable-panels";
 import { RasterViewportProvider } from "../../contexts/RasterViewportContext";
-import { isActiveScenario, useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { normalizeEditorLayoutPreferences, type EditorLayoutPreferencesV1 } from "../../layout/editorLayout";
 import { TAICHI_FLOW_PREFERENCES_STORAGE_KEY } from "../../themePreference";
 import {
@@ -19,7 +19,6 @@ import type { WorkspaceModule } from "../Calculate/CalculateWorkspace";
 import { ScenarioOutliner } from "./ScenarioOutliner";
 import { InspectorPanel } from "./InspectorPanel";
 import { BottomDock } from "./BottomDock";
-import { canEditScenario } from "../../utils/scenarioEditability";
 
 function selectionToModule(kind: string | undefined): WorkspaceModule {
   if (kind === "input") return "input";
@@ -38,7 +37,6 @@ export function ProjectEditor() {
   const navigate = useNavigate();
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
-  const queue = useTaichiFlowStore((state) => state.queue);
   const inputFiles = useTaichiFlowStore((state) => state.inputFiles);
   const layerVisibility = useTaichiFlowStore((state) => state.layerVisibility);
   const layerOrder = useTaichiFlowStore((state) => state.layerOrder);
@@ -163,25 +161,11 @@ export function ProjectEditor() {
     setEditorSelection({ kind: "scenario", scenarioId });
   }, [scenarioId, setEditorSelection]);
 
-  useEffect(() => {
-    if (!scenarioId || scenarios.length === 0) return;
-    const routeScenario = scenarios.find((scenario) => scenario.scenario_id === scenarioId);
-    if (routeScenario && isActiveScenario(routeScenario)) return;
-    const next = scenarios.find(isActiveScenario);
-    if (next) {
-      setEditorSelection({ kind: "scenario", scenarioId: next.scenario_id });
-      navigate(`/editor/${projectId}/scenarios/${next.scenario_id}`, { replace: true });
-    } else {
-      setEditorSelection({ kind: "input", family: "all" });
-      navigate(`/editor/${projectId}`, { replace: true });
-    }
-  }, [navigate, projectId, scenarioId, scenarios, setEditorSelection]);
-
   const activeModule = useMemo(() => selectionToModule(editorSelection?.kind), [editorSelection?.kind]);
   const selectedScenario = useMemo(() => {
-    if (scenarioId) return scenarios.find((scenario) => scenario.scenario_id === scenarioId && isActiveScenario(scenario));
+    if (scenarioId) return scenarios.find((scenario) => scenario.scenario_id === scenarioId);
     if (editorSelection?.kind === "scenario" || editorSelection?.kind === "result") {
-      return scenarios.find((scenario) => scenario.scenario_id === editorSelection.scenarioId && isActiveScenario(scenario));
+      return scenarios.find((scenario) => scenario.scenario_id === editorSelection.scenarioId);
     }
     return undefined;
   }, [editorSelection, scenarioId, scenarios]);
@@ -191,7 +175,7 @@ export function ProjectEditor() {
     setDraftBindings([...(selectedScenario?.input_bindings || [])]);
     setWorkspaceMode("canvas");
     if (selectedScenario) void fetchScenarioConfiguration(selectedScenario.scenario_id);
-  }, [fetchScenarioConfiguration, selectedScenario?.scenario_id]);
+  }, [fetchScenarioConfiguration, selectedScenario?.scenario_id, selectedScenario?.updated_at]);
 
   const baselinePeriods = selectedScenario?.parameter_baseline?.["rainfall.periods"];
   const draftPeriods = (Array.isArray(draftPatch["rainfall.periods"])
@@ -240,25 +224,8 @@ export function ProjectEditor() {
     }
   };
 
-  const handleDraftChange = (next: Record<string, unknown>) => {
-    setDraftPatch(next);
-  };
-
-  const handleBindingsChange = (next: InputBinding[]) => {
-    setDraftBindings(next);
-  };
-
-  const selectedScenarioCanEdit = canEditScenario(selectedScenario, queue);
-
   const handleSelectScenario = (nextScenarioId: string) => {
     navigate(`/editor/${projectId}/scenarios/${nextScenarioId}`, { replace: true });
-  };
-
-  const handleScenarioRemoved = (_scenarioId: string, nextScenarioId?: string) => {
-    if (!nextScenarioId) {
-      setEditorSelection({ kind: "input", family: "all" });
-      navigate(`/editor/${projectId}`, { replace: true });
-    }
   };
 
   const focusAsset = (fileOrId: InputFile | string) => {
@@ -305,9 +272,8 @@ export function ProjectEditor() {
                 <CollapsedPaneRail label="方案栏" direction="left" temporary={focusPanels} onExpand={focusPanels ? undefined : () => togglePane("outliner")} />
               ) : (
                 <ScenarioOutliner
-                  selectedScenarioId={scenarioId || scenarios.find(isActiveScenario)?.scenario_id}
+                  selectedScenarioId={scenarioId || scenarios[0]?.scenario_id}
                   onSelectScenario={handleSelectScenario}
-                  onScenarioRemoved={handleScenarioRemoved}
                   onToggleCollapse={() => togglePane("outliner")}
                 />
               )}
@@ -326,7 +292,7 @@ export function ProjectEditor() {
                   periods={draftPeriods}
                   bindings={draftBindings}
                   assets={inputFiles}
-                  canEdit={selectedScenarioCanEdit}
+                  canEdit={["draft", "ready"].includes(selectedScenario.status)}
                   timeline={draftTimeline}
                   simulationEndS={draftSimulationEnd}
                   onChange={handleRainfallChange}
@@ -372,8 +338,8 @@ export function ProjectEditor() {
                   draftBindings={draftBindings}
                   dirty={dirty}
                   saving={saving}
-                   onDraftChange={handleDraftChange}
-                   onBindingsChange={handleBindingsChange}
+                  onDraftChange={setDraftPatch}
+                  onBindingsChange={setDraftBindings}
                   onSave={saveScenario}
                   onOpenRainfall={() => setWorkspaceMode("rainfall")}
                   onToggleCollapse={() => togglePane("inspector")}

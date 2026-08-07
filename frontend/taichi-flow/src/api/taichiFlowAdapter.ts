@@ -12,13 +12,8 @@ import type {
   ProjectInfo,
   RuntimeLock,
   QueueItem,
-  QueueDeletePreview,
-  QueueBatchDeleteResult,
-  QueueStartResult,
   ResultFamily,
   Scenario,
-  ScenarioDeletePreview,
-  ScenarioPermanentDeleteResult,
   ScenarioConfiguration,
   SimulationRun,
   DirectoryListing,
@@ -288,10 +283,7 @@ export const scenarioApi = {
   ),
   duplicateScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/duplicate`, json({})),
   archiveScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/archive`, json({})),
-  restoreScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/restore`, json({})),
-  previewDelete: (projectId: string, scenarioId: string) => request<ScenarioDeletePreview>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/delete-preview`, json({})),
   deleteScenario: (projectId: string, scenarioId: string) => request<void>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}`, { method: "DELETE" }),
-  permanentlyDelete: (projectId: string, scenarioId: string) => request<ScenarioPermanentDeleteResult>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/permanent`, { method: "DELETE" }),
 };
 
 export const parameterApi = {
@@ -334,10 +326,7 @@ export const migrationApi = {
 export const queueApi = {
   getQueue: async (projectId: string): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue`)).items,
   enqueueScenario: (projectId: string, scenarioId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId })),
-  startQueue: (projectId: string) => request<QueueStartResult>(`/projects/${encodeURIComponent(projectId)}/queue/start`, json({})),
   reorderQueue: async (projectId: string, itemId: string, newPosition: number): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue/order`, putJson({ item_id: itemId, new_position: newPosition }))).items,
-  previewDelete: (projectId: string, queueItemIds: string[]) => request<QueueDeletePreview>(`/projects/${encodeURIComponent(projectId)}/queue/delete-preview`, json({ queue_item_ids: queueItemIds })),
-  batchDelete: (projectId: string, queueItemIds: string[]) => request<QueueBatchDeleteResult>(`/projects/${encodeURIComponent(projectId)}/queue/batch-delete`, json({ queue_item_ids: queueItemIds })),
   cancelQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stopRunningItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/stop`, json({})),
   retryQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/retry`, json({})),

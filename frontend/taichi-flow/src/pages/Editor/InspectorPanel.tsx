@@ -11,13 +11,12 @@ import {
   DEFAULT_RASTER_SYMBOLOGY,
   useRasterViewportOptional,
 } from "../../contexts/RasterViewportContext";
-import { isActiveScenario, useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import type { InputBinding, InputFile, Scenario } from "../../types";
 import { InputModule } from "../Calculate/InputModule";
 import { ParameterModule } from "../Calculate/ParameterModule";
 import { ResultModule } from "../Calculate/ResultModule";
 import { RunModule } from "../Calculate/RunModule";
-import { canEditScenario } from "../../utils/scenarioEditability";
 import {
   CollapsedPaneRail,
   PanelCollapseButton,
@@ -151,19 +150,17 @@ export function InspectorPanel({
   const [tab, setTab] = useState<InspectorTab>("parameters");
 
   const scenarioFromSelection = editorSelection?.kind === "scenario" || editorSelection?.kind === "result"
-    ? scenarios.find((item) => item.scenario_id === editorSelection.scenarioId && isActiveScenario(item))
+    ? scenarios.find((item) => item.scenario_id === editorSelection.scenarioId)
     : undefined;
-  const scenarioFromRoute = scenarioId ? scenarios.find((item) => item.scenario_id === scenarioId && isActiveScenario(item)) : undefined;
+  const scenarioFromRoute = scenarioId ? scenarios.find((item) => item.scenario_id === scenarioId) : undefined;
   const queueItem = editorSelection?.kind === "queue" ? queue.find((item) => item.queue_item_id === editorSelection.queueItemId) : undefined;
   const scenarioFromQueue = queueItem ? scenarios.find((item) => item.scenario_id === queueItem.scenario_id) : undefined;
   const scenario = scenarioFromSelection || scenarioFromQueue || scenarioFromRoute;
   const displayScenario = scenario ?? PREVIEW_SCENARIO;
-  const kind = editorSelection?.kind === "queue" && !queueItem
-    ? (scenario ? "scenario" : "input")
-    : editorSelection?.kind || (scenario ? "scenario" : "input");
+  const kind = editorSelection?.kind || (scenario ? "scenario" : "input");
   const selectedFamily = editorSelection?.kind === "input" ? editorSelection.family : DEFAULT_INPUT_FAMILY;
   const isLegacy = Boolean(scenario && !scenario.parameter_template_id);
-  const canEdit = Boolean(scenario && !isLegacy && canEditScenario(scenario, queue));
+  const canEdit = Boolean(scenario && !isLegacy && ["draft", "ready"].includes(scenario.status));
   const configuration = scenario ? configurations[scenario.scenario_id] : null;
 
   const title = kind === "input"
@@ -274,6 +271,9 @@ export function InspectorPanel({
                       />
                     );
                   })}
+                  <button type="button" className="tf-binding-summary-link" disabled={isLegacy} onClick={onOpenRainfall}>
+                    <span>降雨时段绑定</span><strong>{draftBindings.filter((item) => item.role === "rainfall-period" && item.active).length}</strong><span>打开编辑器 →</span>
+                  </button>
                   {isLegacy ? <div className="tf-validation-summary is-neutral">迁移完成后将执行结构化参数与输入绑定预检。</div> : <ValidationSummary validation={configuration?.validation} />}
                 </div>
               ) : null}

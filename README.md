@@ -17,6 +17,7 @@ Taichi-Flow/
   api/                         FastAPI domain service and runtime coordinator
   edda/                        Internal numerical implementation
   frontend/taichi-flow/        React/Vite production UI
+  artifacts/agent_runs/        Migration and verification evidence
   docs/                        Current architecture, API, and runbooks
   tests/                       Domain and solver regression tests
 ```
@@ -69,8 +70,7 @@ smoke-test, and future packaging boundaries.
 
 - Projects: `/api/projects`, `/api/projects/import`, `/api/projects/{id}`
 - Inputs and revisions: `/api/projects/{id}/uploads`, `/input-revisions`
-- Scenarios and queue: `/scenarios`, `/queue`, `/queue/start`, `/queue/order`,
-  `/queue/delete-preview`, `/queue/batch-delete`
+- Scenarios and queue: `/scenarios`, `/queue`, `/queue/order`
 - Runs and terminal: `/api/projects/{id}/simulations/{run_id}`
 - Results and exports: `/results/{run_id}`, `/exports`
 - Realtime: `/ws/simulations/{run_id}` and `/ws/projects/{id}/queue`
@@ -93,6 +93,6 @@ npm run test:desktop
 npm run build
 ```
 
-Generated diagnostics, screenshots, logs, runtime state, and simulation outputs
-remain in ignored local directories such as `artifacts/`, `.runtime/`, and
-`outputs/`; they are not part of the public source tree.
+Migration and browser evidence is kept under
+`artifacts/agent_runs/2026-08-02_taichi_flow_full_ui_cutover/` and the append-only
+`agentlog.md`.

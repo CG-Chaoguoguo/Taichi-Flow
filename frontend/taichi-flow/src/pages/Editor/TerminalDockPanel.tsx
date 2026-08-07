@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isActiveScenario, useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { runApi } from "../../api/taichiFlowAdapter";
 
 export function TerminalDockPanel() {
@@ -14,9 +14,9 @@ export function TerminalDockPanel() {
       ? editorSelection.scenarioId
       : editorSelection?.kind === "queue"
         ? queue.find((item) => item.queue_item_id === editorSelection.queueItemId)?.scenario_id
-        : scenarios.find((item) => isActiveScenario(item) && item.status === "running")?.scenario_id || scenarios.find(isActiveScenario)?.scenario_id;
+        : scenarios.find((item) => item.status === "running")?.scenario_id || scenarios[0]?.scenario_id;
 
-  const scenario = scenarios.find((item) => item.scenario_id === scenarioId && isActiveScenario(item));
+  const scenario = scenarios.find((item) => item.scenario_id === scenarioId);
   const simulationId = scenario?.latest_simulation_id;
 
   useEffect(() => {
