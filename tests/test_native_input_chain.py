@@ -306,10 +306,10 @@ def test_reference_config_parser_detects_direct_rain_plus_storage_dfs_variant(tm
     assert parsed.ltstar_raw < 0
     assert parsed.zmax == 7.0
     unsupported_flags = {entry["flag"]: entry for entry in parsed.unsupported_flags}
-    assert unsupported_flags["use_analytic_fillable_porosity"]["current_status"] == "source-trace-blocked"
-    assert unsupported_flags["flow_direction_mode"]["current_status"] == "source-trace-blocked"
-    assert unsupported_flags["simulate_rainfall"]["current_status"] == "fixed-status-only"
-    assert unsupported_flags["save_runoff_grids"]["current_status"] == "production-unsupported"
+    assert unsupported_flags["use_analytic_fillable_porosity"]["current_status"] == "parsed_only"
+    assert unsupported_flags["flow_direction_mode"]["current_status"] == "parsed_only"
+    assert unsupported_flags["simulate_rainfall"]["current_status"] == "partial"
+    assert unsupported_flags["save_runoff_grids"]["current_status"] == "unsupported"
     assert "OUTNQ_*" in parsed.reference_output_expectations["expected_output_families"]
     assert "Flow_depth_*" in parsed.reference_output_expectations["expected_output_families"]
     assert parsed.reference_output_expectations["output_timing"]["Flow_depth_*"] == "periodic_output"
@@ -875,4 +875,3 @@ def test_reference_mapping_requires_rifil_when_cri_is_negative(tmp_path):
             parsed,
             tmp_path / "output_missing_rifil",
         )
-
