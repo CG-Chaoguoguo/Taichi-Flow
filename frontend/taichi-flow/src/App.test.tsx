@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ProjectRouteGuard } from "./App";
+import { EditorRouteGuard } from "./App";
 import { useTaichiFlowStore } from "./stores/taichiFlowStore";
 
 function renderGuard(projectId = "project-1") {
@@ -11,14 +11,14 @@ function renderGuard(projectId = "project-1") {
         <Route path="projects" element={<div>项目列表</div>} />
         <Route
           path="projects/:projectId/queue"
-          element={<ProjectRouteGuard><div>队列页面</div></ProjectRouteGuard>}
+          element={<EditorRouteGuard><div>队列页面</div></EditorRouteGuard>}
         />
       </Routes>
     </MemoryRouter>,
   );
 }
 
-describe("ProjectRouteGuard", () => {
+describe("EditorRouteGuard", () => {
   beforeEach(() => {
     useTaichiFlowStore.setState({ activeProject: null, activeProjectId: null });
   });

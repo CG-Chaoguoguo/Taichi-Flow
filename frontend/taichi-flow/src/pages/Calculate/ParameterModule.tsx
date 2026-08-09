@@ -2,6 +2,7 @@ import { FileDiff, RotateCcw, Search, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parameterApi } from "../../api/taichiFlowAdapter";
 import { Button } from "../../components/Button";
+import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
 import { ManningModeEditor } from "../../components/ManningModeEditor";
 import { ParameterGroupSection } from "../../components/ParameterGroupSection";
@@ -101,6 +102,7 @@ export function ParameterModule({
   const entries = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return (catalog?.parameters || []).filter((entry) => {
+      if (entry.control_family === "edda") return false;
       if (MODE_EDITOR_KEYS.has(entry.key)) return false;
       if (!(entry.editable || entry.label_zh || entry.abbrev)) return false;
       if (!needle) return true;
@@ -108,6 +110,10 @@ export function ParameterModule({
         .filter(Boolean).join(" ").toLowerCase().includes(needle);
     });
   }, [catalog, search]);
+  const eddaControlEntries = useMemo(
+    () => (catalog?.parameters || []).filter((entry) => entry.control_family === "edda"),
+    [catalog],
+  );
 
   const canEdit = !readOnly && (scenario.status === "draft" || scenario.status === "ready");
   const groups = useMemo(() => {
@@ -259,6 +265,17 @@ export function ParameterModule({
             <Button variant="ghost" size="small" onClick={() => setPendingEndTime(null)}>取消</Button>
           </div>
         </section>
+      ) : null}
+
+      {catalog?.control_registry && eddaControlEntries.length ? (
+        <EddaComputeControlsSection
+          entries={eddaControlEntries}
+          controlRegistry={catalog.control_registry}
+          baseline={scenario.parameter_baseline || {}}
+          draftPatch={draftPatch}
+          canEdit={canEdit}
+          onDraftChange={onDraftChange}
+        />
       ) : null}
 
       <section className="tf-card tf-card-flush tf-rainfall-summary-card">

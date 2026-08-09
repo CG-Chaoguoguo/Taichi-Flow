@@ -25,6 +25,7 @@ from api.services import (
     write_runtime_metadata_files,
 )
 from api.services.parameter_catalog import build_parameter_catalog
+from api.services.edda_semantic_gate import validate_runtime_control_plan
 from api.services.structured_input_resolver import materialize_structured_rainfall
 from api.services.runtime_profile import (
     RuntimeProfile,
@@ -34,6 +35,7 @@ from api.services.runtime_profile import (
 )
 from edda.backend.backend_manager import reset_taichi_runtime
 from edda.config.sim_config import BoundaryConditionConfig, SimulationConfig
+from edda.config.edda_runtime_plan import EddaRuntimeControlPlan, build_runtime_control_plan
 from taichi_flow.solver import FlowSolver
 
 
@@ -42,6 +44,17 @@ SolverFactory = Callable[[SimulationConfig], Any]
 
 class SimulationStopRequested(Exception):
     """Internal control-flow signal for a user-requested stop."""
+
+
+def _runtime_error_payload(exc: Exception) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"error": str(exc)}
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    if code:
+        payload["error_code"] = str(code)
+    if details is not None:
+        payload["error_details"] = deepcopy(details)
+    return payload
 
 
 def _deep_merge(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -233,6 +246,7 @@ class PreparedRuntime:
     request_payload: Dict[str, Any]
     job_metadata: Dict[str, Any]
     runtime_profile: RuntimeProfile
+    runtime_control_plan: EddaRuntimeControlPlan
 
 
 def prepare_runtime_from_payload(
@@ -358,6 +372,16 @@ def prepare_runtime_from_payload(
         runtime_input_manifest["structured_rainfall"] = structured_rainfall_audit
         provenance["structured_rainfall"] = structured_rainfall_audit
 
+    runtime_control_plan = build_runtime_control_plan(flow_config)
+    semantic_gate = validate_runtime_control_plan(runtime_control_plan)
+    control_plan_payload = runtime_control_plan.to_dict()
+    effective_config["edda_runtime_control_plan"] = control_plan_payload
+    effective_config["edda_semantic_gate"] = semantic_gate
+    runtime_input_manifest["edda_runtime_control_plan"] = control_plan_payload
+    runtime_input_manifest["edda_semantic_gate"] = semantic_gate
+    provenance["edda_runtime_control_plan"] = control_plan_payload
+    provenance["edda_semantic_gate"] = semantic_gate
+
     if not requested_backend and flow_config.compute.backend == "auto":
         flow_config.compute.backend = profile.default_backend
 
@@ -385,6 +409,7 @@ def prepare_runtime_from_payload(
         request_payload=request_payload,
         job_metadata=job_metadata,
         runtime_profile=profile,
+        runtime_control_plan=runtime_control_plan,
     )
 
 
@@ -431,6 +456,13 @@ class RuntimeSession:
                 self.solver,
                 self.prepared.runtime_input_manifest,
             )
+            runtime_gate = validate_runtime_control_plan(
+                self.prepared.runtime_control_plan,
+                runtime_input_manifest=self.prepared.runtime_input_manifest,
+            )
+            self.prepared.runtime_input_manifest["edda_semantic_gate"] = runtime_gate
+            self.prepared.effective_config["edda_semantic_gate"] = runtime_gate
+            self.prepared.provenance["edda_semantic_gate"] = runtime_gate
             self._write_metadata_bundle()
             return self.state_entry(status="pending")
         except Exception:
@@ -463,6 +495,8 @@ class RuntimeSession:
             "start_time": None,
             "end_time_actual": None,
             "error": None,
+            "error_code": None,
+            "error_details": {},
             "resource_summary": {},
         }
 
@@ -509,6 +543,8 @@ class RuntimeSession:
                     "status": "stopped",
                     "end_time_actual": datetime.now().isoformat(),
                     "error": None,
+                    "error_code": None,
+                    "error_details": {},
                     "effective_config": self.prepared.effective_config,
                     "runtime_input_manifest": self.prepared.runtime_input_manifest,
                     "runtime_provenance": self.prepared.provenance,
@@ -528,7 +564,7 @@ class RuntimeSession:
                 pass
         except Exception as exc:
             sim_data["status"] = "failed"
-            sim_data["error"] = str(exc)
+            sim_data.update(_runtime_error_payload(exc))
             try:
                 self._write_metadata_bundle()
             except Exception:

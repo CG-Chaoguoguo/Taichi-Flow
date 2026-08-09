@@ -13,6 +13,7 @@ import os
 import numpy as np
 import taichi as ti
 
+from edda.config.edda_runtime_plan import EddaRuntimeControlPlan, build_runtime_control_plan
 from edda.config.sim_config import SimulationConfig
 from edda.core.fields import EDDAFields
 from edda.io.topoindex_sidecar import (
@@ -387,10 +388,31 @@ class DFSDynamicWaveSolver:
         fields: EDDAFields,
         config: SimulationConfig,
         workspace: FortranDynamicWaveWorkspace,
+        *,
+        runtime_control_plan: EddaRuntimeControlPlan | None = None,
     ):
         self.fields = fields
         self.config = config
         self.workspace = workspace
+        self.runtime_control_plan = runtime_control_plan or build_runtime_control_plan(config)
+        self.simulate_rainfall = self.runtime_control_plan.run_enabled(
+            "simulate_rainfall", compatibility_default=True
+        )
+        self.simulate_infiltration = self.runtime_control_plan.run_enabled(
+            "simulate_infiltration", compatibility_default=True
+        )
+        self.simulate_outflow_cell = self.runtime_control_plan.run_enabled(
+            "simulate_outflow_cell", compatibility_default=True
+        )
+        self.simulate_shallow_landslide = self.runtime_control_plan.run_enabled(
+            "simulate_shallow_landslide", compatibility_default=True
+        )
+        self.simulate_erosion = self.runtime_control_plan.run_enabled(
+            "simulate_erosion", compatibility_default=True
+        )
+        self.simulate_separate_deposition = self.runtime_control_plan.run_enabled(
+            "simulate_water_and_solid_separately", compatibility_default=True
+        )
 
         self.fp = fields.fp
         self.g = DFS_GRAV
@@ -491,10 +513,24 @@ class DFSDynamicWaveSolver:
         self.cand_totalerosionvolume = ti.field(dtype=self.fp, shape=())
         self.cand_totalfsvolume = ti.field(dtype=self.fp, shape=())
         self.cand_totaldepovolume = ti.field(dtype=self.fp, shape=())
+        # `dfs.F90` records `fhpredi2(outflowcell)` and its discharge before
+        # zeroing the selected outflow cells.  Keep candidate and accepted
+        # snapshots separate so a rejected retry cannot overwrite the last
+        # accepted OUTNQ state.
+        self.outflow_candidate_depth = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_candidate_density = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_accepted_depth = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_accepted_density = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.last_accepted_outflow_dt = 0.0
         self.double_layer_model = None
         self.initial_rikzero_field = None
         self.numpy_float_dtype = np.float64 if self.fp == ti.f64 else np.float32
-        self.use_background_flux = bool(getattr(config.hydrology, "use_background_flux_offset", False))
+        self.use_background_flux = bool(
+            self.runtime_control_plan.run_controls.get(
+                "background_flux_offset",
+                getattr(config.hydrology, "use_background_flux_offset", False),
+            )
+        )
         self.use_transient_green_ampt = bool(getattr(config.hydrology, "use_transient_green_ampt_in_dfs", False))
         self.dfs_infiltration_variant = str(getattr(config.hydrology, "dfs_infiltration_variant", "tol_clipped_fhw"))
         self.dfs_face_flux_variant = str(getattr(config.hydrology, "dfs_face_flux_variant", "both_thin_weighted"))
@@ -838,6 +874,41 @@ class DFSDynamicWaveSolver:
         self.rizero0_field.from_numpy(
             np.full((fields.nx, fields.ny), self.rizero0, dtype=self.numpy_float_dtype)
         )
+        self.outflow_candidate_depth.fill(0.0)
+        self.outflow_candidate_density.fill(self.rhow)
+        self.outflow_accepted_depth.fill(0.0)
+        self.outflow_accepted_density.fill(self.rhow)
+
+    def get_last_accepted_outflow_samples(
+        self,
+        cells: list[dict[str, int]],
+        *,
+        dt_used: float | None = None,
+    ) -> list[dict[str, float]]:
+        """Return original-order OUTNQ samples from the accepted pre-clear state."""
+        sample_dt = self.last_accepted_outflow_dt if dt_used is None else float(dt_used)
+        if sample_dt <= 0.0:
+            return []
+
+        density_span = self.rhos - self.rhow
+        samples: list[dict[str, float]] = []
+        for cell in cells:
+            i = int(cell["i"])
+            j = int(cell["j"])
+            depth = float(self.outflow_accepted_depth[i, j])
+            density = float(self.outflow_accepted_density[i, j])
+            cell_area = float(self.fields.cell_area_cal[i, j])
+            cv = 0.0 if density_span <= 0.0 else max((density - self.rhow) / density_span, 0.0)
+            samples.append(
+                {
+                    "cell_id": int(cell["cell_id"]),
+                    "predictor_depth": depth,
+                    "predictor_density": density,
+                    "discharge_cms": depth * cell_area / sample_dt,
+                    "cv": cv,
+                }
+            )
+        return samples
 
     def set_double_layer_model(self, double_layer_model) -> None:
         self.double_layer_model = double_layer_model
@@ -5909,7 +5980,14 @@ class DFSDynamicWaveSolver:
         connectivity = self._get_flow_connectivity_numpy_cached()
         cell_id = np.asarray(connectivity["cell_id"], dtype=np.int64)
         active = ~np.asarray(self.fields.is_nodata.to_numpy(), dtype=bool)
-        boundary = np.asarray(self.fields.boundary_type.to_numpy(), dtype=np.int32)
+        if self.runtime_control_plan.strict:
+            excluded_source_mask = np.asarray(
+                self.fields.dfs_outflow_mask.to_numpy(), dtype=np.int32
+            )
+        else:
+            excluded_source_mask = np.asarray(
+                self.fields.boundary_type.to_numpy(), dtype=np.int32
+            ) == 1
         neighbor_i = np.asarray(connectivity["flow_neighbor_i"], dtype=np.int32)
         neighbor_j = np.asarray(connectivity["flow_neighbor_j"], dtype=np.int32)
         neighbor_id = np.asarray(connectivity["flow_neighbor_id"], dtype=np.int64)
@@ -5923,7 +6001,7 @@ class DFSDynamicWaveSolver:
             key=lambda item: item[0],
         )
         for source_cell_id, i, j in active_indices:
-            if boundary[i, j] == 1:
+            if excluded_source_mask[i, j]:
                 continue
             for direction in range(8):
                 ni = int(neighbor_i[i, j, direction])
@@ -5968,6 +6046,10 @@ class DFSDynamicWaveSolver:
 
     def step(self, dt: float) -> dict:
         """Perform one DFS step on workspace state without partial main-state commits."""
+        if not self.simulate_outflow_cell:
+            # Enforce the frozen control even if a checkpoint or external
+            # caller supplied a stale sidecar mask after initialization.
+            self.fields.dfs_outflow_mask.fill(0)
         if self.rholimit_initialized[None] == 0:
             self._zero_tanslodir_carry()
             self._seed_initial_rholimit_from_input_slope(self.rhow, self.rhos, self.cvstar)
@@ -5990,19 +6072,24 @@ class DFSDynamicWaveSolver:
         self.suggested_dt[None] = dt_reject
         self.max_wave_speed[None] = 0.0
         self._reset_first_reject_diagnostics(self.current_time, dt_used)
+        if not self.simulate_rainfall:
+            self._zero_rainfall_forcing()
         self._stage_inflow_forcing(dt_used)
         rnoff_period_precompute_manifest = self.apply_rnoff_period_precompute(dt_used)
 
-        if self.dfs_infiltration_variant == "direct_rain_plus_storage":
+        if not self.simulate_infiltration:
+            self._stage_surface_forcing_without_infiltration(dt_used, self.rhow, self.cvstar)
+        elif self.dfs_infiltration_variant == "direct_rain_plus_storage":
             self._stage_surface_forcing_direct_rain_plus_storage(dt_used, self.rhow, self.cvstar)
         elif self.use_transient_green_ampt:
             self._stage_surface_forcing_green_ampt(dt_used, self.rhow, self.cvstar)
         else:
             self._stage_surface_forcing(dt_used, self.rhow, self.cvstar)
-        if bool(rnoff_period_precompute_manifest.get("rnoff_period_precompute_enabled", False)):
-            self.apply_rnoff_period_precompute_to_surface_staging(dt_used)
-        else:
-            self.apply_rnoff_topoindex_runtime_hook(dt_used)
+        if self.simulate_infiltration:
+            if bool(rnoff_period_precompute_manifest.get("rnoff_period_precompute_enabled", False)):
+                self.apply_rnoff_period_precompute_to_surface_staging(dt_used)
+            else:
+                self.apply_rnoff_topoindex_runtime_hook(dt_used)
         self._record_stage_trace("STEP_START", dt_used, event="STEP_START")
         self._capture_depo_velocity_source_entry()
         momentum_probe_enabled = int(self.momentum_faceflux_probe_enabled[None]) != 0
@@ -6022,8 +6109,13 @@ class DFSDynamicWaveSolver:
             self.cvstar,
             1 if self.cvbar_erosion_parity_enabled else 0,
             self.legacy_previous_face_cvbar_scalar,
+            1 if self.simulate_erosion else 0,
+            1 if self.simulate_separate_deposition else 0,
         )
-        self._advance_double_layer_failure_sources(dt_used)
+        if self.simulate_shallow_landslide:
+            self._advance_double_layer_failure_sources(dt_used)
+        else:
+            self._zero_failure_source_staging()
         self._record_stage_trace("SOURCE_STAGING", dt_used, event="POST_SOURCE_STAGING")
         self._merge_source_terms(dt_used, self.rhow, self.rhos, self.cvstar)
         self._run_erosion_deposition_kernel_diagnostic_if_enabled(dt_used)
@@ -6057,7 +6149,7 @@ class DFSDynamicWaveSolver:
             )
             if momentum_probe_enabled:
                 self._mark_momentum_faceflux_probe_rejected_status(1)
-            if self.double_layer_model is not None:
+            if self.simulate_shallow_landslide and self.double_layer_model is not None:
                 self.double_layer_model.restore_richards_committed_state()
             self._ci_candidate = None
             self._discard_precomputed_failure_candidate()
@@ -6085,6 +6177,7 @@ class DFSDynamicWaveSolver:
         self._reset_volume_balance_accumulators()
         self._accumulate_volume_balance(dt_used)
         self._finalize_volume_balance(dt_used)
+        self._capture_outflow_candidate_before_clear(self.rhow)
         self._apply_post_balance_outflow(self.rhow)
 
         accepted = int(self.reject_flag[None]) == 0
@@ -6096,7 +6189,7 @@ class DFSDynamicWaveSolver:
         if momentum_probe_enabled:
             self._mark_momentum_faceflux_probe_rejected_status(0 if accepted else 1)
         if not accepted:
-            if self.double_layer_model is not None:
+            if self.simulate_shallow_landslide and self.double_layer_model is not None:
                 # `dfs.F90` retries rejected dynamic-wave steps from the previously
                 # accepted Richards state. Only the temporary candidate arrays are
                 # advanced inside the rejected step; the committed `kkt/kkb`
@@ -6125,6 +6218,8 @@ class DFSDynamicWaveSolver:
         self._prepare_h_cv_rho_diagnostic_if_enabled()
         self._prepare_h_cv_rho_mutation_if_enabled()
         self._commit_volume_counters()
+        self._commit_accepted_outflow_candidate()
+        self.last_accepted_outflow_dt = dt_used
         self._commit_step(dt_used, dt_next, self.rhow, self.rhos, self.cvstar)
         self._finalize_h_cv_rho_diagnostic_if_enabled()
         self._run_h_cv_rho_mutation_if_enabled()
@@ -6154,7 +6249,8 @@ class DFSDynamicWaveSolver:
                 - float(erosion_diag_record["deposition_depth_increment_sum_expected"])
             )
             self.erosion_step_diagnostics.append(erosion_diag_record)
-        self._commit_precomputed_failure_schedule()
+        if self.simulate_shallow_landslide:
+            self._commit_precomputed_failure_schedule()
         self._commit_cumulative_infiltration()
         self._sync_uv_from_fortran_velocity()
         self._sync_legacy_directional_velocity()
@@ -6168,6 +6264,64 @@ class DFSDynamicWaveSolver:
             "experimental_first_reject_short_circuit": False,
             "first_reject": self.get_first_reject_diagnostics(),
         }
+
+    @ti.kernel
+    def _zero_rainfall_forcing(self):
+        for i, j in self.fields.rainfall:
+            self.fields.rainfall[i, j] = 0.0
+
+    @ti.kernel
+    def _zero_failure_source_staging(self):
+        for i, j in self.fields.tempfsh_flow:
+            self.fields.tempfsh_flow[i, j] = 0.0
+            self.fields.tempfsrho_flow[i, j] = 0.0
+
+    @ti.kernel
+    def _stage_surface_forcing_without_infiltration(
+        self,
+        dt: ti.f64,
+        rho_water: ti.f64,
+        cvstar: ti.f64,
+    ):
+        """Original `infilsimul=.false.` branch: `ir=0`, then normal mass staging."""
+        for i, j in self.fields.h:
+            if self.fields.is_nodata[i, j]:
+                self.fields.infiltration[i, j] = 0.0
+                self.fields.tempri[i, j] = 0.0
+                self.fields.tempinflowh[i, j] = 0.0
+                self.fields.tempinflowrho[i, j] = 0.0
+                self.fields.fhw[i, j] = 0.0
+                self.fields.fhpredi1[i, j] = 0.0
+                self.fields.frhopredi1[i, j] = rho_water
+                continue
+
+            self.fields.tempri[i, j] = self.fields.rainfall[i, j]
+            self.fields.infiltration[i, j] = 0.0
+            self.fields.fhw[i, j] = (
+                self.fields.h[i, j] * (1.0 - self.fields.Cv[i, j] / cvstar)
+                + self.fields.tempri[i, j] * dt
+                + self.fields.tempinflowh[i, j]
+            )
+            fhpredi1 = (
+                self.fields.h[i, j]
+                + self.fields.tempri[i, j] * dt
+                + self.fields.tempinflowh[i, j]
+            )
+            if fhpredi1 <= 0.0:
+                fhpredi1 = 0.0
+            self.fields.fhpredi1[i, j] = fhpredi1
+            if fhpredi1 <= EPS:
+                self.fields.frhopredi1[i, j] = rho_water
+            else:
+                mass = (
+                    self.fields.rho[i, j] * self.fields.h[i, j]
+                    + self.fields.tempri[i, j] * dt * rho_water
+                    + self.fields.tempinflowh[i, j] * self.fields.tempinflowrho[i, j]
+                )
+                self.fields.frhopredi1[i, j] = mass / fhpredi1
+            if _is_outflow(self.fields, i, j) == 1:
+                self.fields.fhpredi1[i, j] = 0.0
+                self.fields.frhopredi1[i, j] = rho_water
 
     @ti.kernel
     def _capture_depo_velocity_source_entry(self):
@@ -6277,9 +6431,10 @@ class DFSDynamicWaveSolver:
         rho = self.fields.rho.to_numpy().astype(np.float64, copy=False)
         rainfall = self.fields.rainfall.to_numpy().astype(np.float64, copy=False)
         nodata = self.fields.is_nodata.to_numpy().astype(bool, copy=False)
-        is_boundary = self.fields.is_boundary.to_numpy()
-        boundary_type = self.fields.boundary_type.to_numpy()
-        outflow = (is_boundary == 1) & (boundary_type == 1)
+        if self.runtime_control_plan.strict:
+            outflow = self.fields.dfs_outflow_mask.to_numpy() == 1
+        else:
+            outflow = self.fields.boundary_type.to_numpy() == 1
 
         kst = self.fields.K_sat_field.to_numpy().astype(np.float64, copy=False)
         theta_s = self.fields.theta_s_field.to_numpy().astype(np.float64, copy=False)
@@ -7017,6 +7172,8 @@ class DFSDynamicWaveSolver:
         cvstar: float,
         erosion_cvbar_override_enabled: int = 0,
         erosion_cvbar_override: float = 0.0,
+        simulate_erosion: int = 1,
+        simulate_separate_deposition: int = 1,
     ) -> None:
         self._compute_source_rates_kernel(
             dt,
@@ -7025,6 +7182,8 @@ class DFSDynamicWaveSolver:
             cvstar,
             int(erosion_cvbar_override_enabled),
             float(erosion_cvbar_override),
+            int(simulate_erosion),
+            int(simulate_separate_deposition),
         )
 
     @ti.kernel
@@ -7036,6 +7195,8 @@ class DFSDynamicWaveSolver:
         cvstar: ti.f64,
         erosion_cvbar_override_enabled: ti.i32,
         erosion_cvbar_override: ti.f64,
+        simulate_erosion: ti.i32,
+        simulate_separate_deposition: ti.i32,
     ):
         rhoero = cvstar * (rho_sediment - rho_water) + rho_water
 
@@ -7300,6 +7461,20 @@ class DFSDynamicWaveSolver:
                         deporate = (rho_water - self.fields.frhopredi1[i, j]) * self.fields.fhpredi1[i, j] / denominator / dt
                 self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j] + ti.abs(deporate * dt)
                 self.fields.deporate_clamped_temp[i, j] = deporate
+
+            if simulate_erosion == 0:
+                erorate = 0.0
+                self.fields.erosion_gate_temp[i, j] = 0
+                self.fields.erorate_raw_temp[i, j] = 0.0
+                self.fields.erorate_rholimit_clamped_temp[i, j] = 0.0
+                self.fields.erorate_clamped_temp[i, j] = 0.0
+                self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j]
+            if simulate_separate_deposition == 0:
+                deporate = 0.0
+                self.fields.deposition_gate_temp[i, j] = 0
+                self.fields.deporate_raw_temp[i, j] = 0.0
+                self.fields.deporate_clamped_temp[i, j] = 0.0
+                self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j]
 
             self.fields.erosion_rate[i, j] = erorate
             self.fields.deposition_rate[i, j] = deporate
@@ -8144,6 +8319,22 @@ class DFSDynamicWaveSolver:
                 self.suggested_dt[None] = dt_reject
 
     @ti.kernel
+    def _capture_outflow_candidate_before_clear(self, rho_water: ti.f64):
+        for i, j in self.fields.h:
+            if _is_outflow(self.fields, i, j) == 1:
+                self.outflow_candidate_depth[i, j] = self.fields.fhpredi2[i, j]
+                self.outflow_candidate_density[i, j] = self.fields.frhopredi2[i, j]
+            else:
+                self.outflow_candidate_depth[i, j] = 0.0
+                self.outflow_candidate_density[i, j] = rho_water
+
+    @ti.kernel
+    def _commit_accepted_outflow_candidate(self):
+        for i, j in self.fields.h:
+            self.outflow_accepted_depth[i, j] = self.outflow_candidate_depth[i, j]
+            self.outflow_accepted_density[i, j] = self.outflow_candidate_density[i, j]
+
+    @ti.kernel
     def _apply_post_balance_outflow(self, rho_water: ti.f64):
         for i, j in self.fields.h:
             if _is_outflow(self.fields, i, j) == 1:
@@ -8204,6 +8395,10 @@ class DFSDynamicWaveSolver:
 
             self.fields.max_flow_velocity[i, j] = local_max_velocity
             self.fields.max_flow_depth[i, j] = ti.max(self.fields.max_flow_depth[i, j], self.fields.h[i, j])
+            solid_depth = ti.max(self.fields.h[i, j] * self.fields.Cv[i, j], 0.0)
+            self.fields.max_solid_depth[i, j] = ti.max(
+                self.fields.max_solid_depth[i, j], solid_depth
+            )
             self.fields.total_depth[i, j] = self.fields.h[i, j] + self.fields.depo_thickness[i, j]
 
     @ti.kernel

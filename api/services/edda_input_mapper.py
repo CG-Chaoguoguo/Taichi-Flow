@@ -620,7 +620,7 @@ def _build_sidecar_output_parity(
         "outflow.txt": _sidecar_entry(
             "outflow.txt",
             original_runtime_consumer="Original DFS selects sidecar-listed outflow cells, samples per-cell discharge/Cv during accepted steps, and exports `OUTNQ_*` through `soutf.F90` at end-of-run.",
-            current_runtime_evidence="Current backend can now load sidecar-selected outflow cells into a runtime observer/export chain and mark them as outflow boundaries, but generic edge outflow handling still coexists so full hydraulic parity remains partial.",
+            current_runtime_evidence="Current backend loads sidecar-selected cells into a dedicated DFS outflow mask, samples accepted-step discharge/Cv before clearing those cells, and keeps generic boundary metadata isolated; full numerical parity remains partial pending an active original/Taichi oracle comparison.",
             parity_status="partial",
         ),
         "hydrograph.txt": _sidecar_entry(
@@ -899,10 +899,10 @@ def build_reference_runtime_metadata(
             "provenance": "reference_config",
             "status": "partial",
             "runtime_stage": "post_initialize.outflow_sidecar_loader",
-            "notes": "Current backend can now load the original outflow-cell sidecar into a selected-cell outflow observer/export chain, but full hydraulic parity with original outflow-only routing is still partial.",
-            "blocked_reason": "Current backend still keeps generic edge/outflow handling alongside the sidecar-selected observer path, so original hydraulic parity remains incomplete.",
+            "notes": "Current backend loads the original outflow-cell sidecar into a dedicated DFS mask and samples accepted-step discharge/Cv before selected cells are cleared; generic boundary metadata remains separate.",
+            "blocked_reason": "The semantic chain is implemented, but no active non-zero original/Taichi oracle comparison has yet established full numerical outflow parity for the exact BJ case.",
             "activation_condition": "Consume `outflow.txt` only when the sidecar exists and original `simulate_outflow_cell` is active.",
-            "status_basis": "Original EDDA reads `outflow.txt` when `outflowsimul` is enabled, zeroes selected outflow cells during DFS, and later writes `OUTNQ_` files; current backend now closes the selected-cell observation/export chain but not full routing parity.",
+            "status_basis": "Original EDDA reads `outflow.txt` when `outflowsimul` is enabled, samples selected cells during accepted DFS steps before zeroing them, and later writes `OUTNQ_` files; current backend closes that control/order/export chain while numerical parity remains unproven.",
             "structure_summary": _structure_summary(parsed, "outflow.txt"),
         },
         "hydrograph.txt": {
@@ -1072,8 +1072,8 @@ def build_reference_runtime_metadata(
             "include_nodata": True,
         },
         "spatial_zones": {
-            "enabled": True,
-            "zone_file": _first_path(parsed, "zonfil"),
+            "enabled": parsed.nzon > 1,
+            "zone_file": _first_path(parsed, "zonfil") if parsed.nzon > 1 else None,
             "num_zones": len(zone_ids),
             "zones": zones_cfg,
         },
@@ -1776,7 +1776,7 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                     missing_on_disk=False,
                     default_substitution_used=False,
                     current_backend_branch_active=True,
-                    notes="Sidecar-selected outflow cells were loaded into the current runtime observer/export chain and boundary registry.",
+                    notes="Sidecar-selected outflow cells were loaded into the dedicated DFS outflow mask and accepted-step observer/export chain.",
                     structure_summary={
                         **structure_summary,
                         "configured_cell_count": observer_result["configured_cell_count"],
@@ -1791,8 +1791,8 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                     sidecar_parity["configured_cell_count"] = observer_result["configured_cell_count"]
                     sidecar_parity["missing_runtime_cell_ids"] = observer_result["missing_cell_ids"]
                     sidecar_parity["current_runtime_evidence"] = (
-                        "Current backend now loads sidecar-selected outflow cells into a runtime observer/export chain and marks those cells as outflow boundaries, "
-                        "but generic edge outflow handling still coexists so full hydraulic parity remains partial."
+                        "Current backend loads sidecar-selected cells into a dedicated DFS outflow mask, samples accepted-step discharge/Cv before clearing those cells, "
+                        "and keeps generic boundary metadata isolated; full numerical parity remains partial pending an active original/Taichi oracle comparison."
                     )
 
     hydrograph_entry = next(

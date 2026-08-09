@@ -6,25 +6,51 @@ from api.services.runmode_capabilities import (
     build_runmode_capabilities,
     write_runmode_capabilities_file,
 )
+from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY, REGISTRY_VERSION
 from edda.config.sim_config import SimulationConfig
+
+
+def test_runmode_switch_view_is_derived_from_all_canonical_registry_entries():
+    payload = build_runmode_capabilities(source_mode="unit_test")
+    canonical = [
+        entry
+        for entry in payload["capabilities"]
+        if entry.get("canonical_switch_key") is not None
+    ]
+
+    assert payload["canonical_registry_version"] == REGISTRY_VERSION
+    assert [entry["canonical_switch_key"] for entry in canonical] == [
+        spec.key for spec in EDDA_SWITCH_REGISTRY
+    ]
+    assert len({entry["canonical_switch_key"] for entry in canonical}) == 45
+    for entry, spec in zip(canonical, EDDA_SWITCH_REGISTRY):
+        assert entry["current_backend_status"] == spec.status
+        assert entry["frontend_exposure_policy"] == spec.frontend_policy
 
 
 def test_runmode_capability_registry_reports_switchable_and_blocked_items():
     payload = build_runmode_capabilities(source_mode="unit_test")
 
     capabilities = {entry["key"]: entry for entry in payload["capabilities"]}
-    assert capabilities["hydrology.use_background_flux_offset"]["current_backend_status"] == "implemented_and_switchable"
-    assert capabilities["hydrology.use_background_flux_offset"]["frontend_exposure_policy"] == "switchable"
-    assert capabilities["flags.use_full_dynamic_wave"]["current_backend_status"] == "blocked_by_missing_source_trace"
-    assert capabilities["flags.log_mass_balance_results"]["current_backend_status"] == "partial"
-    assert capabilities["flags.simulate_rainfall"]["frontend_exposure_policy"] == "fixed_path"
+    assert capabilities["hydrology.use_background_flux_offset"]["current_backend_status"] == "production_consumed"
+    assert capabilities["hydrology.use_background_flux_offset"]["frontend_exposure_policy"] == "editable"
+    assert capabilities["flags.use_full_dynamic_wave"]["current_backend_status"] == "parsed_only"
+    assert capabilities["flags.log_mass_balance_results"]["current_backend_status"] == "metadata_only"
+    assert capabilities["flags.simulate_rainfall"]["frontend_exposure_policy"] == "editable"
     assert capabilities["native_inputs.zonfil"]["frontend_exposure_policy"] == "importable_auditable"
     assert capabilities["sidecar.hydrograph.txt"]["current_backend_status"] == "partial"
     assert capabilities["sidecar.inflow.txt"]["current_backend_status"] == "partial"
-    assert capabilities["sidecar.EDDALog.txt"]["current_backend_status"] == "partial"
-    assert capabilities["soil.double_layer.uww"]["current_backend_status"] == "implemented_but_fixed_scientific_path"
+    assert capabilities["sidecar.EDDALog.txt"]["current_backend_status"] == "metadata_only"
+    assert capabilities["soil.double_layer.uww"]["current_backend_status"] == "production_consumed"
     assert capabilities["sidecar.inflow.txt"]["source_trace_status"] == "anchored"
-    assert payload["summary"]["switchable_keys"] == ["hydrology.use_background_flux_offset"]
+    assert payload["summary"]["switchable_keys"] == [
+        "hydrology.use_background_flux_offset",
+        "flags.simulate_rainfall",
+        "flags.simulate_infiltration",
+        "flags.simulate_outflow_cell",
+        "flags.simulate_erosion",
+        "flags.simulate_water_and_solid_separately",
+    ]
 
 
 def test_runmode_capability_registry_records_configured_background_flux_value(tmp_path):

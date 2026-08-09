@@ -1,7 +1,7 @@
 import numpy as np
 import taichi as ti
 
-from edda.config.sim_config import SimulationConfig
+from edda.config.sim_config import DoubleLayerSoilParams, SimulationConfig
 from edda.core.fields import EDDAFields
 from edda.solver.dfs_dynamic_wave import (
     DFS_EROSION_DEPOSITION_DEEP_STATE_DIAGNOSTIC_KERNEL_ENV,
@@ -31,6 +31,7 @@ from edda.solver.dfs_dynamic_wave import (
     _green_ampt_average_infiltration_rate,
 )
 from edda.solver.dynamic_wave_fortran import FortranDynamicWaveWorkspace
+from edda.solver.edda_solver import EDDASolver
 
 
 def _build_config(
@@ -78,6 +79,24 @@ def _build_config(
     )
 
 
+def _with_strict_run_controls(config: SimulationConfig, **overrides: bool) -> SimulationConfig:
+    controls = {
+        "simulate_debris_flow": True,
+        "simulate_rainfall": True,
+        "simulate_infiltration": True,
+        "simulate_inflow_hydrograph": False,
+        "simulate_outflow_cell": False,
+        "simulate_shallow_landslide": True,
+        "simulate_drainage_flow": False,
+        "simulate_erosion": True,
+        "simulate_water_and_solid_separately": True,
+        "simulate_barrier": False,
+    }
+    controls.update(overrides)
+    config.edda.run_controls = controls
+    return config
+
+
 def _build_fields() -> EDDAFields:
     fields = EDDAFields(2, 1, 10.0, 10.0, fp_dtype=ti.f64)
     z = np.array([[1.0], [0.0]], dtype=np.float64)
@@ -111,6 +130,25 @@ def _build_fields() -> EDDAFields:
     return fields
 
 
+def test_strict_background_flux_uses_immutable_runtime_plan_value():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        background_flux_offset=True,
+        simulate_shallow_landslide=False,
+    )
+    cfg.hydrology.use_background_flux_offset = False
+    fields = _build_fields()
+
+    solver = DFSDynamicWaveSolver(
+        fields,
+        cfg,
+        FortranDynamicWaveWorkspace(fields),
+    )
+
+    assert solver.runtime_control_plan.strict is True
+    assert solver.use_background_flux is True
+
+
 def test_dfs_step_accepts_small_dt_and_updates_pairwise_velocity():
     cfg = _build_config()
     fields = _build_fields()
@@ -126,6 +164,183 @@ def test_dfs_step_accepts_small_dt_and_updates_pairwise_velocity():
     fv = fields.fv_fortran.to_numpy()
     assert fv[0, 0, 2] != 0.0
     assert np.isclose(fv[0, 0, 2], -fv[1, 0, 6])
+
+
+def test_dfs_outflow_sample_uses_accepted_pre_clear_predictor_state():
+    cfg = _build_config()
+    fields = _build_fields()
+    fields.dfs_outflow_mask.from_numpy(np.array([[0], [1]], dtype=np.int32))
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    result = solver.step(1.0e-3)
+
+    assert result["accepted"] is True
+    assert float(fields.h[1, 0]) == 0.0
+    samples = solver.get_last_accepted_outflow_samples(
+        [{"cell_id": 2, "i": 1, "j": 0}],
+        dt_used=float(result["used_dt"]),
+    )
+    assert samples[0]["predictor_depth"] > 0.0
+    assert samples[0]["discharge_cms"] > 0.0
+
+
+def test_generic_boundary_metadata_does_not_remove_dfs_face_pair():
+    cfg = _with_strict_run_controls(
+        _build_config(), simulate_shallow_landslide=False
+    )
+    fields = _build_fields()
+    fields.set_boundary_conditions(
+        np.array([[1], [0]], dtype=np.int32),
+        np.array([[1], [0]], dtype=np.int32),
+    )
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    source_i, source_j, target_i, target_j = solver._ensure_legacy_fortran_order_face_pairs()
+
+    assert list(zip(source_i, source_j, target_i, target_j)) == [(0, 0, 1, 0)]
+
+
+def test_outer_boundary_clear_is_direct_compatibility_only():
+    class _AcceptedDFS:
+        @staticmethod
+        def set_current_time(_time):
+            return None
+
+        @staticmethod
+        def step(dt):
+            return {"accepted": True, "used_dt": dt}
+
+    remaining_depth = []
+    for strict in (False, True):
+        cfg = _build_config()
+        if strict:
+            cfg = _with_strict_run_controls(
+                cfg, simulate_shallow_landslide=False
+            )
+        cfg.soil.double_layer = DoubleLayerSoilParams(enabled=True)
+        fields = _build_fields()
+        fields.set_boundary_conditions(
+            np.array([[1], [0]], dtype=np.int32),
+            np.array([[1], [0]], dtype=np.int32),
+        )
+        solver = EDDASolver(cfg)
+        solver.fields = fields
+        solver.double_layer = object()
+        solver.dfs_dynamic_wave = _AcceptedDFS()
+        solver.time_stepper = type("_Time", (), {"t_current": 0.0})()
+
+        solver._physics_step(1.0e-3)
+        remaining_depth.append(float(fields.h[0, 0]))
+
+    assert remaining_depth == [0.0, 0.5]
+
+
+def test_strict_shallow_landslide_false_skips_outer_stability_calls():
+    class _AcceptedDFS:
+        @staticmethod
+        def set_current_time(_time):
+            return None
+
+        @staticmethod
+        def step(dt):
+            return {"accepted": True, "used_dt": dt}
+
+    class _Hydrology:
+        def step(self, _dt):
+            return None
+
+    class _Stability:
+        def __init__(self):
+            self.calls = []
+
+        def step(self, **kwargs):
+            self.calls.append(("step", kwargs))
+
+        def populate_failure_source_terms(self, **kwargs):
+            self.calls.append(("populate_failure_source_terms", kwargs))
+
+    cfg = _with_strict_run_controls(
+        _build_config(), simulate_shallow_landslide=False
+    )
+    solver = EDDASolver(cfg)
+    solver.fields = _build_fields()
+    solver.hydrology = _Hydrology()
+    solver.stability = _Stability()
+    solver.dfs_dynamic_wave = _AcceptedDFS()
+    solver.time_stepper = type("_Time", (), {"t_current": 0.0})()
+
+    solver._physics_step(1.0e-3)
+
+    assert solver.stability.calls == []
+
+
+def test_strict_infiltration_false_keeps_rainfall_but_stages_zero_infiltration():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        simulate_infiltration=False,
+        simulate_shallow_landslide=False,
+        simulate_erosion=False,
+        simulate_water_and_solid_separately=False,
+    )
+    fields = _build_fields()
+    fields.rainfall.from_numpy(np.full((2, 1), 1.0e-3, dtype=np.float64))
+    fields.K_sat_top_field.fill(1.0e-4)
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    solver.step(1.0e-3)
+
+    np.testing.assert_allclose(fields.tempri.to_numpy(), 1.0e-3)
+    np.testing.assert_allclose(fields.infiltration.to_numpy(), 0.0)
+
+
+def test_strict_false_process_controls_zero_rain_and_skip_failure_advancement():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        simulate_rainfall=False,
+        simulate_infiltration=False,
+        simulate_shallow_landslide=False,
+        simulate_erosion=False,
+        simulate_water_and_solid_separately=False,
+    )
+    fields = _build_fields()
+    fields.rainfall.from_numpy(np.full((2, 1), 1.0e-3, dtype=np.float64))
+    fields.dfs_outflow_mask.from_numpy(np.array([[0], [1]], dtype=np.int32))
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+    fake = _FakeDoubleLayerModel()
+    solver.set_double_layer_model(fake)
+
+    solver.step(1.0e-3)
+
+    np.testing.assert_allclose(fields.tempri.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.infiltration.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.erosion_rate.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.deposition_rate.to_numpy(), 0.0)
+    assert np.count_nonzero(fields.dfs_outflow_mask.to_numpy()) == 0
+    assert fake.calls == []
+
+
+def test_accepted_commit_tracks_max_solid_depth_without_decreasing_history():
+    cfg = _build_config()
+    fields = _build_fields()
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+    rho_water = cfg.rheology.rho_water
+    rho_sediment = cfg.rheology.rho_sediment
+    density_span = rho_sediment - rho_water
+
+    fields.fhpredi2.from_numpy(np.array([[2.0], [1.0]], dtype=np.float64))
+    fields.frhopredi2.from_numpy(
+        np.array([[rho_water + 0.25 * density_span], [rho_water + 0.50 * density_span]], dtype=np.float64)
+    )
+    fields.tempele.from_numpy(fields.z_bed.to_numpy())
+    solver._commit_step(0.1, 0.1, rho_water, rho_sediment, cfg.rheology.Cv_max)
+    np.testing.assert_allclose(fields.max_solid_depth.to_numpy(), np.array([[0.5], [0.5]]))
+
+    fields.fhpredi2.from_numpy(np.array([[0.5], [0.25]], dtype=np.float64))
+    fields.frhopredi2.from_numpy(
+        np.array([[rho_water + 0.10 * density_span], [rho_water + 0.20 * density_span]], dtype=np.float64)
+    )
+    solver._commit_step(0.1, 0.1, rho_water, rho_sediment, cfg.rheology.Cv_max)
+    np.testing.assert_allclose(fields.max_solid_depth.to_numpy(), np.array([[0.5], [0.5]]))
 
 
 def test_paired_face_flux_variant_opens_face_when_only_one_cell_is_thin():
@@ -1149,6 +1364,9 @@ class _FakeDoubleLayerModel:
 
     def populate_failure_source_terms(self, cvstar, rho_sediment, rho_water):
         self.calls.append(("populate_failure_source_terms", float(cvstar), float(rho_sediment), float(rho_water)))
+
+    def restore_richards_committed_state(self):
+        self.calls.append(("restore_richards_committed_state",))
 
 
 def test_precomputed_unsfin_failure_source_variant_skips_live_doublelayer_advancement():

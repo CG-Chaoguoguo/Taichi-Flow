@@ -1564,6 +1564,241 @@
   background: var(--color-brand-bg-subtle);
 }
 
+.tf-edda-compute-card {
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--color-brand) 24%, var(--layer-stroke));
+  background: var(--layer-on-acrylic);
+}
+
+.tf-edda-compute-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 12px;
+  border-bottom: 1px solid var(--layer-stroke);
+  background: linear-gradient(135deg, var(--color-brand-bg-subtle), transparent 76%);
+}
+
+.tf-edda-compute-header > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--color-brand);
+}
+
+.tf-edda-compute-header h2 {
+  margin: 0;
+}
+
+.tf-edda-control-count {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--color-brand) 22%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-bg-subtle);
+  color: var(--color-brand);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tf-edda-compute-card > .tf-banner {
+  margin: 10px 10px 0;
+}
+
+.tf-edda-control-groups {
+  display: grid;
+}
+
+.tf-edda-control-group + .tf-edda-control-group {
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-control-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 7px 12px;
+  background: var(--color-surface-secondary);
+  color: var(--color-foreground-secondary);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+}
+
+.tf-edda-control-group-title span:last-child {
+  color: var(--color-foreground-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.tf-edda-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 58px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--layer-stroke-subtle, var(--layer-stroke));
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.tf-edda-control:first-of-type {
+  border-top: 0;
+}
+
+.tf-edda-control:hover {
+  background: var(--layer-fill-selected);
+}
+
+.tf-edda-control.is-changed {
+  background: var(--color-brand-bg-subtle);
+}
+
+.tf-edda-control-copy {
+  min-width: 0;
+}
+
+.tf-edda-control-copy > .tf-caption {
+  margin-top: 3px;
+  line-height: 1.35;
+}
+
+.tf-edda-control-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tf-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--control-stroke, var(--layer-stroke));
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-tertiary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+
+.tf-switch:hover:not(:disabled) {
+  border-color: var(--color-brand);
+}
+
+.tf-switch:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.tf-switch[aria-checked="true"] {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.tf-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.tf-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-foreground-on-accent, #fff);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.tf-switch[aria-checked="true"] .tf-switch-thumb {
+  transform: translateX(16px);
+}
+
+.tf-edda-restricted {
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-restricted > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: 8px 12px;
+  color: var(--color-foreground-secondary);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tf-edda-restricted > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tf-edda-restricted > summary:hover,
+.tf-edda-restricted > summary:focus-visible {
+  background: var(--layer-fill-selected);
+}
+
+.tf-edda-restricted > summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.tf-edda-restricted-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-restricted-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px var(--space-2);
+  padding: 8px 12px;
+  border-top: 1px solid var(--layer-stroke-subtle, var(--layer-stroke));
+  color: var(--color-foreground-tertiary);
+  font-size: 10px;
+}
+
+.tf-edda-restricted-row:first-child {
+  border-top: 0;
+}
+
+.tf-edda-restricted-row > div {
+  min-width: 0;
+}
+
+.tf-edda-restricted-row strong,
+.tf-edda-restricted-row .tf-mono {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-edda-restricted-row strong {
+  color: var(--color-foreground-secondary);
+  font-size: 11px;
+}
+
+.tf-edda-restricted-row > span {
+  align-self: start;
+  padding: 2px 5px;
+  border-radius: var(--radius-control);
+  background: var(--color-surface-tertiary);
+  white-space: nowrap;
+}
+
+.tf-edda-restricted-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  line-height: 1.4;
+}
+
 .tf-card-trigger {
   width: 100%;
   padding: 12px;

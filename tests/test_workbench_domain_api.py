@@ -104,7 +104,10 @@ def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) 
         )
         assert scenario_response.status_code == 201
         scenario = scenario_response.json()
-        assert scenario["effective_parameters"] == {"rheology.n_manning": 0.04}
+        assert scenario["parameter_patch"] == {"rheology.n_manning": 0.04}
+        assert scenario["effective_parameters"]["rheology.n_manning"] == 0.04
+        assert scenario["effective_parameters"]["edda.registry_version"] == "1.0.0"
+        assert scenario["effective_parameters"]["edda.run_controls.simulate_rainfall"] is True
 
         rejected = client.patch(
             f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
@@ -112,6 +115,56 @@ def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) 
         )
         assert rejected.status_code == 422
         assert rejected.json()["code"] == "parameter_not_editable"
+
+
+def test_edda_compute_controls_round_trip_through_scenario_public_api(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "compute-controls")
+        created = client.post(
+            f"/api/projects/{project['project_id']}/scenarios",
+            json={"name": "EDDA control variant"},
+        )
+        assert created.status_code == 201
+        scenario = created.json()
+        assert scenario["parameter_template_id"] == "pt-bj-hxl-v3"
+        assert scenario["parameter_baseline"]["edda.registry_version"] == "1.0.0"
+        assert sum(
+            key.startswith(("edda.run_controls.", "edda.output_controls."))
+            for key in scenario["parameter_baseline"]
+        ) == 45
+
+        patch = {
+            "edda.run_controls.simulate_rainfall": False,
+            "edda.output_controls.save_flow_depth": False,
+        }
+        saved = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
+            json={"parameter_patch": patch, "expected_version": scenario["version"]},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["parameter_patch"] == patch
+        assert saved.json()["effective_parameters"]["edda.run_controls.simulate_rainfall"] is False
+        assert saved.json()["effective_parameters"]["edda.output_controls.save_flow_depth"] is False
+        assert saved.json()["effective_parameters"]["edda.output_controls.save_max_flow_depth"] is True
+
+        configuration = client.get(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}/configuration"
+        )
+        assert configuration.status_code == 200
+        assert configuration.json()["overrides"] == patch
+        assert configuration.json()["effective"]["edda.run_controls.simulate_rainfall"] is False
+
+        restricted = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
+            json={
+                "parameter_patch": {
+                    "edda.run_controls.simulate_debris_flow": False,
+                },
+                "expected_version": saved.json()["version"],
+            },
+        )
+        assert restricted.status_code == 422
+        assert restricted.json()["code"] == "parameter_not_editable"
 
 
 def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> None:
