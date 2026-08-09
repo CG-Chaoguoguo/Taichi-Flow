@@ -172,6 +172,7 @@ class EDDAFields:
         self.tanslo_fortran = ti.field(dtype=self.fp, shape=(nx, ny))
         self.max_flow_depth = ti.field(dtype=self.fp, shape=(nx, ny))
         self.max_flow_velocity = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.max_solid_depth = ti.field(dtype=self.fp, shape=(nx, ny))
         self.total_depth = ti.field(dtype=self.fp, shape=(nx, ny))
         self.temp_erodible_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
         self.temp_depo_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
@@ -393,6 +394,7 @@ class EDDAFields:
             self.tanslo_fortran[i, j] = 0.0
             self.max_flow_depth[i, j] = 0.0
             self.max_flow_velocity[i, j] = 0.0
+            self.max_solid_depth[i, j] = 0.0
             self.total_depth[i, j] = 0.0
             self.temp_erodible_thickness[i, j] = 0.0
             self.temp_depo_thickness[i, j] = 0.0
@@ -653,6 +655,7 @@ class EDDAFields:
             ('slope_angle', 'slope_angle'),
             ('max_flow_depth', 'max_flow_depth'),
             ('max_flow_velocity', 'max_flow_velocity'),
+            ('max_solid_depth', 'max_solid_depth'),
             ('total_depth', 'total_depth'),
             ('fdepth', 'fdepth'),
             ('ctao_field', 'ctao_field'),

@@ -4,12 +4,65 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict
 
+from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY, REGISTRY_VERSION
 from api.services.rainfall_timeline import timeline_from_boundaries
 
 BJ_HXL_TEMPLATE_V1_ID = "pt-bj-hxl-v1"
-BJ_HXL_TEMPLATE_ID = "pt-bj-hxl-v2"
+BJ_HXL_TEMPLATE_V2_ID = "pt-bj-hxl-v2"
+BJ_HXL_TEMPLATE_ID = "pt-bj-hxl-v3"
 BJ_HXL_SOURCE_HASH = "6ed94a70bd075d392c4cd1ea2659416efc62e2beb0e9c8ca247648ff50cd9689"
 PATH_FREE_PARAMETER_TEMPLATE_VERSION = "2"
+
+BJ_HXL_SWITCH_VALUES: Dict[str, Any] = {
+    "save_runoff_grids": False,
+    "save_fs_min_legacy": True,
+    "save_fs_depth_at_min": True,
+    "save_fs_pore_pressure_at_min": False,
+    "save_infiltration_rate": False,
+    "save_basal_flux": False,
+    "save_deposit_distribution": True,
+    "save_pf": False,
+    "save_road_risk": False,
+    "save_road_warning": False,
+    "save_detached_trace": False,
+    "pressure_head_fs_listing_flag": -1,
+    "slope_failure_output_count": 1,
+    "slope_failure_output_times_s": [3600.0],
+    "skip_other_timesteps": False,
+    "use_analytic_fillable_porosity": True,
+    "estimate_positive_pressure_head": True,
+    "use_psi0_negative_inverse_alpha": False,
+    "log_mass_balance_results": True,
+    "flow_direction_mode": "slope",
+    "background_flux_offset": True,
+    "use_full_dynamic_wave": True,
+    "simulate_rainfall": True,
+    "simulate_infiltration": True,
+    "simulate_inflow_hydrograph": False,
+    "simulate_outflow_cell": True,
+    "simulate_shallow_landslide": True,
+    "simulate_debris_flow": True,
+    "simulate_erosion": True,
+    "simulate_water_and_solid_separately": True,
+    "simulate_drainage_flow": False,
+    "simulate_barrier": False,
+    "save_fs_min_grid": True,
+    "save_flow_depth": True,
+    "save_max_flow_depth": True,
+    "save_flow_velocity": True,
+    "save_max_flow_velocity": True,
+    "save_erosion_depth": True,
+    "save_deposition_depth": True,
+    "save_total_depth": True,
+    "save_max_solid_depth": True,
+    "save_volumetric_sediment_concentration": True,
+    "save_outflow_process": False,
+    "save_drainage_nodal_flow": False,
+    "save_drainage_conduit_flow": False,
+}
+
+if tuple(BJ_HXL_SWITCH_VALUES) != tuple(spec.key for spec in EDDA_SWITCH_REGISTRY):
+    raise RuntimeError("BJ_HXL switch defaults must follow the canonical 45-switch order")
 
 
 def _bj_hxl_rainfall_periods() -> list[Dict[str, Any]]:
@@ -124,8 +177,7 @@ def builtin_bj_hxl_template_v1() -> Dict[str, Any]:
     return _template_payload(BJ_HXL_TEMPLATE_V1_ID, "1", _bj_hxl_values())
 
 
-def builtin_bj_hxl_template() -> Dict[str, Any]:
-    """Return current BJ_HXL defaults with an explicit, path-free rainfall timeline."""
+def _bj_hxl_v2_values() -> Dict[str, Any]:
     values = _bj_hxl_values()
     boundaries = [float(index * 3600) for index in range(73)]
     values["rainfall.timeline"] = timeline_from_boundaries(
@@ -134,11 +186,29 @@ def builtin_bj_hxl_template() -> Dict[str, Any]:
         declared_period_count=72,
         declared_end_s=259200.0,
     )
-    return _template_payload(BJ_HXL_TEMPLATE_ID, "2", values)
+    return values
+
+
+def builtin_bj_hxl_template_v2() -> Dict[str, Any]:
+    """Keep the timeline-enabled v2 immutable for existing scenarios."""
+    return _template_payload(BJ_HXL_TEMPLATE_V2_ID, "2", _bj_hxl_v2_values())
+
+
+def builtin_bj_hxl_template() -> Dict[str, Any]:
+    """Return current BJ_HXL defaults with the exact 45-control snapshot."""
+    values = _bj_hxl_v2_values()
+    values["edda.registry_version"] = REGISTRY_VERSION
+    for spec in EDDA_SWITCH_REGISTRY:
+        values[spec.taichi_config_path] = deepcopy(BJ_HXL_SWITCH_VALUES[spec.key])
+    return _template_payload(BJ_HXL_TEMPLATE_ID, "3", values)
 
 
 def builtin_parameter_templates() -> list[Dict[str, Any]]:
-    return [builtin_bj_hxl_template_v1(), builtin_bj_hxl_template()]
+    return [
+        builtin_bj_hxl_template_v1(),
+        builtin_bj_hxl_template_v2(),
+        builtin_bj_hxl_template(),
+    ]
 
 
 def merge_parameter_values(baseline: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -335,4 +405,13 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
     mode = str(getattr(parsed, "rainfall_mode", "uniform_cri"))
     values["rainfall.mode"] = "raster" if mode == "raster_rifil" else "mixed" if mode == "mixed" else "uniform"
     values["manning.source"] = "raster" if "raster" in str(getattr(parsed, "manning_source", "")) else "global"
+    snapshot = getattr(parsed, "switch_snapshot", None)
+    if snapshot is not None:
+        snapshot_values = snapshot.values
+        values["edda.registry_version"] = snapshot.registry_version
+        for spec in EDDA_SWITCH_REGISTRY:
+            group = "output_controls" if spec.group in {"legacy_output", "process_output"} else "run_controls"
+            values[f"edda.{group}.{spec.key}"] = snapshot_values[spec.key]
+        for key, value in (getattr(parsed, "extension_flags", {}) or {}).items():
+            values[f"edda.extension_controls.{key}"] = value
     return values

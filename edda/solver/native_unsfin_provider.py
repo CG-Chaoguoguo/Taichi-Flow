@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from tools.diagnostics.native_unsfin_ledger_diagnostic import LedgerArrays
+from edda.solver.native_unsfin_types import LedgerArrays
 
 
 PROVIDER_NAME = "production_native_unsfin"

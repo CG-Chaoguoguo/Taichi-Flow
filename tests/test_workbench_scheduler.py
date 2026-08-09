@@ -8,6 +8,7 @@ from time import monotonic, sleep
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from api.services.workbench_store import ProjectDatabase
 from tests.test_workbench_domain_api import _create_project, _create_ready_scenario
 
 
@@ -256,3 +257,106 @@ def test_scheduler_persists_progress_only_at_output_boundaries(tmp_path: Path) -
     assert any(update.get("status") == "running" for update in persisted_updates)
     assert [update["output_count"] for update in progress_updates] == [1, 2]
     assert [update["step_count"] for update in progress_updates] == [100, 200]
+
+
+def test_failed_run_persists_structured_semantic_error(tmp_path: Path) -> None:
+    app = create_app(state_dir=tmp_path / "state", scheduler_enabled=False)
+    with TestClient(app) as client:
+        project = _create_project(client, tmp_path / "project", "Structured failure")
+        scenario = _create_ready_scenario(client, project, "Semantic gate")
+        store = client.app.state.workbench
+        simulation_id = "sim-structured-semantic-error"
+        database = store.project_database(project["project_id"])
+        with database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO simulation_runs(simulation_id, scenario_id, status, created_at)
+                VALUES(?, ?, 'running', '2026-08-09T00:00:00+00:00')
+                """,
+                (simulation_id, scenario["scenario_id"]),
+            )
+        store.finish_run(
+            project["project_id"],
+            simulation_id,
+            {
+                "status": "failed",
+                "error": "validated UNSFIN schedule required",
+                "error_code": "edda_unsfin_schedule_required",
+                "error_details": {
+                    "control": "simulate_shallow_landslide",
+                    "configured_value": True,
+                },
+            },
+        )
+
+        simulation = store.public_simulation(
+            project["project_id"],
+            store.simulation_row(project["project_id"], simulation_id),
+        )
+
+        assert simulation["error_code"] == "edda_unsfin_schedule_required"
+        assert simulation["error_details"] == {
+            "control": "simulate_shallow_landslide",
+            "configured_value": True,
+        }
+
+
+def test_schema_v7_queue_lineage_migrates_structured_error_columns(tmp_path: Path) -> None:
+    database = ProjectDatabase(tmp_path / "legacy-v7-queue-project")
+    database.initialize(
+        project_id="prj-legacy-v7-queue",
+        name="Legacy v7 queue lineage",
+        description="migration fixture",
+        created_at="2026-08-09T00:00:00+00:00",
+    )
+    with database.connect() as connection:
+        connection.execute("ALTER TABLE simulation_runs DROP COLUMN error_details_json")
+        connection.execute("ALTER TABLE simulation_runs DROP COLUMN error_code")
+        connection.execute(
+            "UPDATE schema_metadata SET value='7' WHERE key='schema_version'"
+        )
+
+    database.ensure_schema()
+
+    with database.connect() as connection:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()["value"]
+
+    assert {"error_code", "error_details_json"} <= columns
+    assert version == "8"
+
+
+def test_schema_v7_error_lineage_migrates_queue_columns(tmp_path: Path) -> None:
+    database = ProjectDatabase(tmp_path / "legacy-v7-error-project")
+    database.initialize(
+        project_id="prj-legacy-v7-error",
+        name="Legacy v7 error lineage",
+        description="migration fixture",
+        created_at="2026-08-09T00:00:00+00:00",
+    )
+    with database.connect() as connection:
+        connection.execute("DROP INDEX IF EXISTS idx_queue_items_order")
+        connection.execute("ALTER TABLE queue_items DROP COLUMN deleted_at")
+        connection.execute("ALTER TABLE queue_items DROP COLUMN queue_order")
+        connection.execute(
+            "UPDATE schema_metadata SET value='7' WHERE key='schema_version'"
+        )
+
+    database.ensure_schema()
+
+    with database.connect() as connection:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()["value"]
+
+    assert {"queue_order", "deleted_at"} <= columns
+    assert version == "8"

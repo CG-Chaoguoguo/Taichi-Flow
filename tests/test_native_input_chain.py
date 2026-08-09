@@ -212,6 +212,7 @@ def test_reference_config_parser_reports_supported_and_recognized_only_fields(tm
 
     parsed = parse_reference_config_file(str(edda_in))
 
+    assert parsed.nzon == 1
     assert "zonfil" in parsed.supported_fields
     assert "slofil" in parsed.supported_fields
     assert "zfil" in parsed.supported_fields
@@ -232,6 +233,8 @@ def test_reference_config_parser_reports_supported_and_recognized_only_fields(tm
     assert parsed.file_inputs["hydrograph.txt"].original_branch_active is False
     assert parsed.file_inputs["inflow.txt"].original_branch_active is False
     assert parsed.file_inputs["zonfil"].exists == [True]
+    assert parsed.file_inputs["zonfil"].original_branch_active is False
+    assert parsed.file_inputs["zonfil"].current_backend_branch_active is False
     assert parsed.file_inputs["outflow.txt"].structure_summary["declared_cell_count"] == 1
     assert parsed.file_inputs["outflow.txt"].structure_summary["grid_coords_preview"][0] == {
         "cell_id": 1,
@@ -308,7 +311,7 @@ def test_reference_config_parser_detects_direct_rain_plus_storage_dfs_variant(tm
     unsupported_flags = {entry["flag"]: entry for entry in parsed.unsupported_flags}
     assert unsupported_flags["use_analytic_fillable_porosity"]["current_status"] == "parsed_only"
     assert unsupported_flags["flow_direction_mode"]["current_status"] == "parsed_only"
-    assert unsupported_flags["simulate_rainfall"]["current_status"] == "partial"
+    assert "simulate_rainfall" not in unsupported_flags
     assert unsupported_flags["save_runoff_grids"]["current_status"] == "unsupported"
     assert "OUTNQ_*" in parsed.reference_output_expectations["expected_output_families"]
     assert "Flow_depth_*" in parsed.reference_output_expectations["expected_output_families"]
@@ -552,10 +555,13 @@ def test_reference_mapping_builds_manifest_and_applies_priority_native_loaders(t
     )
 
     solver = _FakeSolver()
+    solver.config.spatial_zones = config.spatial_zones
     runtime_input_manifest = apply_native_runtime_inputs(solver, runtime_input_manifest)
 
     assert config.dem_file.endswith("bcdem.asc")
     assert config.spatial_zones is not None
+    assert config.spatial_zones.enabled is False
+    assert config.spatial_zones.zone_file is None
     assert config.native_inputs is not None
     assert (tmp_path / "output" / "_generated_inputs" / "rainfall_from_edda_in.csv").exists()
     assert solver.fields.slope_angle.value.shape == (2, 2)
@@ -567,7 +573,7 @@ def test_reference_mapping_builds_manifest_and_applies_priority_native_loaders(t
     statuses = {entry["family"]: entry["production_status"] for entry in runtime_input_manifest["inputs"]}
     manifest = {entry["family"]: entry for entry in runtime_input_manifest["inputs"]}
     source_registry = runtime_input_manifest["input_source_registry"]
-    assert consumed["zonfil"] is True
+    assert consumed["zonfil"] is False
     assert consumed["slofil"] is True
     assert consumed["manningfil"] is True
     assert consumed["zfil"] is True

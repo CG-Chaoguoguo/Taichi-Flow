@@ -5,6 +5,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from api.services.edda_switch_registry import (
+    EDDA_SWITCH_BY_KEY,
+    EDDA_SWITCH_REGISTRY,
+    REGISTRY_VERSION as EDDA_SWITCH_REGISTRY_VERSION,
+)
 from api.services.reference_config_parser import ReferenceConfigParseResult
 
 
@@ -102,6 +107,129 @@ PARAMETER_META: Dict[str, Dict[str, str]] = {
 READONLY_DISPLAY_PARAMETERS = {
     "spatial_zones.zone_file",
     "spatial_zones.zones",
+}
+
+# ``background_flux_offset`` now has one canonical, strict EDDA control path.
+# Keep the historical hydrology alias writable for direct-config compatibility,
+# but never expose both paths in the authoring UI as competing sources of truth.
+STATIC_CATALOG_HIDDEN_ALIASES = {
+    "hydrology.use_background_flux_offset",
+}
+
+EDDA_CONTROL_META_ZH: Dict[str, Dict[str, str]] = {
+    "background_flux_offset": {
+        "label": "背景入渗通量偏移",
+        "description": "按原始入渗契约启用背景通量偏移；在降雨与入渗源项装配前冻结。",
+    },
+    "simulate_rainfall": {
+        "label": "模拟降雨",
+        "description": "控制降雨源项是否进入 DFS 强迫装配，不改变降雨时段定义。",
+    },
+    "simulate_infiltration": {
+        "label": "模拟入渗",
+        "description": "控制 Green-Ampt 入渗源项；关闭时入渗率归零，其他水量源项保持独立。",
+    },
+    "simulate_outflow_cell": {
+        "label": "模拟出流单元",
+        "description": "启用 outflow.txt 专用单元掩膜及接受步出流采样。",
+    },
+    "simulate_erosion": {
+        "label": "模拟侵蚀",
+        "description": "控制侵蚀率与候选床面变化源项，结果输出仍由独立保存开关控制。",
+    },
+    "simulate_water_and_solid_separately": {
+        "label": "水固分相计算",
+        "description": "控制水相与固相的独立淤积候选装配，并作为淤积/总深度输出的前置门禁。",
+    },
+    "save_flow_depth": {
+        "label": "保存流深",
+        "description": "在每个输出边界写出已提交的 Flow_depth 标量网格。",
+    },
+    "save_max_flow_depth": {
+        "label": "保存最大流深",
+        "description": "写出由接受时间步单调累计的 Max_flow_depth 网格。",
+    },
+    "save_flow_velocity": {
+        "label": "保存流速",
+        "description": "按原始四方向面速度绝对值公式写出 Flow_velocity 标量网格。",
+    },
+    "save_max_flow_velocity": {
+        "label": "保存最大流速",
+        "description": "写出由接受时间步单调累计的 Max_flow_velocity 网格。",
+    },
+    "save_erosion_depth": {
+        "label": "保存侵蚀深度",
+        "description": "在侵蚀过程启用时写出原始床面减当前床面的正侵蚀深度。",
+    },
+    "save_deposition_depth": {
+        "label": "保存淤积深度",
+        "description": "在水固分相计算启用时写出当前床面相对原始床面的正增量。",
+    },
+    "save_total_depth": {
+        "label": "保存总深度",
+        "description": "在水固分相计算启用时写出流深与床面增量之和。",
+    },
+    "save_max_solid_depth": {
+        "label": "保存最大固相深度",
+        "description": "写出接受时间步累计的 h×Cv 最大值，并保留原始浅层阈值。",
+    },
+    "save_volumetric_sediment_concentration": {
+        "label": "保存体积含沙浓度",
+        "description": "写出体积含沙浓度 Cv，并按原始浅水深规则置零。",
+    },
+    "save_outflow_process": {
+        "label": "保存出流过程",
+        "description": "在出流单元模拟启用时写出末态 OUTNQ 过程文件。",
+    },
+    "save_runoff_grids": {"label": "保存径流栅格"},
+    "save_fs_min_legacy": {"label": "保存最小安全系数（旧）"},
+    "save_fs_depth_at_min": {"label": "保存最小安全系数时水深"},
+    "save_fs_pore_pressure_at_min": {"label": "保存最小安全系数时孔压"},
+    "save_infiltration_rate": {"label": "保存入渗率"},
+    "save_basal_flux": {"label": "保存基底通量"},
+    "save_deposit_distribution": {"label": "保存淤积分布"},
+    "save_pf": {"label": "保存 PF 结果"},
+    "save_road_risk": {"label": "保存道路风险"},
+    "save_road_warning": {"label": "保存道路预警"},
+    "save_detached_trace": {"label": "保存脱落体轨迹"},
+    "pressure_head_fs_listing_flag": {"label": "压力水头/安全系数列表开关"},
+    "slope_failure_output_count": {"label": "边坡失稳输出时刻数"},
+    "slope_failure_output_times_s": {"label": "边坡失稳输出时刻"},
+    "skip_other_timesteps": {"label": "跳过其他时间步"},
+    "use_analytic_fillable_porosity": {"label": "使用解析可填充孔隙率"},
+    "estimate_positive_pressure_head": {"label": "估算正压力水头"},
+    "use_psi0_negative_inverse_alpha": {"label": "使用 ψ₀=-1/α"},
+    "log_mass_balance_results": {"label": "记录质量平衡结果"},
+    "flow_direction_mode": {"label": "流向模式"},
+    "use_full_dynamic_wave": {"label": "使用完整动波"},
+    "simulate_inflow_hydrograph": {"label": "模拟入流过程"},
+    "simulate_shallow_landslide": {"label": "模拟浅层滑坡"},
+    "simulate_debris_flow": {"label": "模拟泥石流"},
+    "simulate_drainage_flow": {"label": "模拟排水管网流"},
+    "simulate_barrier": {"label": "模拟拦挡设施"},
+    "save_fs_min_grid": {"label": "保存最小安全系数栅格"},
+    "save_drainage_nodal_flow": {"label": "保存排水节点流量"},
+    "save_drainage_conduit_flow": {"label": "保存排水管道流量"},
+}
+
+EDDA_STATUS_LABELS_ZH = {
+    "production_consumed": "生产已闭环",
+    "config_fallback_consumed": "配置回退已闭环",
+    "parsed_only": "仅解析",
+    "mapped_only": "仅映射",
+    "metadata_only": "仅审计元数据",
+    "partial": "部分闭环",
+    "unsupported": "生产未支持",
+    "blocked": "已阻断",
+}
+
+EDDA_RESTRICTION_MESSAGES_ZH = {
+    "parsed_only": "仅完成输入解析，尚无运行时消费证据，当前保持只读。",
+    "mapped_only": "仅完成配置映射，尚无生产运行时消费证据，当前保持只读。",
+    "metadata_only": "仅作为审计元数据记录，不改变求解与输出行为。",
+    "partial": "仅部分语义闭环；未验证分支继续由后端门禁阻断。",
+    "unsupported": "生产链路尚未端到端实现，当前不可启用。",
+    "blocked": "该控制已被语义门禁阻断。",
 }
 
 CASE_CONFIG_OVERRIDE_PATHS = {
@@ -312,6 +440,8 @@ def build_static_parameter_catalog() -> Dict[str, Any]:
     """Return the edda_in-aligned catalog before a case is parsed or a run starts."""
     parameters = []
     for key in sorted(EDITABLE_PARAMETERS | READONLY_DISPLAY_PARAMETERS):
+        if key in STATIC_CATALOG_HIDDEN_ALIASES:
+            continue
         meta = _meta_for(key)
         editable = key in EDITABLE_PARAMETERS
         parameters.append(
@@ -331,15 +461,70 @@ def build_static_parameter_catalog() -> Dict[str, Any]:
                 "evidence": {"source": "static_catalog", "edda_in": True},
             }
         )
+    for spec in EDDA_SWITCH_REGISTRY:
+        localized = EDDA_CONTROL_META_ZH.get(spec.key, {})
+        parameters.append(
+            {
+                "key": spec.taichi_config_path,
+                "control_key": spec.key,
+                "control_family": "edda",
+                "source_index": spec.source_index,
+                "label": spec.key.replace("_", " ").title(),
+                "label_zh": localized.get("label"),
+                "description_zh": localized.get("description") or EDDA_RESTRICTION_MESSAGES_ZH.get(spec.status),
+                "abbrev": spec.original_variable,
+                "group": (
+                    "compute_process"
+                    if spec.group == "run_control"
+                    else "compute_outputs"
+                ),
+                "config_path": spec.taichi_config_path,
+                "parser_field": spec.taichi_parser_field,
+                "runtime_consumer": spec.taichi_runtime_consumer,
+                "activation_condition": spec.activation_condition,
+                "runtime_status": spec.status,
+                "status_label_zh": EDDA_STATUS_LABELS_ZH[spec.status],
+                "editable": spec.frontend_policy == "editable",
+                "frontend_policy": spec.frontend_policy,
+                "value_type": spec.value_type,
+                "allowed_values": list(spec.allowed_values),
+                "status_reason": spec.status_reason,
+                "source_stage": spec.consumption_stage,
+                "dependencies": list(spec.dependencies),
+                "dependency_paths": [
+                    EDDA_SWITCH_BY_KEY[key].taichi_config_path
+                    for key in spec.dependencies
+                ],
+                "affected_output_families": list(spec.affected_output_families),
+                "original_variable": spec.original_variable,
+                "output_evidence": list(spec.affected_output_families),
+                "evidence": {
+                    "source": "edda_switch_registry",
+                    "registry_version": EDDA_SWITCH_REGISTRY_VERSION,
+                    "fortran_read_location": spec.fortran_read_location,
+                    "real_case_activation_evidence": spec.real_case_activation_evidence,
+                },
+            }
+        )
     status_counts: Dict[str, int] = {}
     for entry in parameters:
         status_counts[entry["runtime_status"]] = status_counts.get(entry["runtime_status"], 0) + 1
     return {
-        "catalog_version": "taichi-flow-parameter-catalog-v2",
+        "catalog_version": "taichi-flow-parameter-catalog-v3",
         "editable_statuses": ["production_consumed", "config_fallback_consumed"],
         "parameters": parameters,
         "status_counts": status_counts,
         "input_source_registry": {},
+        "control_registry": {
+            "registry_version": EDDA_SWITCH_REGISTRY_VERSION,
+            "entry_count": len(EDDA_SWITCH_REGISTRY),
+            "editable_count": sum(
+                spec.frontend_policy == "editable" for spec in EDDA_SWITCH_REGISTRY
+            ),
+            "restricted_count": sum(
+                spec.frontend_policy != "editable" for spec in EDDA_SWITCH_REGISTRY
+            ),
+        },
     }
 
 

@@ -27,6 +27,17 @@ from api.services.workbench_store import WorkbenchError, WorkbenchStore
 logger = logging.getLogger(__name__)
 
 
+def _structured_error_payload(exc: Exception) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"error": str(exc)}
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    if code:
+        payload["error_code"] = str(code)
+    if details is not None:
+        payload["error_details"] = _ObservableState._safe(details)
+    return payload
+
+
 class RunExecutor(Protocol):
     def signature(self, context: Dict[str, Any]) -> str:
         ...
@@ -72,6 +83,8 @@ class _ObservableState(dict):
             "start_time",
             "end_time_actual",
             "error",
+            "error_code",
+            "error_details",
         }:
             self._on_change({key: self._safe(value)})
 
@@ -92,6 +105,8 @@ class _ObservableState(dict):
                 "start_time",
                 "end_time_actual",
                 "error",
+                "error_code",
+                "error_details",
             }
         }
         if selected:
@@ -173,13 +188,19 @@ class RuntimeRunExecutor:
                 "step_count": int(observed.get("step_count") or 0),
                 "output_count": int(observed.get("output_count") or 0),
                 "error": observed.get("error"),
+                "error_code": observed.get("error_code"),
+                "error_details": observed.get("error_details") or {},
                 "resource_summary": observed.get("resource_summary") or {},
             }
         except Exception as exc:  # noqa: BLE001 - persist the execution failure
             logger.exception("Taichi run %s failed before completion", simulation_id)
             if session is not None and session._registered_active:
                 session.dispose()
-            return {"status": "failed", "error": str(exc), "resource_summary": {"children": 0}}
+            return {
+                "status": "failed",
+                **_structured_error_payload(exc),
+                "resource_summary": {"children": 0},
+            }
         finally:
             if stop_thread is not None and stop_thread.is_alive():
                 stop_event.set()
@@ -339,6 +360,8 @@ class SimulationCoordinator:
                 "start_time",
                 "end_time_actual",
                 "error",
+                "error_code",
+                "error_details",
             ):
                 if key in update:
                     safe[key] = update[key]
@@ -370,7 +393,7 @@ class SimulationCoordinator:
             raise
         except Exception as exc:  # noqa: BLE001 - domain state must record worker errors
             logger.exception("Queued simulation %s failed", simulation_id)
-            result = {"status": "failed", "error": str(exc)}
+            result = {"status": "failed", **_structured_error_payload(exc)}
         finally:
             try:
                 # Progress between output boundaries is intentionally not

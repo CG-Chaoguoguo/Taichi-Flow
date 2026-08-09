@@ -18,7 +18,7 @@ import shutil
 import sqlite3
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class WorkbenchError(Exception):
@@ -256,6 +256,8 @@ class ProjectDatabase:
                     start_time TEXT,
                     end_time_actual TEXT,
                     error TEXT,
+                    error_code TEXT,
+                    error_details_json TEXT NOT NULL DEFAULT '{}',
                     elapsed_seconds REAL NOT NULL DEFAULT 0,
                     output_dir TEXT,
                     runtime_profile_json TEXT NOT NULL DEFAULT '{}',
@@ -683,7 +685,7 @@ class ProjectDatabase:
                 );
                 """
             )
-        if version < 7:
+        if version < 8:
             # Queue position is historical (the public #N identifier); the
             # mutable queue_order is the only ordering key used by the
             # scheduler-facing queue.  Existing records which were queued but
@@ -692,37 +694,50 @@ class ProjectDatabase:
                 str(column["name"])
                 for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
             }
-            if "queue_order" not in queue_columns:
+            queue_order_missing = "queue_order" not in queue_columns
+            if queue_order_missing:
                 connection.execute("ALTER TABLE queue_items ADD COLUMN queue_order INTEGER")
             if "deleted_at" not in queue_columns:
                 connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
-            connection.execute(
-                "UPDATE queue_items SET queue_order=position WHERE queue_order IS NULL"
-            )
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET status='waiting', summary=CASE
-                    WHEN summary IS NULL OR summary='' OR summary='等待调度'
-                    THEN '待运行' ELSE summary END
-                WHERE status='queued' AND simulation_id IS NULL
-                """
-            )
-            waiting_rows = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
-            ).fetchall()
-            for order, row in enumerate(waiting_rows, start=1):
+            if queue_order_missing:
                 connection.execute(
-                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                    (order, row["queue_item_id"]),
+                    "UPDATE queue_items SET queue_order=position WHERE queue_order IS NULL"
                 )
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET status='waiting', summary=CASE
+                        WHEN summary IS NULL OR summary='' OR summary='等待调度'
+                        THEN '待运行' ELSE summary END
+                    WHERE status='queued' AND simulation_id IS NULL
+                    """
+                )
+                waiting_rows = connection.execute(
+                    """
+                    SELECT queue_item_id FROM queue_items
+                    WHERE status='waiting' AND deleted_at IS NULL
+                    ORDER BY queue_order, enqueued_at, queue_item_id
+                    """
+                ).fetchall()
+                for order, row in enumerate(waiting_rows, start=1):
+                    connection.execute(
+                        "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
+                        (order, row["queue_item_id"]),
+                    )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_queue_items_order ON queue_items(status, queue_order, enqueued_at, queue_item_id)"
             )
+        if version < 8:
+            simulation_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+            }
+            if "error_code" not in simulation_columns:
+                connection.execute("ALTER TABLE simulation_runs ADD COLUMN error_code TEXT")
+            if "error_details_json" not in simulation_columns:
+                connection.execute(
+                    "ALTER TABLE simulation_runs ADD COLUMN error_details_json TEXT NOT NULL DEFAULT '{}'"
+                )
         from api.services.parameter_templates import builtin_parameter_templates
 
         templates = builtin_parameter_templates()
@@ -3593,6 +3608,21 @@ class WorkbenchStore:
         if scenario["parameter_template_id"]:
             validation = self.get_scenario_configuration(project_id, scenario_id)["validation"]
             if not validation["valid"]:
+                semantic_gate = validation.get("edda_semantic_gate") or {}
+                if semantic_gate.get("decision") == "reject" and semantic_gate.get("code"):
+                    raise WorkbenchError(
+                        str(semantic_gate["code"]),
+                        next(
+                            (
+                                str(issue.get("message"))
+                                for issue in validation.get("issues", [])
+                                if issue.get("code") == semantic_gate.get("code")
+                            ),
+                            "EDDA semantic preflight rejected the scenario.",
+                        ),
+                        status_code=422,
+                        details=validation,
+                    )
                 raise WorkbenchError(
                     "scenario_configuration_invalid",
                     "方案参数或输入绑定未通过运行预检。",
@@ -4300,6 +4330,13 @@ class WorkbenchStore:
 
     def update_run(self, project_id: str, simulation_id: str, values: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
+        normalized_values = dict(values)
+        if "error_details" in normalized_values:
+            normalized_values["error_details_json"] = json.dumps(
+                normalized_values.pop("error_details") or {},
+                ensure_ascii=False,
+                default=str,
+            )
         allowed = {
             "status",
             "progress",
@@ -4310,26 +4347,28 @@ class WorkbenchStore:
             "start_time",
             "end_time_actual",
             "error",
+            "error_code",
+            "error_details_json",
             "elapsed_seconds",
             "runtime_profile_json",
             "effective_config_json",
             "resource_summary_json",
             "terminal_log_json",
         }
-        fields = [(key, value) for key, value in values.items() if key in allowed]
+        fields = [(key, value) for key, value in normalized_values.items() if key in allowed]
         if not fields:
             return
         assignments = ", ".join(f"{key}=?" for key, _ in fields)
         params = [value for _, value in fields] + [simulation_id]
         with database.connect() as connection:
             connection.execute(f"UPDATE simulation_runs SET {assignments} WHERE simulation_id=?", params)
-            status = values.get("status")
+            status = normalized_values.get("status")
             if status in {"running", "starting", "stopping"}:
                 connection.execute(
                     "UPDATE queue_items SET status=?, progress=?, summary=? WHERE simulation_id=?",
                     (
                         status,
-                        float(values.get("progress") or 0),
+                        float(normalized_values.get("progress") or 0),
                         "正在模拟中" if status == "running" else "准备运行",
                         simulation_id,
                     ),
@@ -4358,13 +4397,16 @@ class WorkbenchStore:
             connection.execute(
                 """
                 UPDATE simulation_runs SET status=?, progress=?, end_time_actual=?, error=?,
-                    resource_summary_json=?, elapsed_seconds=? WHERE simulation_id=?
+                    error_code=?, error_details_json=?, resource_summary_json=?,
+                    elapsed_seconds=? WHERE simulation_id=?
                 """,
                 (
                     status,
                     float(result.get("progress") if result.get("progress") is not None else (100.0 if status == "completed" else 0.0)),
                     now,
                     result.get("error"),
+                    result.get("error_code"),
+                    json.dumps(result.get("error_details") or {}, ensure_ascii=False, default=str),
                     json.dumps(result.get("resource_summary") or {}, ensure_ascii=False),
                     float(result.get("elapsed_seconds") or 0),
                     simulation_id,
@@ -4410,6 +4452,8 @@ class WorkbenchStore:
             "start_time": data.get("start_time"),
             "end_time_actual": data.get("end_time_actual"),
             "error": data.get("error"),
+            "error_code": data.get("error_code"),
+            "error_details": json_loads(data.get("error_details_json"), {}),
             "elapsed_seconds": float(data["elapsed_seconds"]),
             "output_dir": data.get("output_dir"),
             "resource_summary": json_loads(data.get("resource_summary_json"), {}),

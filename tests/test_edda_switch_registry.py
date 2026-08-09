@@ -6,9 +6,16 @@ import pytest
 from api.services.edda_input_mapper import build_reference_runtime_metadata
 from api.services.edda_switch_registry import (
     ALLOWED_STATUSES,
+    EDDA_SWITCH_BY_KEY,
     EDDA_SWITCH_REGISTRY,
 )
 from api.services.reference_config_parser import parse_reference_config_file
+from api.services.parameter_templates import (
+    BJ_HXL_TEMPLATE_ID,
+    builtin_bj_hxl_template,
+    builtin_parameter_templates,
+    normalized_parameter_values,
+)
 
 
 def _case_config_file() -> Path:
@@ -132,3 +139,71 @@ def test_registry_has_complete_nine_part_trace_and_acyclic_dependency_contract()
             if spec.status in {"production_consumed", "config_fallback_consumed"}
             else "read_only"
         )
+
+
+def test_output_truth_uses_one_scalar_flow_velocity_family_and_tracks_max_solid():
+    parsed = parse_reference_config_file(_case_config_file())
+
+    expected = parsed.reference_output_expectations["expected_grid_families"]
+    assert "Flow_velocity_*" in expected
+    assert "Flow_velocity_*_1..8" not in expected
+    assert "Maxsoliddepth_*" in expected
+    assert EDDA_SWITCH_BY_KEY["save_max_solid_depth"].status == "production_consumed"
+
+
+def test_repaired_dfs_controls_and_output_families_report_current_consumption_truth():
+    production_consumed = {
+        "simulate_rainfall",
+        "simulate_infiltration",
+        "simulate_outflow_cell",
+        "simulate_erosion",
+        "simulate_water_and_solid_separately",
+        "save_flow_depth",
+        "save_max_flow_depth",
+        "save_flow_velocity",
+        "save_max_flow_velocity",
+        "save_erosion_depth",
+        "save_deposition_depth",
+        "save_total_depth",
+        "save_max_solid_depth",
+        "save_volumetric_sediment_concentration",
+        "save_outflow_process",
+    }
+
+    assert {
+        key: EDDA_SWITCH_BY_KEY[key].status for key in production_consumed
+    } == {key: "production_consumed" for key in production_consumed}
+    assert EDDA_SWITCH_BY_KEY["simulate_shallow_landslide"].status == "partial"
+    assert EDDA_SWITCH_BY_KEY["simulate_debris_flow"].status == "partial"
+
+
+def test_path_free_import_preserves_all_edda_controls_for_strict_runtime_gate():
+    parsed = parse_reference_config_file(_case_config_file())
+
+    values = normalized_parameter_values(parsed)
+
+    assert values["edda.registry_version"] == parsed.switch_snapshot.registry_version
+    imported = {
+        key.removeprefix("edda.run_controls.").removeprefix("edda.output_controls."): value
+        for key, value in values.items()
+        if key.startswith(("edda.run_controls.", "edda.output_controls."))
+    }
+    assert imported == parsed.switch_snapshot.to_dict()["values"]
+
+
+def test_current_bj_hxl_template_freezes_exact_controls_without_rewriting_v2():
+    parsed = parse_reference_config_file(_case_config_file())
+    template = builtin_bj_hxl_template()
+    template_ids = [item["template_id"] for item in builtin_parameter_templates()]
+
+    assert BJ_HXL_TEMPLATE_ID == "pt-bj-hxl-v3"
+    assert template["version"] == "3"
+    assert "pt-bj-hxl-v2" in template_ids
+    assert template_ids[-1] == BJ_HXL_TEMPLATE_ID
+    assert template["values"]["edda.registry_version"] == parsed.switch_snapshot.registry_version
+    controls = {
+        key.removeprefix("edda.run_controls.").removeprefix("edda.output_controls."): value
+        for key, value in template["values"].items()
+        if key.startswith(("edda.run_controls.", "edda.output_controls."))
+    }
+    assert controls == parsed.switch_snapshot.to_dict()["values"]

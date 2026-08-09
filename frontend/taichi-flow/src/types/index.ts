@@ -384,8 +384,12 @@ export type DirectoryListing = {
 };
 export type ParameterCatalogEntry = {
   key: string;
+  control_key?: string | null;
+  control_family?: string | null;
+  source_index?: number | null;
   label: string;
   label_zh?: string | null;
+  description_zh?: string | null;
   abbrev?: string | null;
   group?: string | null;
   config_path?: string | null;
@@ -393,9 +397,31 @@ export type ParameterCatalogEntry = {
   runtime_consumer?: string | null;
   activation_condition?: string | null;
   runtime_status: string;
+  status_label_zh?: string | null;
   editable: boolean;
+  frontend_policy?: "editable" | "read_only" | string;
+  value_type?: "boolean" | "integer" | "number_array" | "enum" | string;
+  allowed_values?: unknown[];
+  dependencies?: string[];
+  dependency_paths?: string[];
+  affected_output_families?: string[];
+  original_variable?: string | null;
+  source_stage?: string | null;
+  status_reason?: string | null;
 };
-export type ParameterCatalog = { catalog_version: string; editable_statuses: string[]; parameters: ParameterCatalogEntry[]; status_counts: Record<string, number> };
+export type EddaControlRegistrySummary = {
+  registry_version: string;
+  entry_count: number;
+  editable_count: number;
+  restricted_count: number;
+};
+export type ParameterCatalog = {
+  catalog_version: string;
+  editable_statuses: string[];
+  parameters: ParameterCatalogEntry[];
+  status_counts: Record<string, number>;
+  control_registry?: EddaControlRegistrySummary | null;
+};
 
 export type RainfallPeriod = {
   period_id?: string;

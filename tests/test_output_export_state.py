@@ -1,6 +1,7 @@
 import numpy as np
 from pathlib import Path
 
+from edda.config.sim_config import SimulationConfig
 from edda.core.fields import EDDAFields
 from edda.solver import edda_solver as edda_solver_module
 from edda.solver.edda_solver import EDDASolver
@@ -102,6 +103,253 @@ class _Config:
     save_intermediate = False
 
 
+def _strict_output_solver(tmp_path, *, extension_controls=None, **enabled_outputs):
+    output_controls = {
+        "save_fs_min_grid": False,
+        "save_flow_depth": False,
+        "save_max_flow_depth": False,
+        "save_flow_velocity": False,
+        "save_max_flow_velocity": False,
+        "save_erosion_depth": False,
+        "save_deposition_depth": False,
+        "save_total_depth": False,
+        "save_max_solid_depth": False,
+        "save_volumetric_sediment_concentration": False,
+        "save_outflow_process": False,
+        "save_drainage_nodal_flow": False,
+        "save_drainage_conduit_flow": False,
+    }
+    output_controls.update(enabled_outputs)
+    config = SimulationConfig.from_dict(
+        {
+            "dem_file": "dummy.asc",
+            "output_dir": str(tmp_path),
+            "edda": {
+                "run_controls": {
+                    "simulate_debris_flow": True,
+                    "simulate_rainfall": True,
+                    "simulate_infiltration": True,
+                    "simulate_inflow_hydrograph": False,
+                    "simulate_outflow_cell": True,
+                    "simulate_shallow_landslide": True,
+                    "simulate_erosion": True,
+                    "simulate_water_and_solid_separately": True,
+                    "simulate_drainage_flow": False,
+                    "simulate_barrier": False,
+                },
+                "output_controls": output_controls,
+                "extension_controls": dict(extension_controls or {}),
+            },
+        }
+    )
+    solver = EDDASolver(config)
+    solver.output_dir = tmp_path
+    solver.export_metadata = {"nodata_value": -9999.0}
+    solver.dfs_dynamic_wave = None
+    return solver
+
+
+def _strict_output_state():
+    fv = np.zeros((2, 1, 8), dtype=np.float64)
+    return {
+        "h": np.array([[1.0], [1.0]], dtype=np.float64),
+        "Cv": np.array([[0.2], [0.3]], dtype=np.float64),
+        "fv_fortran": fv,
+        "z_bed": np.array([[12.0], [9.0]], dtype=np.float64),
+        "z_original": np.array([[10.0], [10.0]], dtype=np.float64),
+        "deposition_depth": np.array([[99.0], [99.0]], dtype=np.float64),
+        "erosion_depth_fortran_output": np.array([[0.0], [1.0]], dtype=np.float64),
+        "max_flow_depth": np.array([[2.0], [3.0]], dtype=np.float64),
+        "max_flow_velocity": np.array([[4.0], [5.0]], dtype=np.float64),
+        "max_solid_depth": np.array([[0.005], [0.006]], dtype=np.float64),
+        "fdepth": np.array([[0.0], [2.0]], dtype=np.float64),
+    }
+
+
+def _record_strict_text_families(solver, state):
+    written = {}
+
+    def record(stem, _t, data, _nodata_mask, _nodata_value):
+        written[stem] = np.asarray(data).copy()
+
+    solver._write_edda_text_grid = record
+    solver._export_taichi_named_edda_text_outputs(
+        state=state,
+        t=10.0,
+        h_export=state["h"].T.copy(),
+        velocity_export=np.zeros((1, 2), dtype=np.float64),
+        cv_export=state["Cv"].T.copy(),
+        nodata_mask=np.zeros((1, 2), dtype=np.int32),
+        nodata_value=-9999.0,
+    )
+    return written
+
+
+def test_strict_edda_text_writer_emits_only_enabled_family(tmp_path):
+    solver = _strict_output_solver(tmp_path, save_flow_depth=True)
+
+    written = _record_strict_text_families(solver, _strict_output_state())
+
+    assert list(written) == ["Flow_depth_EDDA"]
+
+
+def test_strict_edda_text_writer_uses_bed_delta_and_accepted_maxima(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        save_deposition_depth=True,
+        save_total_depth=True,
+        save_max_flow_depth=True,
+        save_max_flow_velocity=True,
+        save_max_solid_depth=True,
+    )
+
+    written = _record_strict_text_families(solver, _strict_output_state())
+
+    np.testing.assert_allclose(written["Deposit_depth_EDDA"], np.array([[2.0, 0.0]]))
+    np.testing.assert_allclose(written["Total_depth_EDDA"], np.array([[3.0, 0.0]]))
+    np.testing.assert_allclose(written["Max_flow_depth_EDDA"], np.array([[2.0, 3.0]]))
+    np.testing.assert_allclose(written["Max_flow_velocity_EDDA"], np.array([[4.0, 5.0]]))
+    np.testing.assert_allclose(written["MaxsoliddepthEDDA"], np.array([[0.0, 0.006]]))
+
+
+def test_control_free_direct_output_retains_checkpoint_max_cache_compatibility(tmp_path):
+    config = SimulationConfig.from_dict(
+        {"dem_file": "dummy.asc", "output_dir": str(tmp_path)}
+    )
+    solver = EDDASolver(config)
+    solver.output_dir = tmp_path
+    solver.export_metadata = {"nodata_value": -9999.0}
+    solver.dfs_dynamic_wave = None
+    state = _strict_output_state()
+    state["h"] = np.array([[1.0], [2.0]], dtype=np.float64)
+    state["Cv"] = np.array([[0.01], [0.5]], dtype=np.float64)
+    state["max_flow_depth"] = np.zeros((2, 1), dtype=np.float64)
+    state["max_flow_velocity"] = np.zeros((2, 1), dtype=np.float64)
+    state["max_solid_depth"] = np.zeros((2, 1), dtype=np.float64)
+    written = {}
+    solver._write_edda_text_grid = (
+        lambda stem, _t, data, _mask, _nodata: written.__setitem__(
+            stem, np.asarray(data).copy()
+        )
+    )
+
+    solver._export_taichi_named_edda_text_outputs(
+        state=state,
+        t=10.0,
+        h_export=state["h"].T.copy(),
+        velocity_export=np.array([[3.0, 4.0]], dtype=np.float64),
+        cv_export=state["Cv"].T.copy(),
+        nodata_mask=np.zeros((1, 2), dtype=np.int32),
+        nodata_value=-9999.0,
+    )
+
+    np.testing.assert_allclose(written["Max_flow_depth_EDDA"], [[1.0, 2.0]])
+    np.testing.assert_allclose(written["Max_flow_velocity_EDDA"], [[3.0, 4.0]])
+    np.testing.assert_allclose(written["MaxsoliddepthEDDA"], [[0.01, 1.0]])
+
+
+def test_strict_edda_output_schedule_is_independent_of_generic_intermediate_geotiff(tmp_path):
+    solver = _strict_output_solver(tmp_path, save_flow_depth=True)
+    solver.config.save_intermediate = False
+    solver.fields = _RecordingFieldsWithDirectionalVelocity()
+    solver.time_stepper = _TimeStepper()
+    solver.results = []
+    solver.output_callback = None
+    written = []
+    solver._write_edda_text_grid = (
+        lambda stem, _t, _data, _mask, _nodata: written.append(stem)
+    )
+
+    solver._output_results()
+
+    assert written == ["Flow_depth_EDDA"]
+
+
+def _seed_outflow_observer(solver):
+    solver.outflow_process_observer = {
+        "output_filename": "OUTNQ_Taichi.txt",
+        "cells": [{"cell_id": 7, "i": 0, "j": 0}],
+        "samples": [
+            {
+                "time_hours": 1.0,
+                "cells": [{"cell_id": 7, "discharge_cms": 2.5, "cv": 0.3}],
+            }
+        ],
+        "max_discharge": {7: 2.5},
+        "max_time_hours": {7: 1.0},
+    }
+
+
+def test_outnq_false_gate_creates_no_file(tmp_path):
+    solver = _strict_output_solver(tmp_path, save_outflow_process=False)
+    _seed_outflow_observer(solver)
+
+    result = solver._export_outflow_process_text()
+
+    assert result is None
+    assert not (tmp_path / "OUTNQ_Taichi.txt").exists()
+
+
+def test_outnq_true_gate_uses_original_three_column_format(tmp_path):
+    solver = _strict_output_solver(tmp_path, save_outflow_process=True)
+    _seed_outflow_observer(solver)
+
+    result = solver._export_outflow_process_text()
+
+    assert result == tmp_path / "OUTNQ_Taichi.txt"
+    content = result.read_text(encoding="utf-8")
+    assert "DISCHARGE (CMS)" in content
+    assert "CV" not in content
+
+
+def test_hydrograph_false_gate_creates_no_file(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        extension_controls={"save_hydrograph_cells": False},
+    )
+    solver.hydrograph_monitor_observer = {
+        "output_filename": "HYDROGRAPHTaichi.txt",
+        "cells": [{"cell_id": 7, "i": 0, "j": 0}],
+        "samples": [
+            {
+                "time_hours": 1.0,
+                "cells": [{"cell_id": 7, "discharge_cms": 2.5, "cv": 0.3}],
+            }
+        ],
+        "max_discharge": {7: 2.5},
+        "max_time_hours": {7: 1.0},
+    }
+
+    result = solver._export_hydrograph_monitor_text()
+
+    assert result is None
+    assert not (tmp_path / "HYDROGRAPHTaichi.txt").exists()
+
+
+def test_pressure_head_listing_zero_gate_creates_no_file(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        pressure_head_fs_listing_flag=0,
+    )
+
+    result = solver._export_list_z_p_fs_text()
+
+    assert result is None
+    assert not (tmp_path / "list_z_p_fs_Taichi.txt").exists()
+
+
+def test_pressure_head_listing_minus_one_writes_supported_normal_header(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        pressure_head_fs_listing_flag=-1,
+    )
+
+    result = solver._export_list_z_p_fs_text()
+
+    assert result == tmp_path / "list_z_p_fs_Taichi.txt"
+    assert result.read_text(encoding="utf-8").splitlines()[-1] == "Z         P         FS"
+
+
 def test_output_results_excludes_pt_from_standard_output_state():
     solver = object.__new__(EDDASolver)
     solver.fields = _RecordingFields()
@@ -128,6 +376,9 @@ def test_output_results_exports_fortran_flow_velocity_from_directional_state(mon
 
         def to_geotiff(self, path):
             exported[Path(path).name] = self.data.copy()
+
+        def to_ascii_grid(self, _path):
+            return None
 
     monkeypatch.setattr(edda_solver_module, "ResultExporter", _Exporter)
 

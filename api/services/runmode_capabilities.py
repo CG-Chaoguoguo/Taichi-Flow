@@ -1,12 +1,22 @@
-"""Structured run-mode capability registry for backend/UI exposure decisions."""
+"""Registry-derived backend capability view for service/runtime audit payloads.
+
+The 45 original EDDA switches have exactly one truth source:
+``EDDA_SWITCH_REGISTRY``.  This module adds only non-switch input, sidecar, and
+parameter capabilities; it never restates switch status or exposure policy.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
+from api.services.edda_switch_registry import (
+    EDDA_SWITCH_REGISTRY,
+    REGISTRY_VERSION,
+    EddaSwitchSpec,
+)
 from edda.config.sim_config import SimulationConfig
 
 
@@ -14,396 +24,185 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-RUNMODE_CAPABILITIES: List[Dict[str, Any]] = [
-    {
-        "key": "hydrology.use_background_flux_offset",
-        "raw_label": "Add steady background flux to transient infiltration rate...",
-        "family": "run_mode",
+def _canonical_capability_key(spec: EddaSwitchSpec) -> str:
+    if spec.key == "background_flux_offset":
+        return "hydrology.use_background_flux_offset"
+    prefix = "flags" if spec.group == "run_control" else "output_flags"
+    return f"{prefix}.{spec.key}"
+
+
+def _canonical_capability(spec: EddaSwitchSpec) -> Dict[str, Any]:
+    supported = spec.status in {"production_consumed", "config_fallback_consumed"}
+    return {
+        "key": _canonical_capability_key(spec),
+        "raw_label": f"{spec.original_variable} / {spec.key}",
+        "family": "run_mode" if spec.group == "run_control" else "output_flag",
         "original_true_switch": "yes",
-        "current_backend_status": "implemented_and_switchable",
-        "frontend_exposure_policy": "switchable",
-        "blocked_reason": None,
-        "evidence_basis": "Original `bkgrof` has active source-trace and current backend runtime consumption; React/FastAPI contract is tested.",
-    },
-    {
-        "key": "flags.use_analytic_fillable_porosity",
-        "raw_label": "Use analytic solution for fillable porosity?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Visible original source shows parsing of `lany`, but no active consumer was found in the current source-trace set.",
-        "evidence_basis": "Current backend has no safe equivalent runtime gate.",
-    },
-    {
-        "key": "flags.estimate_positive_pressure_head",
-        "raw_label": "Estimate positive pressure head in rising water table zone?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Visible original source shows parsing of `llus`, but no active consumer was found in the current source-trace set.",
-        "evidence_basis": "Current backend has no safe equivalent runtime gate.",
-    },
-    {
-        "key": "flags.use_psi0_negative_inverse_alpha",
-        "raw_label": "Use psi0=-1/alpha?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Visible original source shows parsing of `lps0`, but no active consumer was found in the current source-trace set.",
-        "evidence_basis": "Current backend has no safe equivalent runtime gate.",
-    },
-    {
-        "key": "flags.flow_direction_mode",
-        "raw_label": "Flow direction (gener/slope/hydro)",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Original input label exists, but current backend is fixed to DEM-derived connectivity and visible original active consumers were not found.",
-        "evidence_basis": "Do not expose `gener/slope/hydro` as a real switch.",
-    },
-    {
-        "key": "flags.use_full_dynamic_wave",
-        "raw_label": "Using the full dynamic wave equation to compute the velocity?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Visible original source proves parsing of `fulldyna`, but no active original branch selection was found in the current source-trace set.",
-        "evidence_basis": "Current backend follows a fixed solver path and does not expose this as a safe independent toggle.",
-    },
-    {
-        "key": "flags.log_mass_balance_results",
-        "raw_label": "Log mass balance results?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend can surface structured JSON parity for requested mass-balance logging, but does not emit original `EDDALog.txt` text parity.",
-        "evidence_basis": "Treat as metadata-only parity; do not expose as a real logging toggle.",
-    },
-    {
-        "key": "flags.simulate_rainfall",
-        "raw_label": "Simulte rainfall?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "implemented_but_fixed_scientific_path",
-        "frontend_exposure_policy": "fixed_path",
-        "blocked_reason": "Current backend treats rainfall as input-driven forcing, not as an independent off/on switch.",
-        "evidence_basis": "Reference-config rainfall source selection is production-reachable.",
-    },
-    {
-        "key": "flags.simulate_infiltration",
-        "raw_label": "Simulte infiltration?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "implemented_but_fixed_scientific_path",
-        "frontend_exposure_policy": "fixed_path",
-        "blocked_reason": "Current backend treats infiltration as part of the production scientific path instead of a safe standalone toggle.",
-        "evidence_basis": "Runtime path exists, but no safe independent contract exists.",
-    },
-    {
-        "key": "flags.simulate_inflow_hydrograph",
-        "raw_label": "Simulate inflow hydrograph?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend can now consume active `inflow.txt` hydrograph forcing for the DFS production path, but full original log/report parity remains incomplete.",
-        "evidence_basis": "Reference-config `inflowsimul + inflow.txt` now reaches runtime DFS staging fields and inflow-volume accounting.",
-    },
-    {
-        "key": "flags.simulate_outflow_cell",
-        "raw_label": "Simulate outflow cell?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend now consumes `outflow.txt` for selected-cell observation/export, but full original hydraulic parity is still incomplete.",
-        "evidence_basis": "Selected-cell sidecar loading and partial `OUTNQ_*` export exist; full routing parity remains blocked.",
-    },
-    {
-        "key": "flags.simulate_shallow_landslide",
-        "raw_label": "Simulate shallow landslide?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "implemented_but_fixed_scientific_path",
-        "frontend_exposure_policy": "fixed_path",
-        "blocked_reason": "Current backend couples shallow-failure logic into the production path without a separate evidence-backed toggle.",
-        "evidence_basis": "Do not split this path until parity risk is lower.",
-    },
-    {
-        "key": "flags.simulate_debris_flow",
-        "raw_label": "Simulate debris flow?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend runs a debris-flow production path, but does not expose original `debrissimul` branch semantics as a safe independent switch.",
-        "evidence_basis": "Keep status-only.",
-    },
-    {
-        "key": "flags.simulate_erosion",
-        "raw_label": "Simulte erosion?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "implemented_but_fixed_scientific_path",
-        "frontend_exposure_policy": "fixed_path",
-        "blocked_reason": "Current backend erosion/deposition logic is part of the fixed production path rather than an independently validated toggle.",
-        "evidence_basis": "Do not split without parity evidence.",
-    },
-    {
-        "key": "flags.simulate_water_and_solid_separately",
-        "raw_label": "Simulte simulate the water and solid material seperately?",
-        "family": "run_mode",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend does not expose a safe standalone contract for the original separate water/solid treatment mode.",
-        "evidence_basis": "Partial runtime behavior exists only.",
-    },
-    {
-        "key": "rainfall.source_family",
-        "raw_label": "cri/capt/rifil rainfall source family",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_derived",
-        "frontend_exposure_policy": "derived_from_inputs",
-        "blocked_reason": None,
-        "evidence_basis": "Production parser/mapper/runtime preserve per-period uniform-vs-raster source selection.",
-    },
-    {
-        "key": "manning.source_family",
-        "raw_label": "manningfil/global manning source family",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_derived",
-        "frontend_exposure_policy": "derived_from_inputs",
-        "blocked_reason": None,
-        "evidence_basis": "Production runtime selects raster Manning when available and falls back to global initiation Manning otherwise.",
-    },
-    {
-        "key": "native_inputs.demfil",
-        "raw_label": "demfil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_derived",
-        "frontend_exposure_policy": "importable_auditable",
-        "blocked_reason": None,
-        "evidence_basis": "Formal production input through upload or reference-config mapping.",
-    },
-    {
-        "key": "native_inputs.slofil",
-        "raw_label": "slofil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_derived",
-        "frontend_exposure_policy": "importable_auditable",
-        "blocked_reason": None,
-        "evidence_basis": "Current backend has a production slope-grid loader.",
-    },
-    {
-        "key": "native_inputs.zonfil",
-        "raw_label": "zonfil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_derived",
-        "frontend_exposure_policy": "importable_auditable",
-        "blocked_reason": None,
-        "evidence_basis": "Current backend has a production zone-grid loader.",
-    },
-    {
-        "key": "native_inputs.dirfil",
-        "raw_label": "dirfil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend derives connectivity from DEM and does not consume original direction grids.",
-        "evidence_basis": "Keep provenance only.",
-    },
-    {
-        "key": "native_inputs.zfil",
-        "raw_label": "zfil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend closes the original `ltstar < 0` branch for `zfil`, but not the separate original `zmax < 0` branch that reuses the same file family.",
-        "evidence_basis": "Treat as partial semantic alignment: case-driven `ltstar` use is anchored, `zmax` parity remains blocked.",
-    },
-    {
-        "key": "native_inputs.depfil",
-        "raw_label": "depfil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend now closes the original `depth < 0` initialization branch, but broader groundwater-depth family parity is still incomplete.",
-        "evidence_basis": "Scalar fallback and per-cell `depfil` initialization branch are production-reachable; no broader family parity is claimed.",
-    },
-    {
-        "key": "native_inputs.rizerofil",
-        "raw_label": "rizerofil",
-        "family": "input_family",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend now closes the original `rizero < 0` initialization branch, but no separate inflow-sidecar forcing semantics are implied.",
-        "evidence_basis": "Scalar fallback and per-cell `rizerofil` initialization branch are production-reachable.",
-    },
-    {
-        "key": "sidecar.outflow.txt",
-        "raw_label": "outflow.txt",
-        "family": "sidecar",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend now consumes `outflow.txt` for selected-cell observation/export, but full original hydraulic parity remains incomplete.",
-        "evidence_basis": "Selected-cell outflow observer/export exists; generic edge outflow handling still coexists.",
-    },
-    {
-        "key": "sidecar.hydrograph.txt",
-        "raw_label": "hydrograph.txt",
-        "family": "sidecar",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend can consume `hydrograph.txt` for monitored-output export, but only the zero-flow synthetic oracle has been validated.",
-        "evidence_basis": "Hydrosave monitored-cell loader and original-style `HYDROGRAPH_` writer exist; keep UI switching blocked until broader oracle coverage.",
-    },
-    {
-        "key": "sidecar.inflow.txt",
-        "raw_label": "inflow.txt",
-        "family": "sidecar",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend now consumes active `inflow.txt` hydrographs for DFS runtime forcing, but full original reporting parity remains incomplete.",
-        "evidence_basis": "Original `inflow_read.F90` semantics are source-traced and the current backend now maps the sidecar into DFS staging fields.",
-    },
-    {
-        "key": "sidecar.EDDALog.txt",
-        "raw_label": "EDDALog.txt",
-        "family": "sidecar",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend emits structured JSON metadata that preserves part of the original logging truth, but not original `EDDALog.txt` text/process parity.",
-        "evidence_basis": "Do not fake original log output.",
-    },
-    {
-        "key": "output_flags.legacy_slope_failure_family",
-        "raw_label": "Legacy slope-failure / runoff / PF / road / warning / listing flags",
-        "family": "output_flag_family",
-        "original_true_switch": "yes",
-        "current_backend_status": "unsupported_in_current_backend",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend does not implement these original legacy output families.",
-        "evidence_basis": "Keep provenance only.",
-    },
-    {
-        "key": "output_flags.whole_process_grid_family",
-        "raw_label": "Whole-process grid output flags (flow depth/velocity/erosion/deposition/cv)",
-        "family": "output_flag_family",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend writes real result files, but not under the original per-flag export-control contract.",
-        "evidence_basis": "Treat as partial result support, not original flag parity.",
-    },
-    {
-        "key": "output_flags.save_outflow_process",
-        "raw_label": "Save outflow process?",
-        "family": "output_flag_family",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend can emit partial original-style `OUTNQ_*` exports, but full hydraulic parity with original outflow routing remains incomplete.",
-        "evidence_basis": "Selected-cell outflow observer/export exists; treat as partial parity only.",
-    },
-    {
-        "key": "output_flags.save_hydrograph_cells",
-        "raw_label": "Save hydrograph of specified cells?",
-        "family": "output_flag_family",
-        "original_true_switch": "yes",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Original `HYDROGRAPH_` export parity is implemented only for source-backed monitored-cell output and the zero-flow synthetic oracle so far.",
-        "evidence_basis": "Hydrosave observer/export path exists; non-zero active-case validation remains pending.",
-    },
-    {
-        "key": "rheology.shallown",
-        "raw_label": "shallown",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend parses and maps `shallown`, but no production runtime consumer is audited.",
-        "evidence_basis": "Keep blocked until an active original consumer or validated equivalent is identified.",
-    },
-    {
-        "key": "time.wavemax",
-        "raw_label": "wavemax",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend parses and maps `wavemax`, but no production Taichi runtime consumer is audited.",
-        "evidence_basis": "Do not expose until runtime consumption is closed.",
-    },
-    {
-        "key": "soil.double_layer.uww",
-        "raw_label": "uww (double-layer branch)",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "implemented_but_fixed_scientific_path",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "The backend now consumes `soil.double_layer.uww` in the double-layer runtime, but this parameter is not being exposed as a standalone UI switch in the current scientific-alignment stage.",
-        "evidence_basis": "Visible original `doublelayer.F90` uses `uww`, and the current backend now wires the parsed config value into the runtime path.",
-    },
-    {
-        "key": "native_inputs.zmax",
-        "raw_label": "zmax",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "blocked_by_missing_source_trace",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend preserves parsed `zmax` provenance, but no canonical runtime consumer is closed.",
-        "evidence_basis": "Keep parsed-only until original active consumer or validated equivalent is identified.",
-    },
-    {
-        "key": "soil.porosity",
-        "raw_label": "porosity",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "partial",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend parses porosity in zone rows but does not map it into a production runtime field.",
-        "evidence_basis": "Do not expose until parsed -> mapped -> consumed is closed.",
-    },
-    {
-        "key": "soil.zone_stddev_family",
-        "raw_label": "zone stddev family",
-        "family": "parameter",
-        "original_true_switch": "no",
-        "current_backend_status": "unsupported_in_current_backend",
-        "frontend_exposure_policy": "blocked",
-        "blocked_reason": "Current backend has no parser/model/runtime support for the original zone stddev family.",
-        "evidence_basis": "Keep fully blocked.",
-    },
-]
+        "current_backend_status": spec.status,
+        "frontend_exposure_policy": spec.frontend_policy,
+        "blocked_reason": None if supported else spec.status_reason,
+        "evidence_basis": (
+            f"{spec.fortran_runtime_consumer}; current: {spec.taichi_runtime_consumer}; "
+            f"evidence: {spec.test_or_audit_artifact}"
+        ),
+        "canonical_switch_key": spec.key,
+        "canonical_source_index": spec.source_index,
+        "canonical_group": spec.group,
+        "canonical_registry_version": REGISTRY_VERSION,
+        "value_type": spec.value_type,
+        "allowed_values": list(spec.allowed_values),
+        "original_semantics": spec.original_semantics,
+        "consumption_stage": spec.consumption_stage,
+        "dependencies": list(spec.dependencies),
+        "affected_output_families": list(spec.affected_output_families),
+    }
+
+
+def _auxiliary_capability(
+    key: str,
+    raw_label: str,
+    family: str,
+    status: str,
+    policy: str,
+    reason: Optional[str],
+    evidence: str,
+    *,
+    original_true_switch: str = "no",
+) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "raw_label": raw_label,
+        "family": family,
+        "original_true_switch": original_true_switch,
+        "current_backend_status": status,
+        "frontend_exposure_policy": policy,
+        "blocked_reason": reason,
+        "evidence_basis": evidence,
+        "canonical_switch_key": None,
+    }
+
+
+_AUXILIARY_CAPABILITIES = (
+    _auxiliary_capability(
+        "rainfall.source_family", "cri/capt/rifil rainfall source family", "input_family",
+        "production_consumed", "derived_from_inputs", None,
+        "Parser, mapper, and runtime preserve each period's uniform-vs-raster source selection.",
+    ),
+    _auxiliary_capability(
+        "manning.source_family", "manningfil/global manning source family", "input_family",
+        "production_consumed", "derived_from_inputs", None,
+        "Runtime selects raster Manning when active and otherwise consumes the scalar fallback.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.demfil", "demfil", "input_family", "production_consumed",
+        "importable_auditable", None, "Formal production DEM input.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.slofil", "slofil", "input_family", "production_consumed",
+        "importable_auditable", None, "Production native slope-grid loader.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.zonfil", "zonfil", "input_family", "production_consumed",
+        "importable_auditable", None,
+        "Zone raster is consumed only when nzon>1; nzon=1 uses the uniform zone-1 branch.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.dirfil", "dirfil", "input_family", "parsed_only", "read_only",
+        "Current connectivity is DEM-derived and does not consume the original direction grid.",
+        "Retained for provenance only.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.zfil", "zfil", "input_family", "partial", "read_only",
+        "The ltstar<0 branch is production-reachable; the separate zmax<0 role is not closed.",
+        "Dual-role input family remains partial.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.depfil", "depfil", "input_family", "partial", "read_only",
+        "Only the original depth<0 initialization branch is closed.",
+        "Scalar fallback and per-cell initialization are production-reachable.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.rizerofil", "rizerofil", "input_family", "partial", "read_only",
+        "Only the original rizero<0 initialization branch is closed.",
+        "Scalar fallback and per-cell initialization are production-reachable.",
+    ),
+    _auxiliary_capability(
+        "sidecar.outflow.txt", "outflow.txt", "sidecar", "partial", "read_only",
+        "The dedicated mask/order/export chain is implemented; exact active numerical oracle parity is pending.",
+        "Generic boundary metadata is isolated from accepted pre-clear sidecar sampling.",
+    ),
+    _auxiliary_capability(
+        "sidecar.hydrograph.txt", "hydrograph.txt", "sidecar", "partial", "read_only",
+        "Only source-backed monitored-output coverage is qualified.",
+        "Hydrograph remains monitored output and is not inflow forcing.",
+    ),
+    _auxiliary_capability(
+        "sidecar.inflow.txt", "inflow.txt", "sidecar", "partial", "read_only",
+        "DFS forcing is implemented; complete original report parity remains open.",
+        "Active hydrographs reach DFS staging and volume accounting.",
+    ),
+    _auxiliary_capability(
+        "sidecar.EDDALog.txt", "EDDALog.txt", "sidecar", "metadata_only", "read_only",
+        "Structured JSON audit data is not original EDDALog text/process parity.",
+        "Do not synthesize an original log file.",
+    ),
+    _auxiliary_capability(
+        "output_flags.save_hydrograph_cells", "Save hydrograph of specified cells?",
+        "output_extension", "partial", "read_only",
+        "Non-zero active original/Taichi oracle coverage remains pending.",
+        "Extension control gates monitored-cell HYDROGRAPH output.", original_true_switch="yes",
+    ),
+    _auxiliary_capability(
+        "rheology.shallown", "shallown", "parameter", "parsed_only", "read_only",
+        "The active WFS consumer is unavailable.", "Retain provenance until WFS is implemented.",
+    ),
+    _auxiliary_capability(
+        "time.wavemax", "wavemax", "parameter", "parsed_only", "read_only",
+        "No active production consumer is qualified.", "Original visible stability block is inactive.",
+    ),
+    _auxiliary_capability(
+        "soil.double_layer.uww", "uww (double-layer branch)", "parameter",
+        "production_consumed", "read_only", None,
+        "Parsed uww is consumed by the current double-layer runtime.",
+    ),
+    _auxiliary_capability(
+        "native_inputs.zmax", "zmax", "parameter", "parsed_only", "read_only",
+        "No canonical runtime consumer is closed.", "Retain parsed provenance only.",
+    ),
+    _auxiliary_capability(
+        "soil.porosity", "porosity", "parameter", "parsed_only", "read_only",
+        "Zone-row porosity is not mapped into a production field.", "Parsed but not consumed.",
+    ),
+    _auxiliary_capability(
+        "soil.zone_stddev_family", "zone stddev family", "parameter", "unsupported", "read_only",
+        "No parser/model/runtime support exists.", "Keep fail-closed.",
+    ),
+)
+
+
+RUNMODE_CAPABILITIES = tuple(
+    [_canonical_capability(spec) for spec in EDDA_SWITCH_REGISTRY]
+    + [deepcopy(entry) for entry in _AUXILIARY_CAPABILITIES]
+)
 
 
 def _infer_source_trace_status(entry: Dict[str, Any]) -> str:
-    status = entry.get("current_backend_status")
-    if status == "blocked_by_missing_source_trace":
-        return "missing_active_consumer"
+    if entry.get("canonical_switch_key") is not None:
+        if entry.get("original_semantics") == "no_op_candidate":
+            return "missing_active_consumer"
+        status = entry.get("current_backend_status")
+        if status in {"production_consumed", "config_fallback_consumed"}:
+            return "anchored"
+        if status == "partial":
+            return "anchored_partial"
+        if status == "metadata_only":
+            return "metadata_only"
+        return "missing_runtime_consumer"
     if entry.get("key") == "native_inputs.zfil":
         return "dual_role_partial"
+    status = entry.get("current_backend_status")
+    if status in {"parsed_only", "mapped_only", "unsupported", "blocked"}:
+        return "missing_runtime_consumer"
     return "anchored"
 
 
@@ -415,26 +214,40 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _configured_value(
-    key: str,
+    entry: Dict[str, Any],
     config: Optional[SimulationConfig],
     reference_audit: Optional[Dict[str, Any]],
     parameter_audit: Optional[Dict[str, Any]],
 ) -> Any:
+    key = entry["key"]
+    canonical_key = entry.get("canonical_switch_key")
     flags = (reference_audit or {}).get("flags") or {}
-    if key == "hydrology.use_background_flux_offset" and config is not None:
-        return config.hydrology.use_background_flux_offset
+    if canonical_key is not None:
+        if config is not None:
+            group = entry.get("canonical_group")
+            controls = (
+                config.edda.run_controls
+                if group == "run_control"
+                else config.edda.output_controls
+            )
+            if canonical_key in controls:
+                return controls[canonical_key]
+            if canonical_key == "background_flux_offset":
+                return config.hydrology.use_background_flux_offset
+        if canonical_key in flags:
+            return flags[canonical_key]
+        return None
+    if key == "output_flags.save_hydrograph_cells":
+        return flags.get("save_hydrograph_cells")
     parameters = {
-        entry.get("parameter"): entry
-        for entry in (parameter_audit or {}).get("parameters", [])
-        if isinstance(entry, dict) and entry.get("parameter")
+        item.get("parameter"): item
+        for item in (parameter_audit or {}).get("parameters", [])
+        if isinstance(item, dict) and item.get("parameter")
     }
     if key in parameters:
         return (parameters[key].get("evidence") or {}).get("configured_value")
     if key == "native_inputs.zmax":
         return (reference_audit or {}).get("zmax")
-    flag_key = key.removeprefix("flags.")
-    if flag_key in flags:
-        return flags.get(flag_key)
     return None
 
 
@@ -444,10 +257,12 @@ def build_runmode_capabilities(
     parameter_audit: Optional[Dict[str, Any]] = None,
     source_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    capabilities = deepcopy(RUNMODE_CAPABILITIES)
+    capabilities = deepcopy(list(RUNMODE_CAPABILITIES))
     parsed_flag_closure = (reference_audit or {}).get("flag_closure") or []
     for entry in capabilities:
-        entry["configured_value"] = _configured_value(entry["key"], config, reference_audit, parameter_audit)
+        entry["configured_value"] = _configured_value(
+            entry, config, reference_audit, parameter_audit
+        )
         entry["source_trace_status"] = _infer_source_trace_status(entry)
 
     status_summary: Dict[str, int] = {}
@@ -458,20 +273,33 @@ def build_runmode_capabilities(
         status_summary[status] = status_summary.get(status, 0) + 1
         exposure_summary[exposure] = exposure_summary.get(exposure, 0) + 1
 
+    editable_run_modes = [
+        entry["key"]
+        for entry in capabilities
+        if entry.get("canonical_group") == "run_control"
+        and entry["frontend_exposure_policy"] == "editable"
+    ]
+    editable_output_keys = [
+        entry["key"]
+        for entry in capabilities
+        if entry.get("canonical_group") in {"legacy_output", "process_output"}
+        and entry["frontend_exposure_policy"] == "editable"
+    ]
     return {
         "generated_at": _timestamp(),
         "source_mode": source_mode,
+        "canonical_registry_version": REGISTRY_VERSION,
         "capabilities": capabilities,
         "parsed_flag_closure": parsed_flag_closure,
         "summary": {
             "count": len(capabilities),
+            "canonical_switch_count": len(EDDA_SWITCH_REGISTRY),
+            "auxiliary_capability_count": len(_AUXILIARY_CAPABILITIES),
             "status_summary": status_summary,
             "frontend_exposure_summary": exposure_summary,
-            "switchable_keys": [
-                entry["key"]
-                for entry in capabilities
-                if entry["frontend_exposure_policy"] == "switchable"
-            ],
+            # Backward-compatible service-info key; now registry-derived.
+            "switchable_keys": editable_run_modes,
+            "editable_output_keys": editable_output_keys,
         },
     }
 

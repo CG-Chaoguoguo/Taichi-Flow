@@ -73,6 +73,7 @@ class ReferenceConfigParseResult:
     reference_base_dir: str
     nzsb: int
     nzst: int
+    nzon: int
     uww: float
     ltstar_raw: float
     lbstar: float
@@ -1055,11 +1056,12 @@ def _build_reference_output_expectations(flags: Dict[str, Any]) -> Dict[str, Any
         "save_fs_min_grid": "fs_min_*",
         "save_flow_depth": "Flow_depth_*",
         "save_max_flow_depth": "Max_flow_depth_*",
-        "save_flow_velocity": "Flow_velocity_*_1..8",
+        "save_flow_velocity": "Flow_velocity_*",
         "save_max_flow_velocity": "Max_flow_velocity_*",
         "save_erosion_depth": "Erosion_depth_*",
         "save_deposition_depth": "Deposit_depth_*",
         "save_total_depth": "Total_depth_*",
+        "save_max_solid_depth": "Maxsoliddepth_*",
         "save_volumetric_sediment_concentration": "Volumetric_sediment_concentration_*",
     }
     process_flag_map = {
@@ -1098,6 +1100,7 @@ def _annotate_reference_case_activation(
     file_inputs: Dict[str, NativeInputFileRef],
     *,
     flags: Dict[str, Any],
+    nzon: int,
     ltstar_raw: float,
     zmax: float,
     depth: float,
@@ -1132,7 +1135,16 @@ def _annotate_reference_case_activation(
     )
     _set("demfil", original_branch_active=True, current_backend_branch_active=True, activation_basis=aligned_basis)
     _set("slofil", original_branch_active=True, current_backend_branch_active=True, activation_basis=aligned_basis)
-    _set("zonfil", original_branch_active=True, current_backend_branch_active=True, activation_basis=aligned_basis)
+    zonfil_active = nzon > 1
+    _set(
+        "zonfil",
+        original_branch_active=zonfil_active,
+        current_backend_branch_active=zonfil_active,
+        activation_basis=(
+            "Original EDDA reads `zonfil` only when `nzon > 1`; for `nzon == 1` it assigns every active cell to zone 1. "
+            "The current backend follows the same activation condition."
+        ),
+    )
     _set(
         "manningfil",
         original_branch_active=manning_source == "raster_manningfil",
@@ -1248,6 +1260,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     nper = int(vals_nz[3])
     uww = vals_nz[5]
     rainfall_duration_s = vals_nz[6]
+    nzon = int(vals_nz[7])
 
     idx_lt = find_line_index(lines, "ltstar, lbstar, zmax,   depth")
     vals_lt = parse_floats(lines[idx_lt + 1])
@@ -1580,6 +1593,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     _annotate_reference_case_activation(
         file_inputs,
         flags=all_flags,
+        nzon=nzon,
         ltstar_raw=ltstar_raw,
         zmax=zmax,
         depth=depth,
@@ -1773,6 +1787,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         reference_base_dir=str(base_dir.resolve()),
         nzsb=nzsb,
         nzst=nzst,
+        nzon=nzon,
         uww=uww,
         ltstar_raw=ltstar_raw,
         lbstar=lbstar,

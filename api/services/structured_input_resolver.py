@@ -8,6 +8,7 @@ import math
 
 import numpy as np
 
+from api.services.edda_semantic_gate import SemanticGateViolation, validate_flat_edda_controls
 from api.services.edda_input_mapper import _write_geotiff_grid, _write_rainfall_file
 from api.services.rainfall_timeline import regular_boundaries
 from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
@@ -199,6 +200,26 @@ def validate_scenario_configuration(
     if manning_source in {"raster", "raster_manningfil", "spatial"} and "manning.raster" not in by_key:
         add_error("manning_binding_missing", "空间曼宁模式需要活动的 manning.raster 绑定。", parameter_key="manning.source", binding_key="manning.raster")
 
+    semantic_gate: Dict[str, Any]
+    try:
+        semantic_gate = validate_flat_edda_controls(parameters)
+    except SemanticGateViolation as exc:
+        semantic_gate = {
+            "strict": True,
+            "decision": "reject",
+            "code": exc.code,
+            "details": exc.details,
+        }
+        add_error(
+            exc.code,
+            exc.message,
+            parameter_key=(
+                f"edda.run_controls.{exc.details['control']}"
+                if exc.details.get("control")
+                else "edda.registry_version"
+            ),
+        )
+
     dem_meta = (by_key.get("dem.primary") or {}).get("raster_metadata") or {}
     dem_shape = (dem_meta.get("rows"), dem_meta.get("cols"))
     if all(value is not None for value in dem_shape):
@@ -231,7 +252,13 @@ def validate_scenario_configuration(
             if dem_crs and crs and str(dem_crs) != str(crs):
                 add_error("grid_crs_mismatch", f"栅格 {binding.get('binding_key')} 的坐标参考系与 DEM 不一致。", binding_key=str(binding.get("binding_key") or ""))
 
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "issues": issues}
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "issues": issues,
+        "edda_semantic_gate": semantic_gate,
+    }
 
 
 def build_structured_rainfall_payload(
