@@ -17,6 +17,8 @@ import type {
   QueueStartResult,
   ResultFamily,
   Scenario,
+  ScenarioDeletePreview,
+  ScenarioPermanentDeleteResult,
   ScenarioConfiguration,
   SimulationRun,
   DirectoryListing,
@@ -286,7 +288,10 @@ export const scenarioApi = {
   ),
   duplicateScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/duplicate`, json({})),
   archiveScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/archive`, json({})),
+  restoreScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/restore`, json({})),
+  previewDelete: (projectId: string, scenarioId: string) => request<ScenarioDeletePreview>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/delete-preview`, json({})),
   deleteScenario: (projectId: string, scenarioId: string) => request<void>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}`, { method: "DELETE" }),
+  permanentlyDelete: (projectId: string, scenarioId: string) => request<ScenarioPermanentDeleteResult>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/permanent`, { method: "DELETE" }),
 };
 
 export const parameterApi = {

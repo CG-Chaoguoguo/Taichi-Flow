@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { AlertCircle, Check, Loader2 } from "lucide-react";
-import { LAUNCH_STEPS, useTaichiFlowStore } from "../../stores/taichiFlowStore";
+import { isActiveScenario, LAUNCH_STEPS, useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
 
 export function ProjectLaunchScreen() {
@@ -31,7 +31,7 @@ export function ProjectLaunchScreen() {
 
   useEffect(() => {
     if (launchState.status !== "ready" || !projectId) return;
-    const scenarioId = scenarios[0]?.scenario_id;
+    const scenarioId = scenarios.find(isActiveScenario)?.scenario_id;
     const timer = window.setTimeout(() => {
       if (scenarioId) {
         navigate(`/editor/${projectId}/scenarios/${scenarioId}`, { replace: true });

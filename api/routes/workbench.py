@@ -644,10 +644,25 @@ async def archive_scenario(request: Request, project_id: str, scenario_id: str):
     return request.app.state.workbench.archive_scenario(project_id, scenario_id)
 
 
+@router.post("/projects/{project_id}/scenarios/{scenario_id}/restore")
+async def restore_scenario(request: Request, project_id: str, scenario_id: str):
+    return request.app.state.workbench.restore_scenario(project_id, scenario_id)
+
+
+@router.post("/projects/{project_id}/scenarios/{scenario_id}/delete-preview")
+async def preview_scenario_delete(request: Request, project_id: str, scenario_id: str):
+    return request.app.state.workbench.preview_delete_scenario(project_id, scenario_id)
+
+
 @router.delete("/projects/{project_id}/scenarios/{scenario_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_scenario(request: Request, project_id: str, scenario_id: str):
     request.app.state.workbench.delete_scenario(project_id, scenario_id)
     return None
+
+
+@router.delete("/projects/{project_id}/scenarios/{scenario_id}/permanent")
+async def permanently_delete_scenario(request: Request, project_id: str, scenario_id: str):
+    return request.app.state.workbench.permanently_delete_scenario(project_id, scenario_id)
 
 
 @router.get("/projects/{project_id}/queue")

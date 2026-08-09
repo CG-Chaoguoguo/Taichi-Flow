@@ -2053,6 +2053,35 @@
   justify-content: flex-end;
 }
 
+.tf-outliner-archive-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--layer-stroke);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-foreground-secondary);
+  cursor: pointer;
+}
+
+.tf-outliner-archive-button:hover {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+  background: var(--layer-on-acrylic);
+}
+
+.tf-outliner-archive-button span {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tf-break-word {
+  overflow-wrap: anywhere;
+}
+
 .tf-outliner-section-title .tf-chip {
   margin-left: auto;
 }
@@ -2552,19 +2581,17 @@
   opacity: 0.42;
 }
 
-.tf-dock-queue-row.is-drop-target {
-  border-color: var(--color-brand);
-  background: color-mix(in srgb, var(--color-brand) 12%, var(--layer-fill-default));
-}
-
-.tf-dock-queue-drag-handle {
-  flex: 0 0 18px;
+.tf-dock-queue-row.is-draggable {
   cursor: grab;
 }
 
-.tf-dock-queue-leading {
-  width: 18px;
-  flex: 0 0 18px;
+.tf-dock-queue-row.is-draggable:active {
+  cursor: grabbing;
+}
+
+.tf-dock-queue-row.is-drop-target {
+  border-color: var(--color-brand);
+  background: color-mix(in srgb, var(--color-brand) 12%, var(--layer-fill-default));
 }
 
 .tf-dock-queue-checkbox {

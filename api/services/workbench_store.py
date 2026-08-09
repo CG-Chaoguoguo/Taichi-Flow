@@ -14,6 +14,7 @@ from uuid import uuid4
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 
 
@@ -2612,6 +2613,7 @@ class WorkbenchStore:
             "binding_state": binding_state,
             "version": int(data.get("version") or 1),
             "status": data["status"],
+            "archived": bool(data.get("archived")),
             "progress": float(progress_row["progress"]) if progress_row else 0.0,
             "latest_simulation_id": data.get("latest_simulation_id"),
             "result_family_count": int(family_count),
@@ -2885,9 +2887,6 @@ class WorkbenchStore:
             row = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not row:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
-            history_count = connection.execute(
-                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0]
             active_queue_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM queue_items
@@ -2895,10 +2894,17 @@ class WorkbenchStore:
                 """,
                 (scenario_id,),
             ).fetchone()[0]
-            if row["archived"] or history_count or active_queue_count:
+            active_simulation_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM simulation_runs
+                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
+                """,
+                (scenario_id,),
+            ).fetchone()[0]
+            if row["archived"] or active_queue_count or active_simulation_count:
                 raise WorkbenchError(
-                    "scenario_immutable",
-                    "Scenarios with started run history are immutable; duplicate one to edit it.",
+                    "scenario_run_active",
+                    "方案正在计算中，计算结束后才能修改参数或输入绑定。",
                     status_code=409,
                 )
             current_version = int(row["version"] or 1)
@@ -2918,9 +2924,13 @@ class WorkbenchStore:
             baseline = self._parameter_template_values(connection, next_template_id)
             effective_parameters = merge_parameter_values(baseline, patch)
 
+            draft_row_count = connection.execute(
+                "SELECT COUNT(*) FROM scenario_draft_bindings WHERE scenario_id=?",
+                (scenario_id,),
+            ).fetchone()[0]
             current_draft = self._bindings_for_draft_connection(connection, scenario_id)
             legacy_bindings = self._bindings_for_revision_connection(connection, row["input_revision_id"])
-            current_bindings = current_draft or legacy_bindings
+            current_bindings = current_draft if draft_row_count or not row["input_revision_id"] else legacy_bindings
             if input_bindings is not None:
                 next_bindings, _ = self._resolve_binding_assets(connection, input_bindings)
             elif input_revision_id:
@@ -2945,6 +2955,16 @@ class WorkbenchStore:
                 or row["parameter_template_id"] != next_template_id
                 or row["input_revision_id"] is not None
             )
+            unclaimed_queue_rows = connection.execute(
+                """
+                SELECT queue_item_id, status
+                FROM queue_items
+                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('waiting', 'queued')
+                ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, queue_order, enqueued_at, queue_item_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+            next_scenario_status = str(unclaimed_queue_rows[0]["status"]) if unclaimed_queue_rows else "draft"
             self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
             now = utc_now()
             next_version = current_version + 1
@@ -2953,7 +2973,7 @@ class WorkbenchStore:
                 UPDATE scenarios
                 SET name=?, input_revision_id=NULL, parameter_template_id=?,
                     parameter_patch_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
-                    status='draft', updated_at=?
+                    status=?, updated_at=?
                 WHERE scenario_id=?
                 """,
                 (
@@ -2962,6 +2982,7 @@ class WorkbenchStore:
                     json.dumps(patch, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
+                    next_scenario_status,
                     now,
                     scenario_id,
                 ),
@@ -2970,11 +2991,11 @@ class WorkbenchStore:
                 connection.execute(
                     """
                     UPDATE queue_items
-                    SET status='cancelled', finished_at=?, summary='Draft changed; queue item cancelled.',
-                        cancel_reason='draft_changed'
+                    SET scenario_version=?, input_revision_id=NULL, summary='配置已更新，待运行。',
+                        retry_of=NULL
                     WHERE scenario_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
                     """,
-                    (now, scenario_id),
+                    (next_version, scenario_id),
                 )
         self.ensure_scenario_workspace(
             project_id,
@@ -3019,31 +3040,454 @@ class WorkbenchStore:
             expected_version=duplicate.get("version"),
         )
 
-    def archive_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
+    def preview_delete_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
+        """Describe whether a scenario can be removed or must be archived.
+
+        Soft-deleted queue rows still count as history, while only visible rows
+        block the action. This keeps result retention separate from membership.
+        """
         database = self.project_database(project_id)
         self._scenario_row(project_id, scenario_id)
         with database.connect() as connection:
+            visible_queue = connection.execute(
+                """
+                SELECT queue_item_id FROM queue_items
+                WHERE scenario_id=? AND deleted_at IS NULL
+                ORDER BY position, enqueued_at, queue_item_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+            active_simulations = connection.execute(
+                """
+                SELECT simulation_id FROM simulation_runs
+                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
+                ORDER BY created_at, simulation_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+            active_queue = connection.execute(
+                """SELECT queue_item_id FROM queue_items
+                   WHERE scenario_id=? AND status IN ('starting', 'running', 'stopping')""",
+                (scenario_id,),
+            ).fetchall()
+            run_count = int(connection.execute(
+                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0])
+            result_family_count = int(connection.execute(
+                """
+                SELECT COUNT(*) FROM result_families
+                WHERE simulation_id IN (SELECT simulation_id FROM simulation_runs WHERE scenario_id=?)
+                """,
+                (scenario_id,),
+            ).fetchone()[0])
+            queue_reference_count = int(connection.execute(
+                "SELECT COUNT(*) FROM queue_items WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0])
+            output_count = int(connection.execute(
+                "SELECT COALESCE(SUM(output_count), 0) FROM simulation_runs WHERE scenario_id=?",
+                (scenario_id,),
+            ).fetchone()[0])
+            export_count = int(connection.execute(
+                "SELECT COUNT(*) FROM export_jobs WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0])
+            derived_reference_count = int(connection.execute(
+                """
+                SELECT COUNT(*) FROM scenarios
+                WHERE base_scenario_id=? AND scenario_id<>?
+                """,
+                (scenario_id, scenario_id),
+            ).fetchone()[0])
+        blocking_queue_item_ids = [str(row["queue_item_id"]) for row in visible_queue]
+        active_simulation_ids = [str(row["simulation_id"]) for row in active_simulations]
+        preserves_history = (
+            queue_reference_count > 0
+            or run_count > 0
+            or result_family_count > 0
+            or derived_reference_count > 0
+        )
+        can_archive = not blocking_queue_item_ids and not active_simulation_ids
+        # The permanent-delete capability intentionally ignores waiting,
+        # released-but-unclaimed and terminal rows.  Only active scheduler
+        # work or an active simulation can make the irreversible action unsafe.
+        can_permanently_delete = not active_queue and not active_simulation_ids
+        return {
+            "scenario_id": scenario_id,
+            "disposition": "archive" if preserves_history else "delete",
+            "can_remove": can_archive,
+            "can_archive": can_archive,
+            "can_permanently_delete": can_permanently_delete,
+            "blocking_queue_item_ids": blocking_queue_item_ids,
+            "active_simulation_ids": active_simulation_ids,
+            "run_count": run_count,
+            "result_family_count": result_family_count,
+            "queue_item_count": queue_reference_count,
+            "output_count": output_count,
+            "export_count": export_count,
+            "derived_scenario_count": derived_reference_count,
+            "preserves_history": preserves_history,
+        }
+
+    def archive_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
+        database = self.project_database(project_id)
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT scenario_id FROM scenarios WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()
+            if not current:
+                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
+            visible_queue = connection.execute(
+                """
+                SELECT queue_item_id FROM queue_items
+                WHERE scenario_id=? AND deleted_at IS NULL
+                ORDER BY position, enqueued_at, queue_item_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+            if visible_queue:
+                raise WorkbenchError(
+                    "scenario_in_queue",
+                    "方案仍有队列记录，请先在底部队列移除。",
+                    status_code=409,
+                    details={"blocking_queue_item_ids": [str(row["queue_item_id"]) for row in visible_queue]},
+                )
+            active_runs = connection.execute(
+                """
+                SELECT simulation_id FROM simulation_runs
+                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
+                ORDER BY created_at, simulation_id
+                """,
+                (scenario_id,),
+            ).fetchall()
+            if active_runs:
+                raise WorkbenchError(
+                    "scenario_run_active",
+                    "方案仍有活动计算，无法归档。",
+                    status_code=409,
+                    details={"active_simulation_ids": [str(row["simulation_id"]) for row in active_runs]},
+                )
             connection.execute(
                 "UPDATE scenarios SET archived=1, status='archived', updated_at=? WHERE scenario_id=?",
-                (utc_now(), scenario_id),
+                (now, scenario_id),
             )
         return self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
 
+    def restore_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
+        database = self.project_database(project_id)
+        now = utc_now()
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()
+            if not current:
+                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
+            if bool(current["archived"]):
+                connection.execute(
+                    "UPDATE scenarios SET archived=0, updated_at=? WHERE scenario_id=?",
+                    (now, scenario_id),
+                )
+                self._restore_scenario_status_connection(connection, scenario_id, now)
+        return self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
+
+    @staticmethod
+    def _scenario_delete_path_candidates(
+        database: ProjectDatabase,
+        scenario_id: str,
+        simulation_rows: list[sqlite3.Row],
+        export_rows: list[sqlite3.Row],
+    ) -> list[Path]:
+        """Return validated, project-owned paths that belong to a scenario.
+
+        The database stores paths produced by older runtime versions as well as
+        the current scenario workspace paths.  Resolve each path before moving
+        it so a malformed or symlinked record cannot escape the project/state
+        roots during an irreversible delete.
+        """
+        allowed_roots = (database.root, database.state_dir)
+        raw_paths: list[Path] = [database.scenario_dir(scenario_id)]
+        for row in simulation_rows:
+            simulation_id = str(row["simulation_id"])
+            raw_output = row["output_dir"]
+            if raw_output:
+                output_path = Path(str(raw_output)).expanduser()
+                raw_paths.append(output_path if output_path.is_absolute() else database.root / output_path)
+            # Older runs wrote directly below the project-level outputs dir.
+            raw_paths.append(database.output_dir / simulation_id)
+        for row in export_rows:
+            if row["archive_path"]:
+                archive_path = Path(str(row["archive_path"])).expanduser()
+                raw_paths.append(archive_path if archive_path.is_absolute() else database.root / archive_path)
+
+        resolved: list[Path] = []
+        for candidate in raw_paths:
+            path = candidate.resolve(strict=False)
+            if not any(path == root or root in path.parents for root in allowed_roots):
+                raise WorkbenchError(
+                    "scenario_path_invalid",
+                    "方案包含越界的输出或导出路径，已阻止永久删除。",
+                    status_code=409,
+                    details={"path": str(candidate)},
+                )
+            if path in {database.root, database.state_dir, database.output_dir, database.scenarios_dir}:
+                raise WorkbenchError(
+                    "scenario_path_invalid",
+                    "方案路径指向项目保护目录，已阻止永久删除。",
+                    status_code=409,
+                    details={"path": str(candidate)},
+                )
+            if path not in resolved:
+                resolved.append(path)
+
+        # If the scenario workspace contains an output directory, moving the
+        # workspace once is enough; do not attempt to move nested paths twice.
+        minimal: list[Path] = []
+        for path in sorted(resolved, key=lambda value: (len(value.parts), str(value))):
+            if any(parent == path or parent in path.parents for parent in minimal):
+                continue
+            minimal.append(path)
+        return minimal
+
+    @staticmethod
+    def _move_scenario_paths_to_quarantine(
+        paths: list[Path],
+        quarantine: Path,
+    ) -> list[tuple[Path, Path]]:
+        quarantine.mkdir(parents=True, exist_ok=True)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for index, source in enumerate(paths, start=1):
+                if not source.exists():
+                    continue
+                target = quarantine / f"{index:03d}_{source.name or 'path'}"
+                try:
+                    shutil.move(str(source), str(target))
+                except OSError as exc:
+                    raise WorkbenchError(
+                        "scenario_files_busy",
+                        "方案输出或导出文件当前被占用，无法永久删除。",
+                        status_code=409,
+                        details={"path": str(source), "error": str(exc)},
+                    ) from exc
+                moved.append((source, target))
+        except Exception:
+            for source, target in reversed(moved):
+                try:
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists():
+                        shutil.move(str(target), str(source))
+                except OSError:
+                    # Preserve the original exception; the quarantine remains
+                    # for an operator to recover if Windows still holds a lock.
+                    pass
+            raise
+        return moved
+
+    @staticmethod
+    def _restore_scenario_paths_from_quarantine(moved: list[tuple[Path, Path]]) -> None:
+        for source, target in reversed(moved):
+            if not target.exists():
+                continue
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target), str(source))
+
+    def permanently_delete_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
+        """Permanently remove one scenario and its private history.
+
+        Scheduler claims, queue mutations, and this operation all acquire the
+        same SQLite ``BEGIN IMMEDIATE`` lock.  Waiting/released/terminal queue
+        rows are purgeable; active work is rejected with a conflict.
+        """
+        database = self.project_database(project_id)
+        quarantine = database.staging_dir / f"scenario-delete-{uuid4().hex}"
+        moved: list[tuple[Path, Path]] = []
+        summary: Dict[str, Any] = {}
+        try:
+            with database.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                scenario = connection.execute(
+                    "SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)
+                ).fetchone()
+                if not scenario:
+                    raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
+                queue_rows = connection.execute(
+                    "SELECT * FROM queue_items WHERE scenario_id=? ORDER BY position, queue_item_id",
+                    (scenario_id,),
+                ).fetchall()
+                simulation_rows = connection.execute(
+                    "SELECT * FROM simulation_runs WHERE scenario_id=? ORDER BY created_at, simulation_id",
+                    (scenario_id,),
+                ).fetchall()
+                export_rows = connection.execute(
+                    "SELECT * FROM export_jobs WHERE scenario_id=? ORDER BY created_at, export_id",
+                    (scenario_id,),
+                ).fetchall()
+                active_queue = [
+                    str(row["queue_item_id"])
+                    for row in queue_rows
+                    if row["status"] in {"starting", "running", "stopping"}
+                ]
+                active_runs = [
+                    str(row["simulation_id"])
+                    for row in simulation_rows
+                    if row["status"] in {"pending", "starting", "running", "stopping"}
+                ]
+                if active_queue or active_runs:
+                    raise WorkbenchError(
+                        "scenario_run_active",
+                        "方案仍有活动计算，请先停止后再永久删除。",
+                        status_code=409,
+                        details={
+                            "active_queue_item_ids": active_queue,
+                            "active_simulation_ids": active_runs,
+                        },
+                    )
+
+                revision_ids = {
+                    str(value)
+                    for row in queue_rows + simulation_rows
+                    for value in (row["input_revision_id"],)
+                    if value
+                }
+                if scenario["input_revision_id"]:
+                    revision_ids.add(str(scenario["input_revision_id"]))
+                derived_count = int(connection.execute(
+                    "SELECT COUNT(*) FROM scenarios WHERE base_scenario_id=? AND scenario_id<>?",
+                    (scenario_id, scenario_id),
+                ).fetchone()[0])
+                result_family_count = int(connection.execute(
+                    "SELECT COUNT(*) FROM result_families WHERE simulation_id IN "
+                    "(SELECT simulation_id FROM simulation_runs WHERE scenario_id=?)",
+                    (scenario_id,),
+                ).fetchone()[0])
+                output_count = int(connection.execute(
+                    "SELECT COALESCE(SUM(output_count), 0) FROM simulation_runs WHERE scenario_id=?",
+                    (scenario_id,),
+                ).fetchone()[0])
+                paths = self._scenario_delete_path_candidates(database, scenario_id, simulation_rows, export_rows)
+                moved = self._move_scenario_paths_to_quarantine(paths, quarantine)
+
+                queue_ids = [str(row["queue_item_id"]) for row in queue_rows]
+                simulation_ids = [str(row["simulation_id"]) for row in simulation_rows]
+                if queue_ids:
+                    placeholders = ",".join("?" for _ in queue_ids)
+                    # Retry chains may be referenced by a later item; sever
+                    # those references before deleting this scenario's rows.
+                    connection.execute(
+                        f"UPDATE queue_items SET retry_of=NULL WHERE retry_of IN ({placeholders})",
+                        tuple(queue_ids),
+                    )
+                connection.execute(
+                    "UPDATE scenarios SET base_scenario_id=NULL WHERE base_scenario_id=?",
+                    (scenario_id,),
+                )
+                connection.execute("DELETE FROM scenario_draft_bindings WHERE scenario_id=?", (scenario_id,))
+                connection.execute("DELETE FROM export_jobs WHERE scenario_id=?", (scenario_id,))
+                if simulation_ids:
+                    placeholders = ",".join("?" for _ in simulation_ids)
+                    connection.execute(
+                        f"DELETE FROM result_families WHERE simulation_id IN ({placeholders})",
+                        tuple(simulation_ids),
+                    )
+                connection.execute("DELETE FROM queue_items WHERE scenario_id=?", (scenario_id,))
+                connection.execute("DELETE FROM simulation_runs WHERE scenario_id=?", (scenario_id,))
+                connection.execute("DELETE FROM scenarios WHERE scenario_id=?", (scenario_id,))
+
+                deleted_revision_count = 0
+                for revision_id in revision_ids:
+                    still_referenced = connection.execute(
+                        """SELECT 1 FROM scenarios WHERE input_revision_id=?
+                           UNION SELECT 1 FROM simulation_runs WHERE input_revision_id=?
+                           UNION SELECT 1 FROM queue_items WHERE input_revision_id=?
+                           LIMIT 1""",
+                        (revision_id, revision_id, revision_id),
+                    ).fetchone()
+                    if not still_referenced:
+                        connection.execute("DELETE FROM input_revisions WHERE revision_id=?", (revision_id,))
+                        deleted_revision_count += 1
+                connection.commit()
+                summary = {
+                    "scenario_id": scenario_id,
+                    "queue_item_count": len(queue_rows),
+                    "run_count": len(simulation_rows),
+                    "result_family_count": result_family_count,
+                    "output_count": output_count,
+                    "export_count": len(export_rows),
+                    "derived_scenario_count": derived_count,
+                    "input_revision_count": deleted_revision_count,
+                }
+        except Exception:
+            if moved:
+                try:
+                    self._restore_scenario_paths_from_quarantine(moved)
+                except OSError as restore_error:
+                    raise WorkbenchError(
+                        "scenario_files_restore_failed",
+                        "永久删除失败且原文件恢复失败，请保留隔离目录后联系管理员。",
+                        status_code=500,
+                        details={"quarantine": str(quarantine), "error": str(restore_error)},
+                    ) from restore_error
+            shutil.rmtree(quarantine, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(quarantine, ignore_errors=True)
+            return summary
+
     def delete_scenario(self, project_id: str, scenario_id: str) -> None:
         database = self.project_database(project_id)
-        self._scenario_row(project_id, scenario_id)
         with database.connect() as connection:
-            history_count = connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT scenario_id FROM scenarios WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()
+            if not current:
+                raise WorkbenchError("scenario_not_found", "方案不存在。", status_code=404)
+            visible_queue = connection.execute(
+                "SELECT queue_item_id FROM queue_items WHERE scenario_id=? AND deleted_at IS NULL",
+                (scenario_id,),
+            ).fetchall()
+            active_runs = connection.execute(
+                """
+                SELECT simulation_id FROM simulation_runs
+                WHERE scenario_id=? AND status IN ('pending', 'starting', 'running', 'stopping')
+                """,
+                (scenario_id,),
+            ).fetchall()
+            run_count = int(connection.execute(
                 "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0]
-            queue_count = connection.execute(
+            ).fetchone()[0])
+            queue_count = int(connection.execute(
                 "SELECT COUNT(*) FROM queue_items WHERE scenario_id=?", (scenario_id,)
-            ).fetchone()[0]
-            if history_count or queue_count:
+            ).fetchone()[0])
+            derived_reference_count = int(connection.execute(
+                "SELECT COUNT(*) FROM scenarios WHERE base_scenario_id=? AND scenario_id<>?",
+                (scenario_id, scenario_id),
+            ).fetchone()[0])
+            if visible_queue:
+                raise WorkbenchError(
+                    "scenario_in_queue",
+                    "方案仍有队列记录，请先在底部队列移除。",
+                    status_code=409,
+                    details={"blocking_queue_item_ids": [str(row["queue_item_id"]) for row in visible_queue]},
+                )
+            if active_runs:
+                raise WorkbenchError(
+                    "scenario_run_active",
+                    "方案仍有活动计算，无法删除。",
+                    status_code=409,
+                    details={"active_simulation_ids": [str(row["simulation_id"]) for row in active_runs]},
+                )
+            if queue_count or run_count or derived_reference_count:
                 raise WorkbenchError(
                     "scenario_has_history",
-                    "已有运行或队列历史的方案只能归档。",
+                    "已有运行历史或派生引用的方案只能移入归档。",
                     status_code=409,
+                    details={
+                        "queue_reference_count": queue_count,
+                        "run_count": run_count,
+                        "derived_reference_count": derived_reference_count,
+                    },
                 )
             connection.execute("DELETE FROM scenarios WHERE scenario_id=?", (scenario_id,))
 
@@ -3218,6 +3662,8 @@ class WorkbenchStore:
             current = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not current:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
+            if bool(current["archived"]):
+                raise WorkbenchError("scenario_archived", "归档方案不能加入模拟队列。", status_code=409)
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
@@ -3804,6 +4250,10 @@ class WorkbenchStore:
         output_dir = str(Path(self.get_project(project_id)["root_path"]) / "outputs" / simulation_id)
         now = utc_now()
         with database.connect() as connection:
+            # Claiming and permanent deletion must serialize at the same
+            # transaction boundary; a queued row can otherwise be deleted
+            # between the preflight read and this state transition.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 UPDATE queue_items SET status='starting', simulation_id=?, started_at=?, summary='准备运行'
@@ -3896,7 +4346,7 @@ class WorkbenchStore:
     def finish_run(self, project_id: str, simulation_id: str, result: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
         status = str(result.get("status") or "failed")
-        if status not in {"completed", "failed", "stopped", "interrupted"}:
+        if status not in {"completed", "failed", "stopped", "interrupted", "cancelled"}:
             status = "failed"
         now = utc_now()
         with database.connect() as connection:

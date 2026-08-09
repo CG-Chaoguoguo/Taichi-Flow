@@ -7,6 +7,7 @@ import {
   Filter,
   FolderOpen,
   Link2,
+  Unlink,
   Search,
   UploadCloud,
 } from "lucide-react";
@@ -153,9 +154,6 @@ export function RainfallProcessEditor({
     end: String(resolvedTimeline.end_s ?? fallbackInterval),
     interval: String(fallbackInterval),
   });
-  const [syncSimulationEnd, setSyncSimulationEnd] = useState(
-    simulationEndS != null && resolvedTimeline.end_s != null && Math.abs(simulationEndS - resolvedTimeline.end_s) <= 1e-9,
-  );
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const rainAssets = useMemo(
@@ -163,7 +161,7 @@ export function RainfallProcessEditor({
     [assets],
   );
   const activeRainBindings = useMemo(
-    () => bindings.filter((binding) => binding.role === "rainfall-period"),
+    () => bindings.filter((binding) => binding.role === "rainfall-period" && binding.active !== false && Boolean(binding.asset_id)),
     [bindings],
   );
   const visiblePeriods = useMemo(() => {
@@ -197,6 +195,7 @@ export function RainfallProcessEditor({
     || Math.abs(Number(resolvedTimeline.start_s) - Number(timelinePreview.value?.start_s)) > 1e-9
     || Math.abs(Number(resolvedTimeline.end_s) - Number(timelinePreview.value?.end_s)) > 1e-9
     || Math.abs(Number(resolvedTimeline.interval_s) - Number(timelinePreview.value?.interval_s)) > 1e-9
+    || (simulationEndS != null && Math.abs(Number(simulationEndS) - Number(timelinePreview.value?.end_s)) > 1e-9)
   );
 
   useEffect(() => {
@@ -209,12 +208,6 @@ export function RainfallProcessEditor({
       interval: String(nextInterval),
     });
   }, [periods, resolvedTimeline.end_s, resolvedTimeline.interval_s, resolvedTimeline.start_s]);
-
-  useEffect(() => {
-    setSyncSimulationEnd(
-      simulationEndS != null && resolvedTimeline.end_s != null && Math.abs(simulationEndS - resolvedTimeline.end_s) <= 1e-9,
-    );
-  }, [resolvedTimeline.end_s, simulationEndS]);
 
   const emitChange = (nextPeriods: RainfallPeriod[], nextBindings: InputBinding[]) => {
     onChange(nextPeriods, nextBindings, resolvedTimeline);
@@ -229,7 +222,7 @@ export function RainfallProcessEditor({
       if (existingIndex >= 0) nextBindings[existingIndex] = nextBinding;
       else nextBindings.push(nextBinding);
     } else if (nextBinding === null && existingIndex >= 0) {
-      nextBindings[existingIndex] = { ...nextBindings[existingIndex], active: false };
+      nextBindings = nextBindings.filter((_, index) => index !== existingIndex);
     }
     emitChange(nextPeriods, nextBindings);
   };
@@ -365,23 +358,29 @@ export function RainfallProcessEditor({
         ? { ...period, source: "uniform", asset_id: null, cri_mps: Math.max(0, Number(period.cri_mps || 0)) }
         : { ...period, source: "raster", cri_mps: null };
     });
-    const nextBindings = bindings.map((binding) =>
-      binding.role === "rainfall-period" && binding.period_id && visibleIds.has(binding.period_id)
-        ? { ...binding, active: source === "raster" }
-        : binding,
-    );
+    const nextBindings = source === "uniform"
+      ? bindings.filter((binding) => !(binding.role === "rainfall-period" && binding.period_id && visibleIds.has(binding.period_id)))
+      : bindings;
     emitChange(nextPeriods, nextBindings);
   };
 
   const applyTimeline = () => {
     if (!canEdit || !timelinePreview.value) return;
     const resized = resizeRainfallTimeline(periods, bindings, timelinePreview.value);
-    const nextSimulationEnd = syncSimulationEnd ? Number(timelinePreview.value.end_s) : undefined;
-    onChange(resized.periods, resized.bindings, timelinePreview.value, nextSimulationEnd);
+    onChange(resized.periods, resized.bindings, timelinePreview.value, Number(timelinePreview.value.end_s));
     if (!resized.periods.some((period) => periodId(period) === selectedPeriodId)) {
       setSelectedPeriodId(resized.periods[0] ? periodId(resized.periods[0]) : "");
     }
     setMapping([]);
+  };
+
+  const clearAllRainfallBindings = () => {
+    if (!canEdit || activeRainBindings.length === 0) return;
+    const nextPeriods = periods.map((period) => canonicalSource(period) === "raster" ? { ...period, asset_id: null } : period);
+    const nextBindings = bindings.filter((binding) => binding.role !== "rainfall-period");
+    emitChange(nextPeriods, nextBindings);
+    setMapping([]);
+    addToast({ type: "success", message: `已取消 ${activeRainBindings.length} 个降雨绑定，栅格时段仍保留。` });
   };
 
   return (
@@ -443,16 +442,9 @@ export function RainfallProcessEditor({
             时段间隔 (s)
             <input className="tf-input tf-mono" aria-label="降雨时段间隔" type="number" min="0" disabled={!canEdit} value={timelineDraft.interval} onChange={(event) => setTimelineDraft((current) => ({ ...current, interval: event.target.value }))} />
           </label>
-          <label className="tf-rainfall-sync-end tf-caption">
-            <input type="checkbox" checked={syncSimulationEnd} disabled={!canEdit} onChange={(event) => setSyncSimulationEnd(event.target.checked)} />
-            同步模拟结束时间{simulationEndS != null ? `（当前 ${simulationEndS} s）` : ""}
-          </label>
           <Button size="small" variant="primary" disabled={!canEdit || !timelinePreview.value || !timelineChanged} onClick={applyTimeline}>应用时间轴</Button>
         </div>
         {timelinePreview.error ? <div className="tf-caption tf-text-danger" role="alert">{timelinePreview.error}</div> : null}
-        {!syncSimulationEnd && timelinePreview.value && simulationEndS != null && Math.abs(simulationEndS - Number(timelinePreview.value.end_s)) > 1e-9 ? (
-          <div className="tf-caption tf-text-warning">应用后降雨终点与模拟终点不同，运行预检会要求你显式调整或截断。</div>
-        ) : null}
       </section>
 
       <div
@@ -513,6 +505,7 @@ export function RainfallProcessEditor({
         </Button>
         <Button variant="ghost" size="small" disabled={!canEdit} onClick={() => bulkSource("uniform")}>筛选项设为均匀</Button>
         <Button variant="ghost" size="small" disabled={!canEdit} onClick={() => bulkSource("raster")}>筛选项设为栅格</Button>
+        <Button variant="ghost" size="small" icon={<Unlink size={14} />} disabled={!canEdit || activeRainBindings.length === 0} onClick={clearAllRainfallBindings}>取消全部降雨绑定</Button>
       </div>
 
       <div className="tf-rainfall-editor-grid">

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate, useParams } from "react-router-dom";
 import { AlertCircle, ArrowLeft, CheckCircle2, Cpu, Monitor, Moon, Sun, X } from "lucide-react";
-import { useTaichiFlowStore } from "../stores/taichiFlowStore";
+import { isActiveScenario, useTaichiFlowStore } from "../stores/taichiFlowStore";
 import { IconButton } from "../components/IconButton";
 import { Button } from "../components/Button";
 import { EditorSettingsPopover } from "../components/EditorSettingsPopover";
@@ -33,7 +33,7 @@ export function ProjectEditorShell() {
     editorSelection?.kind === "scenario" || editorSelection?.kind === "result"
       ? editorSelection.scenarioId
       : undefined;
-  const selectedScenario = scenarios.find((item) => item.scenario_id === selectedScenarioId);
+  const selectedScenario = scenarios.find((item) => item.scenario_id === selectedScenarioId && isActiveScenario(item));
 
   const handleBackToLauncher = () => {
     navigate("/projects");
