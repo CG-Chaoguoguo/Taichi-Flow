@@ -37,7 +37,7 @@ def test_paired_runtime_input_sources_match_expected_semantics():
         assert registry["dfs_infiltration_variant"]["selected_source"] == "direct_rain_plus_storage"
         assert registry["dfs_face_flux_variant"]["selected_source"] == "both_thin_weighted"
         assert registry["dfs_failure_source_variant"]["selected_source"] == "precomputed_unsfin_schedule"
-        assert registry["dfs_failure_source_variant"]["schedule_provider"] == "original_tfail_artifacts"
+        assert registry["dfs_failure_source_variant"]["schedule_provider"] == "uploaded_schedule"
         assert registry["dfs_failure_source_variant"]["schedule_loaded"] is True
         assert registry["dfs_failure_source_variant"]["runtime_equivalent_implemented"] is True
         assert registry["dfs_failure_source_variant"]["runtime_active"] is True

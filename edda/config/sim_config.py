@@ -36,15 +36,15 @@ class HydrologyParams(BaseModel):
         ),
     )
     dfs_face_flux_variant: str = Field(
-        "asymmetric_head_guard",
+        "both_thin_weighted",
         description=(
             "Native-input DFS face-flux / wet-dry gating variant. "
-            "`asymmetric_head_guard` matches the EntireBanzigou-style "
-            "`if ((fhpredi(i)<=tol and hi>=hn) or (fhpredi(nq)<=tol and hn>=hi))` "
-            "gate with arithmetic `hbar/cvbar/frhobar` averaging. "
-            "`both_thin_weighted` matches the NO.5/NO.8/Test31-style "
-            "`if (fhpredi(i)<=tol and fhpredi(nq)<=tol)` gate with "
-            "`cellareacal`-weighted `hbar/cvbar/frhobar`."
+            "`both_thin_weighted` (BJ/NO.5 default) uses the both-thin gate with "
+            "`cellareacal`-weighted `hbar/cvbar/frhobar`. "
+            "`arithmetic_mean_chamoli` keeps the both-thin gate and weighted `hbar`, "
+            "but uses area-mean `cvbar` without depth and arithmetic `frhobar`. "
+            "`asymmetric_head_guard` matches EntireBanzigou-style asymmetric thin-front "
+            "gating with arithmetic `hbar/cvbar/frhobar`."
         ),
     )
     dfs_failure_source_variant: str = Field(
@@ -74,6 +74,44 @@ class HydrologyParams(BaseModel):
     inflow_denominator_fv_value: Optional[float] = Field(
         None,
         description="For CELSIZ_DIRECTIONAL_VELOCITY, the source-assigned fv value used in the denominator.",
+    )
+    dfs_manningbar_variant: str = Field(
+        "exponential_cv",
+        description=(
+            "Native-input DFS Manning-bar variant. "
+            "`exponential_cv` matches BJ_HXL `manningbar=manning*manningb*exp(manningm*cv)` "
+            "when `cv>cvtol`. `debrisflowmanning_cvtol` matches Chamoli `dfs.F90:417-421` "
+            "`manningbar=debrisflowmanning` in the erosion-rate branch, with a no-op "
+            "face-flux `cvbar>cvtol` assignment."
+        ),
+    )
+    dfs_dry_face_velocity_variant: str = Field(
+        "keep_velocity_bj",
+        description=(
+            "Native-input DFS dry-face predicted-velocity variant. "
+            "`keep_velocity_bj` keeps `fvpredi=dv+fv` even when the upstream cell is dry "
+            "(BJ production default). `zero_dry_face_chamoli` matches Chamoli "
+            "`dfs.F90:736-737`, zeroing `fvpredi` when the upstream cell is thinner "
+            "than `tol` before the sign-reversal branch."
+        ),
+    )
+    dfs_artivis_variant: str = Field(
+        "depth_ratio_bj",
+        description=(
+            "Native-input DFS artificial-viscosity weight variant. "
+            "`depth_ratio_bj` uses `0.02*|Δh|/(h_i+h_nq)` on every direction (BJ). "
+            "`velocity_ratio_chamoli` uses `0.02*|Δv|/(|v_nq|+|v_i|+1)` and divides "
+            "the diagonal `artivis` term by `√2` (Chamoli `dfs.F90:730-732`)."
+        ),
+    )
+    dfs_absubar_variant: str = Field(
+        "max_component_bj",
+        description=(
+            "Native-input DFS erosion/deposition velocity-magnitude (`absubar`) variant. "
+            "`max_component_bj` takes `max(vorth,vcomp)` from half-velocity `fvpredi2` (BJ). "
+            "`signed_mean_chamoli` reconstructs a signed Cartesian speed from raw `fv` "
+            "with literal `0.707` diagonals (Chamoli `dfs.F90:209-212`)."
+        ),
     )
     use_fortran_absubar_velocity_state: bool = Field(
         True,
@@ -186,6 +224,18 @@ class RheologyParams(BaseModel):
     kresis: float = Field(8.0, description="Original EDDA viscous resistance coefficient")
     cs: float = Field(0.9, description="Original EDDA channel suspension coefficient")
     shallown: float = Field(0.2, description="Original EDDA shallow-flow Manning coefficient for wfs path")
+    debrisflowmanning: Optional[float] = Field(
+        None,
+        description="Chamoli-variant debris-flow Manning coefficient used when cv>cvtol in dfs.F90 erosion staging",
+    )
+    cvglacier: Optional[float] = Field(
+        None,
+        description="Original EDDA cvglacier; parsed for provenance. Chamoli dfs.F90 rhoero assignment is commented out.",
+    )
+    cvlandslide: Optional[float] = Field(
+        None,
+        description="Original EDDA cvlandslide used as triggerslide mixture concentration in dfs.F90:561",
+    )
 
 
 class ErosionParams(BaseModel):
@@ -235,6 +285,14 @@ class ZoneParams(BaseModel):
     phib: float = Field(15.0, description="Unsaturated shear strength angle (degrees)")
     kero: float = Field(1e-5, description="Erosion coefficient (m/s/Pa)")
     ctao: float = Field(10.0, description="Original EDDA ctao top-layer erosion threshold term (Pa)")
+    cvero: Optional[float] = Field(
+        None,
+        description="Zone bed volumetric concentration for erosion density (Chamoli cvero). Absent on BJ; rhoero falls back to cvstar.",
+    )
+    c_bottom: float = Field(8000.0, description="Bottom-layer cohesion (Pa); parsed for provenance, unused by original double-layer FS")
+    phi_bottom: float = Field(35.0, description="Bottom-layer internal friction angle (degrees); parsed for provenance, unused by original double-layer FS")
+    phib_bottom: float = Field(20.0, description="Bottom-layer basal friction angle (degrees); parsed for provenance, unused by original double-layer FS")
+    gamma_s_bottom: float = Field(21000.0, description="Bottom-layer unit weight (N/m³); parsed for provenance, unused by original double-layer FS")
     ltstar: float = Field(1.0, description="Top layer thickness (m)")
     lbstar: float = Field(1.0, description="Bottom layer thickness (m)")
 

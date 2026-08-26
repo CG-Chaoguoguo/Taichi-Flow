@@ -26,6 +26,10 @@ from api.services import (
 )
 from api.services.parameter_catalog import build_parameter_catalog
 from api.services.edda_semantic_gate import validate_runtime_control_plan
+from api.services.compute_policy_resolver import (
+    annotate_failure_source_registry,
+    compute_policy_resolution_identity,
+)
 from api.services.structured_input_resolver import materialize_structured_rainfall
 from api.services.runtime_profile import (
     RuntimeProfile,
@@ -55,6 +59,27 @@ def _runtime_error_payload(exc: Exception) -> Dict[str, Any]:
     if details is not None:
         payload["error_details"] = deepcopy(details)
     return payload
+
+
+def _policy_resolution_projection(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the mapper/frozen fields that must agree at runtime.
+
+    The mapper does not need to reproduce queue bookkeeping such as the
+    numeric-variant baseline or the original Settings map byte-for-byte.  It
+    must, however, reach the same failure-source decision and source evidence
+    before the frozen resolution is copied into the runtime manifest.
+    """
+    detected = payload.get("detected") or {}
+    effective = payload.get("effective") or {}
+    return {
+        "status": payload.get("status"),
+        "simulate_shallow_landslide": detected.get("simulate_shallow_landslide"),
+        "topology_status": detected.get("topology_status"),
+        "detected_variant": detected.get("dfs_failure_source_variant"),
+        "mode": effective.get("mode"),
+        "effective_simulate_shallow_landslide": effective.get("simulate_shallow_landslide"),
+        "active_variant": effective.get("active_variant"),
+    }
 
 
 def _deep_merge(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -134,6 +159,7 @@ def _native_file_stage(family: str) -> Tuple[str, str, Optional[str]]:
     stages = {
         "demfil": ("production-reachable", "initialize.dem_reader", None),
         "slofil": ("production-reachable", "post_initialize.native_slope_loader", None),
+        "triggerslide": ("production-reachable", "post_initialize.native_triggerslide_loader", "Always-on original triggering-slide grid; one-shot DFS injection when tnow>0."),
         "zonfil": ("production-reachable", "initialize.zone_reader", None),
         "zfil": ("partial", "post_initialize.native_ltstar_loader", "Active when double-layer runtime is enabled and ltstar grid input is selected."),
         "manningfil": ("production-reachable", "post_initialize.native_manning_loader", None),
@@ -153,6 +179,7 @@ WORKBENCH_FAMILY_TO_NATIVE = {
     "manning": "manningfil",
     "slope": "slofil",
     "thickness": "zfil",
+    "trigger": "triggerslide",
     "groundwater": "depfil",
     "infiltration": "rizerofil",
     "rainfall": "rifil",
@@ -265,6 +292,8 @@ def prepare_runtime_from_payload(
     case_input_files: Optional[Dict[str, str]] = None,
     runtime_profile_name: Optional[str] = None,
     session_id: Optional[str] = None,
+    frozen_effective_config: Optional[Dict[str, Any]] = None,
+    frozen_compute_policy_resolution: Optional[Dict[str, Any]] = None,
 ) -> PreparedRuntime:
     """Prepare config/provenance without changing solver equations."""
     profile = resolve_runtime_profile(runtime_profile_name)
@@ -324,6 +353,16 @@ def prepare_runtime_from_payload(
         "rainfall_file": rainfall_file,
         "soil_zones_file": soil_zones_file,
     }
+    # A workbench queue carries the Settings snapshot that was used at
+    # enqueue time.  Reference mapping must use that same sparse gate map for
+    # policy resolution (not the current Settings and not an implicit empty
+    # map), otherwise an explicitly unlocked live policy would be rejected
+    # during mapper preparation.
+    frozen_policy_gates = None
+    if isinstance(frozen_compute_policy_resolution, dict):
+        candidate_gates = frozen_compute_policy_resolution.get("settings_snapshot")
+        if isinstance(candidate_gates, dict):
+            frozen_policy_gates = deepcopy(candidate_gates)
 
     if case_config_file:
         parsed_reference = parse_reference_config_file(case_config_file, case_base_dir)
@@ -332,6 +371,8 @@ def prepare_runtime_from_payload(
             run_output_dir,
             config_overrides=normalized_overrides,
             top_level_overrides=top_level_overrides,
+            global_gates=frozen_policy_gates,
+            strict_reference=True,
         )
         if boundary_config:
             flow_config.boundary_conditions = BoundaryConditionConfig(**boundary_config)
@@ -366,6 +407,42 @@ def prepare_runtime_from_payload(
         config_dict = _deep_merge(config_dict, normalized_overrides)
         flow_config = SimulationConfig.from_dict(config_dict)
         effective_config, runtime_input_manifest, provenance = build_direct_runtime_metadata(flow_config)
+
+    if frozen_compute_policy_resolution is not None:
+        # Workbench runs carry an enqueue-time policy snapshot.  Reuse it as
+        # the authoritative audit/provenance record instead of resolving the
+        # current global Settings again during runtime preparation.
+        frozen_resolution = deepcopy(frozen_compute_policy_resolution)
+        expected_id, expected_hash = compute_policy_resolution_identity(frozen_resolution)
+        if frozen_resolution.get("resolution_id") not in {None, expected_id} or frozen_resolution.get("resolution_hash") not in {None, expected_hash}:
+            raise ValueError("Frozen compute policy resolution identity is invalid.")
+        frozen_resolution.setdefault("resolution_id", expected_id)
+        frozen_resolution.setdefault("resolution_hash", expected_hash)
+        mapped_resolution = runtime_input_manifest.get("compute_policy_resolution") or {}
+        if mapped_resolution and _policy_resolution_projection(mapped_resolution) != _policy_resolution_projection(frozen_resolution):
+            raise ValueError(
+                "Mapper compute policy resolution differs from the enqueue-time frozen resolution."
+            )
+        runtime_input_manifest["compute_policy_resolution"] = frozen_resolution
+        provenance["compute_policy_resolution"] = frozen_resolution
+        effective_config["compute_policy_resolution"] = frozen_resolution
+        registry = runtime_input_manifest.setdefault("input_source_registry", {})
+        failure_entry = registry.setdefault(
+            "dfs_failure_source_variant",
+            {
+                "family": "dfs_failure_source_variant",
+                "state": "config_fallback",
+                "selected_source": None,
+            },
+        )
+        registry["dfs_failure_source_variant"] = annotate_failure_source_registry(
+            dict(failure_entry), frozen_resolution
+        )
+    if frozen_effective_config is not None:
+        frozen_effective = deepcopy(frozen_effective_config)
+        runtime_input_manifest["frozen_effective_config"] = frozen_effective
+        provenance["frozen_effective_config"] = deepcopy(frozen_effective)
+        effective_config["frozen_effective_config"] = deepcopy(frozen_effective)
 
     if structured_rainfall_audit is not None:
         effective_config["structured_rainfall"] = structured_rainfall_audit

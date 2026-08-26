@@ -36,6 +36,8 @@ class ZoneLayerParams:
     alpha: float
     kero: float = 1e-6
     ctao: float = 10.0
+    # Chamoli top-layer column; BJ edda_in stops at ctao. None => rhoero falls back to cvstar.
+    cvero: Optional[float] = None
 
 
 @dataclass
@@ -98,10 +100,25 @@ class ReferenceConfigParseResult:
     manning_source: str
     limitfr: float
     shallown: float
+    debrisflowmanning: Optional[float]
     d50: float
     cvstar: float
+    cvglacier: Optional[float]
+    cvlandslide: Optional[float]
     coedepo: float
     cs: float
+    dfs_manningbar_variant: str
+    dfs_manningbar_variant_source: Optional[str]
+    dfs_manningbar_variant_basis: Optional[str]
+    dfs_dry_face_velocity_variant: str
+    dfs_dry_face_velocity_variant_source: Optional[str]
+    dfs_dry_face_velocity_variant_basis: Optional[str]
+    dfs_artivis_variant: str
+    dfs_artivis_variant_source: Optional[str]
+    dfs_artivis_variant_basis: Optional[str]
+    dfs_absubar_variant: str
+    dfs_absubar_variant_source: Optional[str]
+    dfs_absubar_variant_basis: Optional[str]
     dtmin: float
     dtmax: float
     dti: float
@@ -132,6 +149,8 @@ class ReferenceConfigParseResult:
     dfs_failure_source_variant: str
     dfs_failure_source_variant_source: Optional[str]
     dfs_failure_source_variant_basis: Optional[str]
+    dfs_failure_source_evidence: List[Dict[str, Any]]
+    dfs_failure_source_topology_status: str
     inflow_denominator_variant: str
     inflow_denominator_variant_source: Optional[str]
     inflow_denominator_variant_basis: Optional[str]
@@ -170,6 +189,20 @@ class ReferenceConfigParseResult:
             "dfs_failure_source_variant": self.dfs_failure_source_variant,
             "dfs_failure_source_variant_source": self.dfs_failure_source_variant_source,
             "dfs_failure_source_variant_basis": self.dfs_failure_source_variant_basis,
+            "dfs_failure_source_evidence": self.dfs_failure_source_evidence,
+            "dfs_failure_source_topology_status": self.dfs_failure_source_topology_status,
+            "dfs_manningbar_variant": self.dfs_manningbar_variant,
+            "dfs_manningbar_variant_source": self.dfs_manningbar_variant_source,
+            "dfs_manningbar_variant_basis": self.dfs_manningbar_variant_basis,
+            "dfs_dry_face_velocity_variant": self.dfs_dry_face_velocity_variant,
+            "dfs_dry_face_velocity_variant_source": self.dfs_dry_face_velocity_variant_source,
+            "dfs_dry_face_velocity_variant_basis": self.dfs_dry_face_velocity_variant_basis,
+            "dfs_artivis_variant": self.dfs_artivis_variant,
+            "dfs_artivis_variant_source": self.dfs_artivis_variant_source,
+            "dfs_artivis_variant_basis": self.dfs_artivis_variant_basis,
+            "dfs_absubar_variant": self.dfs_absubar_variant,
+            "dfs_absubar_variant_source": self.dfs_absubar_variant_source,
+            "dfs_absubar_variant_basis": self.dfs_absubar_variant_basis,
             "inflow_denominator_variant": self.inflow_denominator_variant,
             "inflow_denominator_variant_source": self.inflow_denominator_variant_source,
             "inflow_denominator_variant_basis": self.inflow_denominator_variant_basis,
@@ -178,11 +211,17 @@ class ReferenceConfigParseResult:
         }
 
 
+FILE_FAMILY_ALIASES = {
+    "triggerslidefil": "triggerslide",
+    "ltstarfil": "zfil",
+}
+
 SUPPORTED_FILE_FAMILIES = {
     "demfil": ("priority-0", "production-reachable"),
     "zonfil": ("priority-1", "production-reachable"),
     "slofil": ("priority-1", "production-reachable"),
     "zfil": ("priority-1", "partial"),
+    "triggerslide": ("priority-0", "production-reachable"),
     "manningfil": ("priority-2", "production-reachable"),
     "rifil": ("priority-1", "conditional-production-reachable"),
 }
@@ -497,6 +536,7 @@ def parse_zone_layers(lines: List[str], zone_start_idx: int) -> Tuple[ZoneLayerP
         alpha=bottom_vals[14],
         kero=1e-6,
         ctao=10.0,
+        cvero=None,
     )
     top = ZoneLayerParams(
         c=top_vals[0],
@@ -513,6 +553,7 @@ def parse_zone_layers(lines: List[str], zone_start_idx: int) -> Tuple[ZoneLayerP
         alpha=top_vals[14],
         kero=top_vals[15] if len(top_vals) > 15 else 1e-6,
         ctao=top_vals[16] if len(top_vals) > 16 else 10.0,
+        cvero=top_vals[17] if len(top_vals) > 17 else None,
     )
     return bottom, top
 
@@ -577,6 +618,7 @@ def _parse_file_inputs(lines: List[str], base_dir: Path) -> Tuple[Dict[str, Nati
             continue
 
         raw_paths = _collect_path_lines(lines, idx + 1)
+        key = FILE_FAMILY_ALIASES.get(key, key)
         if key in SUPPORTED_FILE_FAMILIES:
             priority, status = SUPPORTED_FILE_FAMILIES[key]
             recognized_families.append(key)
@@ -736,42 +778,134 @@ def _detect_dfs_infiltration_variant(base_dir: Path) -> Tuple[str, Optional[str]
     )
 
 
+def _compact_fortran_source(text: str) -> str:
+    return re.sub(r"\s+", "", text.lower())
+
+
+def _strip_fortran_line_comments(text: str) -> str:
+    """Drop `!` comments so inactive alternate branches do not match detectors."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if "!" in line:
+            line = line.split("!", 1)[0]
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _normalize_fortran_active_source(text: str) -> str:
+    """Lowercase, drop comments/continuations, and compact active Fortran statements."""
+    logical_lines: list[str] = []
+    for raw in _strip_fortran_line_comments(text).splitlines():
+        # Fixed-form Fortran treats column-one C, *, and debug D lines as
+        # comments.  Check the raw line before stripping whitespace so an
+        # inactive alternate branch cannot satisfy a topology signature.
+        first = raw[:1]
+        second = raw[1:2]
+        if first == "*" or (
+            first.lower() in {"c", "d"} and (not second or second.isspace() or second in {"*", "!"})
+        ):
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped[:1].lower() == "c" and (len(stripped) == 1 or stripped[1] in {" ", "\t"}):
+            continue
+        # A non-blank, non-zero fixed-form column six is a continuation
+        # marker.  Join it before handling free-form `&` continuations.
+        fixed_continuation = len(raw) >= 6 and raw[:5].isspace() and raw[5] not in {" ", "0"}
+        if fixed_continuation:
+            continuation_body = raw[6:].strip()
+            if continuation_body and logical_lines:
+                logical_lines[-1] = f"{logical_lines[-1]} {continuation_body}".strip()
+            elif continuation_body:
+                logical_lines.append(continuation_body)
+            continue
+        logical_lines.append(stripped)
+
+    pending = ""
+    statements: list[str] = []
+    for stripped in logical_lines:
+        if stripped.startswith("&"):
+            stripped = stripped[1:].lstrip()
+        pending = f"{pending} {stripped}".strip() if pending else stripped
+        if pending.endswith("&"):
+            pending = pending[:-1].rstrip()
+            continue
+        statements.append(pending)
+        pending = ""
+    if pending:
+        statements.append(pending)
+    return _compact_fortran_source("\n".join(statements)).replace("&", "")
+
+
 def _detect_dfs_face_flux_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Classify DFS face-flux averaging / thin-front gates from bundled `dfs.F90`.
+
+    Recognized variants:
+    - ``both_thin_weighted`` (BJ/NO.5): both-thin gate + depth/area-weighted
+      ``hbar/cvbar/frhobar``.
+    - ``arithmetic_mean_chamoli`` (Chamoli): both-thin gate + area-weighted
+      ``hbar``, area-mean ``cvbar`` without depth, arithmetic ``frhobar``.
+    - ``asymmetric_head_guard``: asymmetric thin-front gate + arithmetic averages.
+    """
     dfs_path = base_dir / "dfs.F90"
     if not dfs_path.exists():
         return (
-            "asymmetric_head_guard",
+            "both_thin_weighted",
             None,
-            "No bundled `dfs.F90` was found in the case directory, so the native-input runtime keeps the existing production default `asymmetric_head_guard` face-flux variant.",
+            "No bundled `dfs.F90` was found in the case directory, so the native-input runtime keeps the BJ production default `both_thin_weighted` face-flux variant.",
         )
 
     try:
         text = dfs_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return (
-            "asymmetric_head_guard",
+            "both_thin_weighted",
             str(dfs_path.resolve()),
-            "Bundled `dfs.F90` could not be read cleanly; the native-input runtime falls back to the existing production default `asymmetric_head_guard` face-flux variant.",
+            "Bundled `dfs.F90` could not be read cleanly; the native-input runtime falls back to the BJ production default `both_thin_weighted` face-flux variant.",
         )
 
-    weighted_variant = (
-        "if (fhpredi(i)<=tol .and. fhpredi(nq)<=tol) then" in text
-        and "hbar=(fhpredi(i) * cellareacal(i) +fhpredi(nq) * cellareacal(nq)) / (cellareacal(i)+cellareacal(nq))" in text
-        and "frhobar=(frhopredi(i)*fhpredi(i)* cellareacal(i)+frhopredi(nq)*fhpredi(nq)* cellareacal(nq))/ (fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))" in text
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    both_thin_gate = "if(fhpredi(i)<=tol.and.fhpredi(nq)<=tol)then" in compact
+    weighted_hbar = (
+        "hbar=(fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))/(cellareacal(i)+cellareacal(nq))"
+        in compact
     )
-    asymmetric_variant = (
-        "if ((fhpredi(i)<=tol .and. hi>=hn) .or. (fhpredi(nq)<=tol .and. hn>=hi)) then" in text
-        and "hbar=0.5*(fhpredi(i)+fhpredi(nq))" in text
-        and "frhobar=0.5*(frhopredi(i)+frhopredi(nq))" in text
+    depth_weighted_cvbar = (
+        "cvbar=(parai*cellareacal(i)+paran*cellareacal(nq))/(fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))"
+        in compact
     )
+    area_mean_cvbar = (
+        "cvbar=(parai*cellareacal(i)+paran*cellareacal(nq))/(cellareacal(i)+cellareacal(nq))" in compact
+        and not depth_weighted_cvbar
+    )
+    depth_weighted_frhobar = (
+        "frhobar=(frhopredi(i)*fhpredi(i)*cellareacal(i)+frhopredi(nq)*fhpredi(nq)*cellareacal(nq))/(fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))"
+        in compact
+    )
+    arithmetic_frhobar = "frhobar=0.5*(frhopredi(i)+frhopredi(nq))" in compact
 
-    if weighted_variant:
+    # Chamoli: both-thin + weighted hbar + area-mean cvbar + arithmetic frhobar.
+    if both_thin_gate and weighted_hbar and area_mean_cvbar and arithmetic_frhobar:
+        return (
+            "arithmetic_mean_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` uses the Chamoli both-thin face gate with `cellareacal`-weighted `hbar`, "
+            "area-mean `cvbar` without depth weighting, and arithmetic `frhobar=0.5*(ρi+ρnq)`.",
+        )
+
+    if both_thin_gate and weighted_hbar and depth_weighted_cvbar and depth_weighted_frhobar:
         return (
             "both_thin_weighted",
             str(dfs_path.resolve()),
             "Bundled `dfs.F90` skips a face only when both paired cells remain thinner than `tol`, uses `cellareacal`-weighted `hbar/cvbar/frhobar`, and emits face discharge with the NO.5/NO.8/Test31 width expression `celsiz*(sqrt(2)-1)`.",
         )
 
+    asymmetric_variant = (
+        "if((fhpredi(i)<=tol.and.hi>=hn).or.(fhpredi(nq)<=tol.and.hn>=hi))then" in compact
+        and "hbar=0.5*(fhpredi(i)+fhpredi(nq))" in compact
+        and arithmetic_frhobar
+    )
     if asymmetric_variant:
         return (
             "asymmetric_head_guard",
@@ -780,29 +914,45 @@ def _detect_dfs_face_flux_variant(base_dir: Path) -> Tuple[str, Optional[str], O
         )
 
     return (
-        "asymmetric_head_guard",
+        "both_thin_weighted",
         str(dfs_path.resolve()),
-        "Bundled `dfs.F90` did not match a recognized face-flux signature; the native-input runtime falls back to the existing production default `asymmetric_head_guard` variant until a new signature is traced.",
+        "Bundled `dfs.F90` did not match a recognized face-flux signature; the native-input runtime falls back to the BJ production default `both_thin_weighted` variant until a new signature is traced.",
     )
 
 
-def _detect_dfs_failure_source_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+def _detect_dfs_failure_source_variant(
+    base_dir: Path,
+) -> Tuple[str, Optional[str], Optional[str], List[Dict[str, Any]], str]:
     dfs_path = base_dir / "dfs.F90"
     main_path = base_dir / "edda main program.F90"
+    if not main_path.exists():
+        main_candidates = sorted(
+            path
+            for pattern in ("*main*program*.F90", "*main*program*.f90", "*edda*.F90", "*edda*.f90")
+            for path in base_dir.glob(pattern)
+            if path.is_file()
+        )
+        if main_candidates:
+            main_path = main_candidates[0]
+    evidence: List[Dict[str, Any]] = []
     if not dfs_path.exists():
         return (
-            "live_doublelayer_in_dfs",
+            "",
             None,
-            "No bundled `dfs.F90` was found in the case directory, so the native-input runtime keeps the existing production default `live_doublelayer_in_dfs` failure-source variant.",
+            "No bundled `dfs.F90` was found; failure-source topology remains unknown.",
+            evidence,
+            "missing_source",
         )
 
     try:
         dfs_text = dfs_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return (
-            "live_doublelayer_in_dfs",
+            "",
             str(dfs_path.resolve()),
-            "Bundled `dfs.F90` could not be read cleanly; the native-input runtime falls back to the existing production default `live_doublelayer_in_dfs` failure-source variant.",
+            "Bundled `dfs.F90` could not be read cleanly; failure-source topology remains unknown.",
+            evidence,
+            "unknown",
         )
 
     try:
@@ -810,41 +960,273 @@ def _detect_dfs_failure_source_variant(base_dir: Path) -> Tuple[str, Optional[st
     except OSError:
         main_text = ""
 
-    precomputed_variant = (
-        "call unsfin" in main_text
-        and "!    call doublelayer(imx1,kper,tnow,tempfsh,tempfsrho,gindx,eroindx,u)" in dfs_text
-        and "if (tnow<=tfail(i) .and. tnext>tfail(i)) then" in dfs_text
-        and "tempfsh(i)=fsdepth(i)" in dfs_text
-        and "tempfsrho(i)=(rhos-rhow)*cvstar+rhow" in dfs_text
+    dfs_active = _normalize_fortran_active_source(dfs_text)
+    main_active = _normalize_fortran_active_source(main_text)
+    live_signature = "calldoublelayer(imx1,kper,tnow,tempfsh,tempfsrho,gindx,eroindx,u)"
+    unsfin_call = "callunsfin" in main_active
+    tfail_gate = "if(tnow<=tfail(i).and.tnext>tfail(i))then" in dfs_active
+    tempfsh_stage = "tempfsh(i)=fsdepth(i)" in dfs_active
+    tempfsrho_stage = "tempfsrho(i)=(rhos-rhow)*cvstar+rhow" in dfs_active
+    live_variant = live_signature in dfs_active
+    precomputed_signatures = (
+        unsfin_call
+        and tfail_gate
+        and tempfsh_stage
+        and tempfsrho_stage
     )
-    live_variant = (
-        "call doublelayer(imx1,kper,tnow,tempfsh,tempfsrho,gindx,eroindx,u)" in dfs_text
-        and "!    call doublelayer(imx1,kper,tnow,tempfsh,tempfsrho,gindx,eroindx,u)" not in dfs_text
+    precomputed_variant = precomputed_signatures and not live_variant
+
+    evidence.append(
+        {
+            "file": str(main_path.resolve()) if main_path.exists() else None,
+            "active_statement": "call unsfin",
+            "matched": unsfin_call,
+        }
     )
+    evidence.append(
+        {
+            "file": str(dfs_path.resolve()),
+            "active_statement": "if (tnow<=tfail(i) .and. tnext>tfail(i)) then",
+            "matched": tfail_gate,
+        }
+    )
+    evidence.append(
+        {
+            "file": str(dfs_path.resolve()),
+            "active_statement": live_signature,
+            "matched": live_variant,
+        }
+    )
+    evidence.append(
+        {
+            "file": str(dfs_path.resolve()),
+            "active_statement": "tempfsh(i)=fsdepth(i)",
+            "matched": tempfsh_stage,
+        }
+    )
+    evidence.append(
+        {
+            "file": str(dfs_path.resolve()),
+            "active_statement": "tempfsrho(i)=(rhos-rhow)*cvstar+rhow",
+            "matched": tempfsrho_stage,
+        }
+    )
+
+    if live_variant and precomputed_signatures:
+        return (
+            "",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` and the main program expose conflicting live `doublelayer` and precomputed `unsfin` signatures.",
+            evidence,
+            "conflict",
+        )
 
     if precomputed_variant:
         return (
             "precomputed_unsfin_schedule",
             str(dfs_path.resolve()),
-            "Bundled native source calls `unsfin` before DFS, comments out the live `doublelayer` call inside `dfs.F90`, and stages `tempfsh/tempfsrho` only when the timestep crosses precomputed `tfail`.",
+            "Active statements call `unsfin` before DFS and stage `tempfsh/tempfsrho` only when the timestep crosses precomputed `tfail`; the live `doublelayer` call is not active.",
+            evidence,
+            "recognized",
         )
 
     if live_variant:
         return (
             "live_doublelayer_in_dfs",
             str(dfs_path.resolve()),
-            "Bundled `dfs.F90` keeps the live `doublelayer` call inside the DFS loop, so failure sources are advanced during each accepted step.",
+            "Active `dfs.F90` statements keep the live `doublelayer` call inside the DFS loop.",
+            evidence,
+            "recognized",
         )
 
     return (
-        "live_doublelayer_in_dfs",
+        "",
         str(dfs_path.resolve()),
-        "Bundled failure-source staging did not match a recognized `dfs/unsfin` signature; the native-input runtime falls back to the existing production default `live_doublelayer_in_dfs` variant until a new signature is traced.",
+        "Bundled failure-source staging did not match a recognized active `dfs/unsfin` signature.",
+        evidence,
+        "unknown",
     )
 
 
-def _compact_fortran_source(text: str) -> str:
-    return re.sub(r"\s+", "", text.lower())
+def _detect_dfs_manningbar_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ exponential Manning from Chamoli debrisflowmanning.
+
+    Chamoli `dfs.F90:417-421` uses `manningbar=debrisflowmanning` when `cv>cvtol`
+    during erosion staging, and the face-flux `cvbar>cvtol` branch is a no-op.
+    BJ_HXL uses `manningbar=manning(i)*manningb*exp(manningm*cv(i))`.
+    """
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "exponential_cv",
+            None,
+            "No bundled `dfs.F90` was found; Manning-bar staging keeps the BJ/HXL exponential-cv production default.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "exponential_cv",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; Manning-bar staging falls back to exponential-cv.",
+        )
+    compact = _compact_fortran_source(text)
+    if "manningbar=debrisflowmanning" in compact:
+        return (
+            "debrisflowmanning_cvtol",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` assigns `manningbar=debrisflowmanning` when `cv>cvtol` in the erosion-rate branch "
+            "(Chamoli `dfs.F90:417-421`); the face-flux `cvbar>cvtol` assignment is a no-op.",
+        )
+    if "manningbar=manning(i)*manningb*exp(manningm*cv(i))" in compact:
+        return (
+            "exponential_cv",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` applies the BJ/HXL `manningb*exp(manningm*cv)` correction when `cv>cvtol`.",
+        )
+    return (
+        "exponential_cv",
+        str(dfs_path.resolve()),
+        "Bundled Manning-bar staging did not match a recognized signature; the runtime keeps the exponential-cv default.",
+    )
+
+
+def _detect_dfs_dry_face_velocity_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Chamoli zeros predicted face velocity when the upstream cell is dry.
+
+    Chamoli ``dfs.F90:736-737`` (after ``fvpredi=dv+fv``, before sign reversal):
+
+        if (fvpredi(i,ii)<0 .and. fhpredi(nq)<=tol) fvpredi(i,ii)=0
+        if (fvpredi(i,ii)>0 .and. fhpredi(i)<=tol) fvpredi(i,ii)=0
+
+    BJ ``dfs.F90`` has no equivalent; predicted velocity is kept.
+    """
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "keep_velocity_bj",
+            None,
+            "No bundled `dfs.F90` was found; dry-face velocity staging keeps the BJ production default `keep_velocity_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "keep_velocity_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; dry-face velocity staging falls back to `keep_velocity_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    zero_from_dry_neighbor = "if(fvpredi(i,ii)<0.and.fhpredi(nq)<=tol)fvpredi(i,ii)=0" in compact
+    zero_from_dry_self = "if(fvpredi(i,ii)>0.and.fhpredi(i)<=tol)fvpredi(i,ii)=0" in compact
+    if zero_from_dry_neighbor and zero_from_dry_self:
+        return (
+            "zero_dry_face_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` zeros `fvpredi` when the upstream cell is thinner than `tol` "
+            "(Chamoli `dfs.F90:736-737`), after `fvpredi=dv+fv` and before the sign-reversal branch.",
+        )
+    return (
+        "keep_velocity_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` does not zero predicted face velocity on a dry upstream cell; "
+        "the runtime keeps the BJ production default `keep_velocity_bj`.",
+    )
+
+
+def _detect_dfs_artivis_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ depth-ratio artificial viscosity from Chamoli velocity-ratio.
+
+    Chamoli ``dfs.F90:730-732`` weights ``artivis`` by
+    ``0.02*|Δv|/(|v_nq|+|v_i|+1)`` and divides the diagonal term by ``√2``.
+    BJ uses ``0.02*|Δh|/(h_i+h_nq)`` on every direction.
+    """
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "depth_ratio_bj",
+            None,
+            "No bundled `dfs.F90` was found; artificial-viscosity staging keeps the BJ production default `depth_ratio_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "depth_ratio_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; artificial-viscosity staging falls back to `depth_ratio_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    velocity_ratio = (
+        "0.02*abs((fv(nq,ii)-fv(i,ii))/(abs(fv(nq,ii))+abs(fv(i,ii))+1))*artivis" in compact
+    )
+    depth_ratio = "0.02*abs(fhpredi(i)-fhpredi(nq))/(fhpredi(i)+fhpredi(nq))*artivis" in compact
+    if velocity_ratio:
+        return (
+            "velocity_ratio_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` weights artificial viscosity by the face-velocity ratio "
+            "`0.02*|Δv|/(|v_nq|+|v_i|+1)` and divides the diagonal `artivis` term by `√2` "
+            "(Chamoli `dfs.F90:730-732`).",
+        )
+    if depth_ratio:
+        return (
+            "depth_ratio_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` weights artificial viscosity by the depth ratio "
+            "`0.02*|Δh|/(h_i+h_nq)` on every direction (BJ production default).",
+        )
+    return (
+        "depth_ratio_bj",
+        str(dfs_path.resolve()),
+        "Bundled artificial-viscosity staging did not match a recognized signature; the runtime keeps `depth_ratio_bj`.",
+    )
+
+
+def _detect_dfs_absubar_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ max-component `absubar` from Chamoli signed-mean reconstruction.
+
+    Chamoli ``dfs.F90:209-212``:
+
+        vx=(fv(i,5)-fv(i,1))*0.5+...0.5*0.707...
+        absubar(i)=(vx**2.+vy**2.)**0.5
+
+    BJ reconstructs ``max(vorth,vcomp)`` from ``fvpredi2=0.5*(fv+fvpredi)``.
+    """
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "max_component_bj",
+            None,
+            "No bundled `dfs.F90` was found; `absubar` staging keeps the BJ production default `max_component_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "max_component_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; `absubar` staging falls back to `max_component_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    signed_mean = (
+        "vx=(fv(i,5)-fv(i,1))*0.5" in compact
+        and "0.5*0.707" in compact
+        and "absubar(i)=(vx**2" in compact
+    )
+    if signed_mean:
+        return (
+            "signed_mean_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` reconstructs `absubar` as a signed Cartesian speed from raw `fv` "
+            "with literal `0.707` diagonals (Chamoli `dfs.F90:209-212`), not BJ `max(vorth,vcomp)`.",
+        )
+    return (
+        "max_component_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` does not use the Chamoli signed-mean `absubar` reconstruction; "
+        "the runtime keeps the BJ production default `max_component_bj`.",
+    )
 
 
 def _detect_inflow_denominator_variant(
@@ -1135,6 +1517,15 @@ def _annotate_reference_case_activation(
     )
     _set("demfil", original_branch_active=True, current_backend_branch_active=True, activation_basis=aligned_basis)
     _set("slofil", original_branch_active=True, current_backend_branch_active=True, activation_basis=aligned_basis)
+    _set(
+        "triggerslide",
+        original_branch_active=True,
+        current_backend_branch_active=True,
+        activation_basis=(
+            "Original EDDA always reads `triggerslidefil` in `edda main program.F90` and injects it once "
+            "inside `dfs.F90` when `slide1==1 .and. tnow>0`, independent of `fssimul`."
+        ),
+    )
     zonfil_active = nzon > 1
     _set(
         "zonfil",
@@ -1281,11 +1672,30 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
 
     idx_ab = find_line_index(lines, "alpha1 beta1 alpha2")
     vals_ab = parse_floats(lines[idx_ab + 1])
-    alpha1, beta1, alpha2, beta2, kresis, manning_global, limitfr, shallown = vals_ab[:8]
+    alpha1, beta1, alpha2, beta2, kresis, manning_global, limitfr = vals_ab[:7]
+    heading_ab = lines[idx_ab].lower()
+    eighth = vals_ab[7] if len(vals_ab) > 7 else None
+    if "debrisflowmanning" in heading_ab:
+        debrisflowmanning = eighth
+        shallown = 0.2
+    else:
+        debrisflowmanning = None
+        shallown = eighth if eighth is not None else 0.2
 
     idx_cv = find_line_index(lines, "d50    cvstar")
     vals_cv = parse_floats(lines[idx_cv + 1])
-    d50, cvstar, coedepo, cs = vals_cv[:4]
+    heading_cv = lines[idx_cv].lower()
+    if "cvglacier" in heading_cv or "cvlandslide" in heading_cv:
+        if len(vals_cv) < 6:
+            raise ValueError(
+                "Chamoli-style sediment line `d50 cvstar cvglacier cvlandslide coedepo cs` "
+                f"requires 6 values, got {len(vals_cv)}."
+            )
+        d50, cvstar, cvglacier, cvlandslide, coedepo, cs = vals_cv[:6]
+    else:
+        d50, cvstar, coedepo, cs = vals_cv[:4]
+        cvglacier = None
+        cvlandslide = None
 
     idx_dt = find_line_index(lines, "dtmin(s)   dtmax(s)")
     vals_dt = parse_floats(lines[idx_dt + 1])
@@ -1312,7 +1722,26 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     recognized_file_families.extend(_discover_case_sidecar_inputs(base_dir, file_inputs))
     dfs_infiltration_variant, dfs_infiltration_variant_source, dfs_infiltration_variant_basis = _detect_dfs_infiltration_variant(base_dir)
     dfs_face_flux_variant, dfs_face_flux_variant_source, dfs_face_flux_variant_basis = _detect_dfs_face_flux_variant(base_dir)
-    dfs_failure_source_variant, dfs_failure_source_variant_source, dfs_failure_source_variant_basis = _detect_dfs_failure_source_variant(base_dir)
+    (
+        dfs_failure_source_variant,
+        dfs_failure_source_variant_source,
+        dfs_failure_source_variant_basis,
+        dfs_failure_source_evidence,
+        dfs_failure_source_topology_status,
+    ) = _detect_dfs_failure_source_variant(base_dir)
+    dfs_manningbar_variant, dfs_manningbar_variant_source, dfs_manningbar_variant_basis = _detect_dfs_manningbar_variant(base_dir)
+    dfs_dry_face_velocity_variant, dfs_dry_face_velocity_variant_source, dfs_dry_face_velocity_variant_basis = (
+        _detect_dfs_dry_face_velocity_variant(base_dir)
+    )
+    dfs_artivis_variant, dfs_artivis_variant_source, dfs_artivis_variant_basis = _detect_dfs_artivis_variant(base_dir)
+    dfs_absubar_variant, dfs_absubar_variant_source, dfs_absubar_variant_basis = _detect_dfs_absubar_variant(base_dir)
+    if debrisflowmanning is not None:
+        dfs_manningbar_variant = "debrisflowmanning_cvtol"
+        dfs_manningbar_variant_source = str(reference_path.resolve())
+        dfs_manningbar_variant_basis = (
+            "edda_in heading includes `debrisflowmanning`; Chamoli dfs.F90:417-421 "
+            "assigns `manningbar=debrisflowmanning` when `cv>cvtol`."
+        )
     (
         inflow_denominator_variant,
         inflow_denominator_variant_source,
@@ -1576,6 +2005,11 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     }
     extension_flags = {
         "save_hydrograph_cells": flags.pop("save_hydrograph_cells"),
+        "simulate_buildings": _parse_optional_bool(
+            lines,
+            "Simulate buildings with ARF and WRF? Enter T (.true.) or F (.false.)",
+            start=whole_process_section_start,
+        ),
     }
     flags["background_flux_offset"] = background_flux_offset
     switch_snapshot = build_switch_snapshot(
@@ -1602,7 +2036,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         manning_source=manning_source,
     )
 
-    supported_fields = sorted({
+    supported_fields = {
         "alpha1",
         "alpha2",
         "background_flux_offset",
@@ -1614,6 +2048,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         "cs",
         "d50",
         "demfil",
+        "triggerslide",
         "depth",
         "dtmax",
         "dtmin",
@@ -1641,7 +2076,14 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         "zfil",
         "zonfil",
         "zones",
-    })
+    }
+    if debrisflowmanning is not None:
+        supported_fields.add("debrisflowmanning")
+    if cvlandslide is not None:
+        supported_fields.add("cvlandslide")
+    if cvglacier is not None:
+        supported_fields.add("cvglacier")
+    supported_fields = sorted(supported_fields)
     recognized_unsupported_fields = sorted({
         family
         for family, file_ref in file_inputs.items()
@@ -1716,6 +2158,28 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
     audit_notes.append(f"Bundled DFS failure-source variant resolved to `{dfs_failure_source_variant}`.")
     if dfs_failure_source_variant_basis:
         audit_notes.append(dfs_failure_source_variant_basis)
+    audit_notes.append(f"Bundled DFS Manning-bar variant resolved to `{dfs_manningbar_variant}`.")
+    if dfs_manningbar_variant_basis:
+        audit_notes.append(dfs_manningbar_variant_basis)
+    audit_notes.append(f"Bundled DFS dry-face velocity variant resolved to `{dfs_dry_face_velocity_variant}`.")
+    if dfs_dry_face_velocity_variant_basis:
+        audit_notes.append(dfs_dry_face_velocity_variant_basis)
+    audit_notes.append(f"Bundled DFS artificial-viscosity variant resolved to `{dfs_artivis_variant}`.")
+    if dfs_artivis_variant_basis:
+        audit_notes.append(dfs_artivis_variant_basis)
+    audit_notes.append(f"Bundled DFS absubar variant resolved to `{dfs_absubar_variant}`.")
+    if dfs_absubar_variant_basis:
+        audit_notes.append(dfs_absubar_variant_basis)
+    if cvlandslide is not None:
+        audit_notes.append(
+            "Sediment line used the Chamoli six-value layout "
+            "`d50 cvstar cvglacier cvlandslide coedepo cs` from `trini.f90:382`."
+        )
+    if "triggerslide" in file_inputs:
+        audit_notes.append(
+            "Triggering-slide grid `triggerslidefil` is always read by original `edda main program.F90` "
+            "and injected once in `dfs.F90` when `slide1==1 .and. tnow>0`, independent of `fssimul`."
+        )
     audit_notes.append(f"Bundled inflow denominator variant resolved to `{inflow_denominator_variant}`.")
     if inflow_denominator_variant_basis:
         audit_notes.append(inflow_denominator_variant_basis)
@@ -1812,8 +2276,11 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         manning_source=manning_source,
         limitfr=limitfr,
         shallown=shallown,
+        debrisflowmanning=debrisflowmanning,
         d50=d50,
         cvstar=cvstar,
+        cvglacier=cvglacier,
+        cvlandslide=cvlandslide,
         coedepo=coedepo,
         cs=cs,
         dtmin=dtmin,
@@ -1846,6 +2313,20 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         dfs_failure_source_variant=dfs_failure_source_variant,
         dfs_failure_source_variant_source=dfs_failure_source_variant_source,
         dfs_failure_source_variant_basis=dfs_failure_source_variant_basis,
+        dfs_failure_source_evidence=dfs_failure_source_evidence,
+        dfs_failure_source_topology_status=dfs_failure_source_topology_status,
+        dfs_manningbar_variant=dfs_manningbar_variant,
+        dfs_manningbar_variant_source=dfs_manningbar_variant_source,
+        dfs_manningbar_variant_basis=dfs_manningbar_variant_basis,
+        dfs_dry_face_velocity_variant=dfs_dry_face_velocity_variant,
+        dfs_dry_face_velocity_variant_source=dfs_dry_face_velocity_variant_source,
+        dfs_dry_face_velocity_variant_basis=dfs_dry_face_velocity_variant_basis,
+        dfs_artivis_variant=dfs_artivis_variant,
+        dfs_artivis_variant_source=dfs_artivis_variant_source,
+        dfs_artivis_variant_basis=dfs_artivis_variant_basis,
+        dfs_absubar_variant=dfs_absubar_variant,
+        dfs_absubar_variant_source=dfs_absubar_variant_source,
+        dfs_absubar_variant_basis=dfs_absubar_variant_basis,
         inflow_denominator_variant=inflow_denominator_variant,
         inflow_denominator_variant_source=inflow_denominator_variant_source,
         inflow_denominator_variant_basis=inflow_denominator_variant_basis,

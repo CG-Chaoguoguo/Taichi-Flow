@@ -1,0 +1,1914 @@
+{
+  "generated_at": "2026-08-25T13:22:00+08:00",
+  "failure_source_policy": {
+    "key": "hydrology.dfs_failure_source_policy",
+    "values": ["auto", "disabled", "precomputed", "live"],
+    "storage": "key_absent_means_auto",
+    "experimental_unlock": "experimental.enable_live_doublelayer_in_dfs",
+    "chamoli_auto": "disabled",
+    "bj_auto_with_topology": "precomputed",
+    "unknown_reference_auto": "blocked/failure_source_topology_unknown",
+    "direct_api_auto_without_topology": "live_compatibility_warning",
+    "live_requires_experimental_unlock": true,
+    "live_requires_runtime_capability": true,
+    "explicit_override_scope": "global_settings_only",
+    "queue_freeze_schema_version": 9,
+    "legacy_run_resolution": "legacy_unrecorded",
+    "triggerslide_independent": true,
+    "no_third_solver_enum": true,
+    "ts_carry_remains_serial": true,
+    "chamoli_cuda_t45_ab": {
+      "A": "artifacts/chamoli_cuda_t45_policy_A_baseline",
+      "B": "artifacts/chamoli_cuda_t45_policy_B_skip",
+      "A_elapsed_s": 1036.9815709590912,
+      "B_elapsed_s": 194.9594371318817,
+      "provider_wall_saved_s": 842.0221338272095,
+      "provider_dir_B": false,
+      "all_taichi_txt_identical": true,
+      "live_arch": "cuda",
+      "fallback_active": false
+    },
+    "bj_production_schedule_closure": "blocked"
+  },
+  "oracle_policy": "rerun Fortran Debug\\EDDA.exe; do not reuse pre-rerun results",
+  "registry_version": "1.0.0",
+  "entry_count": 45,
+  "cases": {
+    "chamoli": {
+      "edda_in": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\edda_in.txt",
+      "fortran_exe": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\Debug\\EDDA.exe",
+      "grid": {
+        "imax": 41069,
+        "nrow": 748,
+        "ncol": 715
+      },
+      "time": {
+        "simul_s": 14400.0,
+        "tout_s": 45.0
+      },
+      "sediment_line": {
+        "shape": "d50 cvstar cvglacier cvlandslide coedepo cs",
+        "d50": 0.035,
+        "cvstar": 0.6,
+        "cvglacier": 0.3,
+        "cvlandslide": 0.55,
+        "coedepo": 0.001,
+        "cs": 0.7
+      },
+      "manningbar_variant": "debrisflowmanning_cvtol",
+      "face_flux_variant": "arithmetic_mean_chamoli",
+      "dry_face_velocity_variant": "zero_dry_face_chamoli",
+      "artivis_variant": "velocity_ratio_chamoli",
+      "absubar_variant": "signed_mean_chamoli",
+      "debrisflowmanning": 0.07,
+      "extension_flags": {
+        "save_hydrograph_cells": null,
+        "simulate_buildings": false
+      },
+      "present_tutorial_rasters": [
+        "dem.asc",
+        "glacier.asc",
+        "landslide.asc",
+        "slope.asc",
+        "zones.asc"
+      ],
+      "declared_missing_files": [
+        {
+          "family": "manningfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\manning.asc"
+        },
+        {
+          "family": "dirfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\directions.asc"
+        },
+        {
+          "family": "depfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\depthwt.asc"
+        },
+        {
+          "family": "rizerofil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\rizero.asc"
+        },
+        {
+          "family": "roadfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\road.asc"
+        },
+        {
+          "family": "catchmentfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\catchment.asc"
+        },
+        {
+          "family": "mouthpointfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\mouthpoint.asc"
+        },
+        {
+          "family": "flexiblefil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\flexible.asc"
+        },
+        {
+          "family": "rigidfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\rigid.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri1.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri2.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri3.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri4.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri5.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri6.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri7.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri8.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri9.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri10.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri11.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri12.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri13.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri14.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri15.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri16.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri17.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri18.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri19.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri20.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri21.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri22.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri23.asc"
+        },
+        {
+          "family": "rifil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri24.asc"
+        },
+        {
+          "family": "nxtfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIdscelGrid_tutorial.txt"
+        },
+        {
+          "family": "ndxfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIcelindxList_tutorial.txt"
+        },
+        {
+          "family": "dscfil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIdscelList_tutorial.txt"
+        },
+        {
+          "family": "wffil",
+          "path": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIwfactorList_tutorial.txt"
+        }
+      ]
+    },
+    "bj_hxl": {
+      "edda_in": "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\BJ_HXL_Text(1)\\BJ_HXL_Text\\edda_in.txt",
+      "sediment_line": {
+        "shape": "d50 cvstar coedepo cs",
+        "d50": 0.001,
+        "cvstar": 0.65,
+        "coedepo": 0.005,
+        "cs": 0.7
+      },
+      "manningbar_variant": "exponential_cv",
+      "face_flux_variant": "both_thin_weighted",
+      "dry_face_velocity_variant": "keep_velocity_bj",
+      "artivis_variant": "depth_ratio_bj",
+      "absubar_variant": "max_component_bj"
+    }
+  },
+  "compute": {
+    "production_path": "Taichi kernels on CUDA (cuda_production_default)",
+    "cpu_reference": "same kernels with ti.cpu for对照; not a separate Fortran rewrite",
+    "not_raw_cuda_c": true
+  },
+  "switches_45": [
+    {
+      "source_index": 1,
+      "key": "save_runoff_grids",
+      "original_variable": "rodoc",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "unsupported",
+      "frontend_policy": "read_only",
+      "consumption_stage": "preprocess_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "Original runoff-grid writer is not implemented as a production result family.",
+      "taichi_runtime_consumer": "RNOFF production output gate not yet closed",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_runoff_grids",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存径流栅格",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 2,
+      "key": "save_fs_min_legacy",
+      "original_variable": "outp(3)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Source-read-only candidate pending the required original counterfactual run.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_fs_min_legacy",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存最小安全系数（旧）",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 3,
+      "key": "save_fs_depth_at_min",
+      "original_variable": "outp(4)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Source-read-only candidate pending counterfactual verification.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_fs_depth_at_min",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存最小安全系数时水深",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 4,
+      "key": "save_fs_pore_pressure_at_min",
+      "original_variable": "outp(5)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Source-read-only candidate pending counterfactual verification.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_fs_pore_pressure_at_min",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存最小安全系数时孔压",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 5,
+      "key": "save_infiltration_rate",
+      "original_variable": "outp(6)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "preprocess_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "Original active gate is traced but production RNOFF output parity is not closed.",
+      "taichi_runtime_consumer": "experimental RNOFF provider only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_infiltration_rate",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存入渗率",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 6,
+      "key": "save_basal_flux",
+      "original_variable": "outp(7)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Source-read-only candidate pending counterfactual verification.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_basal_flux",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存基底通量",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 7,
+      "key": "save_deposit_distribution",
+      "original_variable": "depositsave",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Legacy deposit-distribution flag is not yet tied to a source-backed writer.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_deposit_distribution",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存淤积分布",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 8,
+      "key": "save_pf",
+      "original_variable": "pfsave",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Probability-of-failure writer is absent and original activity remains to be disproved by paired run.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_pf",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存 PF 结果",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 9,
+      "key": "save_road_risk",
+      "original_variable": "risksave",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Road-risk branch is source-read-only in the visible case source.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_road_risk",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存道路风险",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 10,
+      "key": "save_road_warning",
+      "original_variable": "warninglevelsave",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Road-warning branch is source-read-only in the visible case source.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_road_warning",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存道路预警",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 11,
+      "key": "save_detached_trace",
+      "original_variable": "tracesave",
+      "group": "legacy_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Detached-trace branch is source-read-only in the visible case source.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_detached_trace",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存脱落体轨迹",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 12,
+      "key": "pressure_head_fs_listing_flag",
+      "original_variable": "flag",
+      "group": "legacy_output",
+      "chamoli_parsed_value": -1,
+      "bj_hxl_parsed_value": -1,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "preprocess_output",
+      "original_semantics": "active_listing_gate",
+      "status_reason": "The original header gate is traced; full listing output parity is not implemented.",
+      "taichi_runtime_consumer": "reference listing metadata only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.pressure_head_fs_listing_flag",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "压力水头/安全系数列表开关",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 13,
+      "key": "slope_failure_output_count",
+      "original_variable": "nout",
+      "group": "legacy_output",
+      "chamoli_parsed_value": 1,
+      "bj_hxl_parsed_value": 1,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Schedule count is allocated/read but no active runtime consumer is visible.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.slope_failure_output_count",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "边坡失稳输出时刻数",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 14,
+      "key": "slope_failure_output_times_s",
+      "original_variable": "tsav(:)",
+      "group": "legacy_output",
+      "chamoli_parsed_value": [
+        3600.0
+      ],
+      "bj_hxl_parsed_value": [
+        3600.0
+      ],
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Schedule values are read/clamped but no active runtime consumer is visible.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.slope_failure_output_times_s",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "边坡失稳输出时刻",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 15,
+      "key": "skip_other_timesteps",
+      "original_variable": "lskip",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Original source-read-only candidate; no Taichi behavior is invented.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.skip_other_timesteps",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "跳过其他时间步",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 16,
+      "key": "use_analytic_fillable_porosity",
+      "original_variable": "lany",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Original source-read-only candidate; no Taichi behavior is invented.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.use_analytic_fillable_porosity",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "使用解析可填充孔隙率",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 17,
+      "key": "estimate_positive_pressure_head",
+      "original_variable": "llus",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Original source-read-only candidate; no Taichi behavior is invented.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.estimate_positive_pressure_head",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "估算正压力水头",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 18,
+      "key": "use_psi0_negative_inverse_alpha",
+      "original_variable": "lps0",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Original source-read-only candidate; no Taichi behavior is invented.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.use_psi0_negative_inverse_alpha",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "使用 ψ₀=-1/α",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 19,
+      "key": "log_mass_balance_results",
+      "original_variable": "outp(8)",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "metadata_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Taichi emits audit metadata, not an invented EDDALog behavior; original no-op status still needs paired confirmation.",
+      "taichi_runtime_consumer": "structured audit metadata only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.log_mass_balance_results",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "记录质量平衡结果",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 20,
+      "key": "flow_direction_mode",
+      "original_variable": "flowdir",
+      "group": "run_control",
+      "chamoli_parsed_value": "slope",
+      "bj_hxl_parsed_value": "slope",
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Current connectivity cannot expose a mode switch without an original active consumer.",
+      "taichi_runtime_consumer": "parser snapshot only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.flow_direction_mode",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "流向模式",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 21,
+      "key": "background_flux_offset",
+      "original_variable": "bkgrof",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "preprocess_and_timestep",
+      "original_semantics": "active_run_control",
+      "status_reason": "Original active source trace and current runtime consumer are both present.",
+      "taichi_runtime_consumer": "immutable runtime plan -> DFS/native UNSFIN provider; direct compatibility falls back to SimulationConfig.hydrology",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.background_flux_offset",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "背景入渗通量偏移",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 22,
+      "key": "use_full_dynamic_wave",
+      "original_variable": "fulldyna",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "parsed_only",
+      "frontend_policy": "read_only",
+      "consumption_stage": "metadata",
+      "original_semantics": "no_op_candidate",
+      "status_reason": "Exact source reads/logs the value but does not switch equations; no diffusive-wave behavior is invented.",
+      "taichi_runtime_consumer": "fixed DFS metadata only",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.use_full_dynamic_wave",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "使用完整动波",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 23,
+      "key": "simulate_rainfall",
+      "original_variable": "rainsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": false,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "forcing_staging",
+      "original_semantics": "active_run_control",
+      "status_reason": "The DFS true/off branches consume the frozen control and preserve source order; unsupported WFS is admitted separately.",
+      "taichi_runtime_consumer": "immutable runtime plan -> EDDASolver rainfall update and DFS rainfall source staging",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_rainfall",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "模拟降雨",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 24,
+      "key": "simulate_infiltration",
+      "original_variable": "infilsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": false,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "forcing_staging",
+      "original_semantics": "active_run_control",
+      "status_reason": "The false branch fixes ir=0 while retaining rainfall/inflow mass; the active branch keeps the existing accepted-step infiltration path.",
+      "taichi_runtime_consumer": "immutable runtime plan -> DFS Green-Ampt or zero-infiltration mass staging",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_infiltration",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "模拟入渗",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 25,
+      "key": "simulate_inflow_hydrograph",
+      "original_variable": "inflowsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": true,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "forcing_staging",
+      "original_semantics": "active_run_control",
+      "status_reason": "Supported DFS forcing exists; branch/reporting parity remains incomplete.",
+      "taichi_runtime_consumer": "native inflow sidecar loader and DFS staging",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_inflow_hydrograph",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "模拟入流过程",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 26,
+      "key": "simulate_outflow_cell",
+      "original_variable": "outflowsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": true,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "accepted_step",
+      "original_semantics": "active_run_control",
+      "status_reason": "The sidecar is isolated from generic boundaries; pre-clear samples commit only after step acceptance and drive OUTNQ.",
+      "taichi_runtime_consumer": "dedicated dfs_outflow_mask -> accepted predictor sample/clear -> outer observer",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_outflow_cell",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "模拟出流单元",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 27,
+      "key": "simulate_shallow_landslide",
+      "original_variable": "fssimul",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": false,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "preprocess_and_forcing",
+      "original_semantics": "active_run_control",
+      "status_reason": "The off branch is closed, but the exact BJ active branch remains fail-closed until a validated UNSFIN schedule is configured.",
+      "taichi_runtime_consumer": "immutable plan gates DFS failure staging; dynamic preflight requires an active UNSFIN schedule",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_shallow_landslide",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "模拟浅层滑坡",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 28,
+      "key": "simulate_debris_flow",
+      "original_variable": "debrissimul",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": true,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "solver_selection",
+      "original_semantics": "active_branch_selector",
+      "status_reason": "The active BJ DFS selection is explicit; the original WFS branch remains unsupported and fail-closed.",
+      "taichi_runtime_consumer": "strict true selects DFS; strict false is rejected before initialization because WFS is unavailable",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_debris_flow",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "模拟泥石流",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 29,
+      "key": "simulate_erosion",
+      "original_variable": "erosionsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": true,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "forcing_staging",
+      "original_semantics": "active_run_control",
+      "status_reason": "The independent DFS off branch zeros erosion rates/candidates and the output family consumes the same control.",
+      "taichi_runtime_consumer": "immutable plan gates DFS erosion rate/candidate staging and the compound writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_erosion",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "模拟侵蚀",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 30,
+      "key": "simulate_water_and_solid_separately",
+      "original_variable": "sepdepositionsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": true,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "forcing_staging",
+      "original_semantics": "active_run_control",
+      "status_reason": "The independent DFS off branch zeros separate-deposition candidates; deposition and total writers consume the same gate.",
+      "taichi_runtime_consumer": "immutable plan gates separate deposition rate/candidate staging and compound writers",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_water_and_solid_separately",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "水固分相计算",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 31,
+      "key": "simulate_drainage_flow",
+      "original_variable": "dwsimul",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": false,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "accepted_step",
+      "original_semantics": "active_run_control",
+      "status_reason": "Source-backed hook exists but is not a default production branch.",
+      "taichi_runtime_consumer": "default-off experimental stormdrain hook",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_drainage_flow",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "模拟排水管网流",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 32,
+      "key": "simulate_barrier",
+      "original_variable": "barriersimul",
+      "group": "run_control",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": false,
+      "chamoli_variant_note": null,
+      "backend_status": "unsupported",
+      "frontend_policy": "read_only",
+      "consumption_stage": "pre_connectivity_and_flux",
+      "original_semantics": "active_run_control",
+      "status_reason": "Barrier assets and runtime semantics are not yet wired end to end.",
+      "taichi_runtime_consumer": "no complete parser-to-runtime barrier chain",
+      "frontend_catalog": {
+        "catalog_key": "edda.run_controls.simulate_barrier",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "模拟拦挡设施",
+        "group": "compute_process"
+      }
+    },
+    {
+      "source_index": 33,
+      "key": "save_fs_min_grid",
+      "original_variable": "fsminsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The writer gate is closed, but exact BJ gindx/fdepth production evidence depends on the still-blocked UNSFIN schedule.",
+      "taichi_runtime_consumer": "strict periodic writer gate using configured failure gindx/fdepth when available",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_fs_min_grid",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存最小安全系数栅格",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 34,
+      "key": "save_flow_depth",
+      "original_variable": "flowdepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The family consumes its own frozen control and committed flow depth at each output boundary.",
+      "taichi_runtime_consumer": "strict periodic EDDA text writer gate independent of generic GeoTIFF output",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_flow_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存流深",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 35,
+      "key": "save_max_flow_depth",
+      "original_variable": "maxflowdepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "accepted_step_and_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The writer reads the monotonic accepted-step maximum and consumes the independent output control.",
+      "taichi_runtime_consumer": "accepted-step max_flow_depth field -> strict periodic writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_max_flow_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存最大流深",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 36,
+      "key": "save_flow_velocity",
+      "original_variable": "fvsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The scalar original writer formula and independent family gate are both consumed.",
+      "taichi_runtime_consumer": "strict periodic scalar EDDA velocity writer from the first four directional faces",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_flow_velocity",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存流速",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 37,
+      "key": "save_max_flow_velocity",
+      "original_variable": "maxfvsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "accepted_step_and_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The writer reads the monotonic accepted-step maximum and consumes the independent output control.",
+      "taichi_runtime_consumer": "accepted-step max_flow_velocity field -> strict periodic writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_max_flow_velocity",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存最大流速",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 38,
+      "key": "save_erosion_depth",
+      "original_variable": "erodepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The family requires both controls and writes the thresholded original-bed minus committed-bed depth.",
+      "taichi_runtime_consumer": "compound immutable run/output gate -> original bed-delta writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_erosion_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存侵蚀深度",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 39,
+      "key": "save_deposition_depth",
+      "original_variable": "debdepodepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The family requires both controls and writes max(ele-eleori,0) rather than bookkeeping deposition.",
+      "taichi_runtime_consumer": "compound immutable run/output gate -> positive committed-bed delta writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_deposition_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存淤积深度",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 40,
+      "key": "save_total_depth",
+      "original_variable": "totaldepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The original total-depth formula and both required controls are consumed at the periodic writer.",
+      "taichi_runtime_consumer": "compound immutable run/output gate -> fh+ele-eleori writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_total_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存总深度",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 41,
+      "key": "save_max_solid_depth",
+      "original_variable": "maxsoliddepthsave",
+      "group": "process_output",
+      "chamoli_parsed_value": null,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": "Chamoli trini.f90 has no maxsoliddepthsave read; input jumps from totaldepthsave to cvsave. Not a 46th registry entry — the 45-switch BJ_HXL contract keeps the key with parsed value null.",
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "accepted_step_and_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The monotonic accepted h*Cv maximum, original threshold, and independent output gate are all consumed.",
+      "taichi_runtime_consumer": "accepted-step max_solid_depth field -> strict writer with <=0.005 zeroing",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_max_solid_depth",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存最大固相深度",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 42,
+      "key": "save_volumetric_sediment_concentration",
+      "original_variable": "cvsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": true,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "periodic_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The committed concentration, original shallow-depth mask, and independent family gate are consumed.",
+      "taichi_runtime_consumer": "strict periodic writer with original fh<0.005 shallow-depth zeroing",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_volumetric_sediment_concentration",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存体积含沙浓度",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 43,
+      "key": "save_outflow_process",
+      "original_variable": "outflowsave",
+      "group": "process_output",
+      "chamoli_parsed_value": false,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "production_consumed",
+      "frontend_policy": "editable",
+      "consumption_stage": "end_of_run_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "The false gate creates no file; the true gate writes original ELEMENT/TIME/DISCHARGE columns from accepted pre-clear samples.",
+      "taichi_runtime_consumer": "accepted pre-clear outflow samples -> gated end-of-run three-column OUTNQ writer",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_outflow_process",
+        "editable": true,
+        "frontend_policy": "editable",
+        "label_zh": "保存出流过程",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 44,
+      "key": "save_drainage_nodal_flow",
+      "original_variable": "dwnodesave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "accepted_step_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "Production drainage node writer is not closed.",
+      "taichi_runtime_consumer": "experimental stormdrain diagnostics only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_drainage_nodal_flow",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存排水节点流量",
+        "group": "compute_outputs"
+      }
+    },
+    {
+      "source_index": 45,
+      "key": "save_drainage_conduit_flow",
+      "original_variable": "dwconduitsave",
+      "group": "process_output",
+      "chamoli_parsed_value": true,
+      "bj_hxl_parsed_value": false,
+      "chamoli_active_in_this_case": null,
+      "chamoli_variant_note": null,
+      "backend_status": "partial",
+      "frontend_policy": "read_only",
+      "consumption_stage": "accepted_step_output",
+      "original_semantics": "active_output_gate",
+      "status_reason": "Production drainage conduit writer is not closed.",
+      "taichi_runtime_consumer": "experimental stormdrain diagnostics only",
+      "frontend_catalog": {
+        "catalog_key": "edda.output_controls.save_drainage_conduit_flow",
+        "editable": false,
+        "frontend_policy": "read_only",
+        "label_zh": "保存排水管道流量",
+        "group": "compute_outputs"
+      }
+    }
+  ],
+  "input_families": [
+    {
+      "family": "triggerslide",
+      "raw_paths": [
+        "Data\\tutorial\\landslide.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\landslide.asc"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "production-reachable",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "slofil",
+      "raw_paths": [
+        "Data\\tutorial\\slope.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\slope.asc"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "production-reachable",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "demfil",
+      "raw_paths": [
+        "Data\\tutorial\\dem.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\dem.asc"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "production-reachable",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "manningfil",
+      "raw_paths": [
+        "Data\\tutorial\\manning.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\manning.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "production-reachable",
+      "original_branch_active": false,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "dirfil",
+      "raw_paths": [
+        "data\\tutorial\\directions.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\directions.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "zonfil",
+      "raw_paths": [
+        "Data\\tutorial\\zones.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\zones.asc"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "production-reachable",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "zfil",
+      "raw_paths": [
+        "Data\\tutorial\\glacier.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\glacier.asc"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "partial",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "depfil",
+      "raw_paths": [
+        "Data\\tutorial\\depthwt.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\depthwt.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "partial",
+      "original_branch_active": false,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "rizerofil",
+      "raw_paths": [
+        "Data\\tutorial\\rizero.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\rizero.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "partial",
+      "original_branch_active": false,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "roadfil",
+      "raw_paths": [
+        "Data\\tutorial\\road.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\road.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "catchmentfil",
+      "raw_paths": [
+        "Data\\tutorial\\catchment.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\catchment.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "mouthpointfil",
+      "raw_paths": [
+        "Data\\tutorial\\mouthpoint.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\mouthpoint.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "flexiblefil",
+      "raw_paths": [
+        "Data\\tutorial\\flexible.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\flexible.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "unrecognized",
+      "original_branch_active": null,
+      "current_backend_branch_active": null,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "rigidfil",
+      "raw_paths": [
+        "Data\\tutorial\\rigid.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\rigid.asc"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "unrecognized",
+      "original_branch_active": null,
+      "current_backend_branch_active": null,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "rifil",
+      "raw_paths": [
+        "Data\\tutorial\\ri1.asc",
+        "Data\\tutorial\\ri2.asc",
+        "Data\\tutorial\\ri3.asc",
+        "Data\\tutorial\\ri4.asc",
+        "Data\\tutorial\\ri5.asc",
+        "Data\\tutorial\\ri6.asc",
+        "Data\\tutorial\\ri7.asc",
+        "Data\\tutorial\\ri8.asc",
+        "Data\\tutorial\\ri9.asc",
+        "Data\\tutorial\\ri10.asc",
+        "Data\\tutorial\\ri11.asc",
+        "Data\\tutorial\\ri12.asc",
+        "Data\\tutorial\\ri13.asc",
+        "Data\\tutorial\\ri14.asc",
+        "Data\\tutorial\\ri15.asc",
+        "Data\\tutorial\\ri16.asc",
+        "Data\\tutorial\\ri17.asc",
+        "Data\\tutorial\\ri18.asc",
+        "Data\\tutorial\\ri19.asc",
+        "Data\\tutorial\\ri20.asc",
+        "Data\\tutorial\\ri21.asc",
+        "Data\\tutorial\\ri22.asc",
+        "Data\\tutorial\\ri23.asc",
+        "Data\\tutorial\\ri24.asc"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri1.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri2.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri3.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri4.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri5.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri6.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri7.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri8.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri9.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri10.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri11.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri12.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri13.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri14.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri15.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri16.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri17.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri18.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri19.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri20.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri21.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri22.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri23.asc",
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\tutorial\\ri24.asc"
+      ],
+      "exists_on_disk": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "production_status": "conditional-production-reachable",
+      "original_branch_active": false,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "nxtfil",
+      "raw_paths": [
+        "Data\\topo\\TIdscelGrid_tutorial.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIdscelGrid_tutorial.txt"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "ndxfil",
+      "raw_paths": [
+        "Data\\topo\\TIcelindxList_tutorial.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIcelindxList_tutorial.txt"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "dscfil",
+      "raw_paths": [
+        "Data\\topo\\TIdscelList_tutorial.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIdscelList_tutorial.txt"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "wffil",
+      "raw_paths": [
+        "Data\\topo\\TIwfactorList_tutorial.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\data\\topo\\TIwfactorList_tutorial.txt"
+      ],
+      "exists_on_disk": [
+        false
+      ],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": null
+    },
+    {
+      "family": "folder",
+      "raw_paths": [],
+      "resolved_paths": [],
+      "exists_on_disk": [],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": null,
+      "activation_condition": null,
+      "notes": "Label found but no subsequent path lines were detected."
+    },
+    {
+      "family": "suffix",
+      "raw_paths": [],
+      "resolved_paths": [],
+      "exists_on_disk": [],
+      "production_status": "recognized-only",
+      "original_branch_active": null,
+      "current_backend_branch_active": null,
+      "activation_condition": null,
+      "notes": "Label found but no subsequent path lines were detected."
+    },
+    {
+      "family": "inflow.txt",
+      "raw_paths": [
+        "inflow.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\inflow.txt"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "partial",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": "Case sidecar file detected for inflow hydrograph forcing; current backend can now map the active branch into DFS runtime forcing for supported production cases."
+    },
+    {
+      "family": "outflow.txt",
+      "raw_paths": [
+        "outflow.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\outflow.txt"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "partial",
+      "original_branch_active": true,
+      "current_backend_branch_active": true,
+      "activation_condition": null,
+      "notes": "Case sidecar file detected; current production backend does not consume it and existing use remains helper-only."
+    },
+    {
+      "family": "drainage.txt",
+      "raw_paths": [
+        "drainage.txt"
+      ],
+      "resolved_paths": [
+        "C:\\Users\\Administrator\\Desktop\\EDDA_test_project\\Chamoli-EDDA file\\Chamoli-EDDA file\\drainage.txt"
+      ],
+      "exists_on_disk": [
+        true
+      ],
+      "production_status": "partial",
+      "original_branch_active": false,
+      "current_backend_branch_active": false,
+      "activation_condition": null,
+      "notes": "Case stormdrain topology file detected; consumed only by the default-off EDDA_EXPERIMENT_STORMDRAIN runtime hook."
+    }
+  ],
+  "auxiliary_capabilities": [
+    {
+      "key": "native_inputs.triggerslide",
+      "raw_label": "triggerslide / triggerslidefil",
+      "family": "input_family",
+      "original_true_switch": "no",
+      "current_backend_status": "production_consumed",
+      "frontend_exposure_policy": "importable_auditable",
+      "blocked_reason": null,
+      "evidence_basis": "Original triggering-slide grid is always read and injected once in dfs.F90 when tnow>0.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "sidecar.inflow.txt",
+      "raw_label": "inflow.txt",
+      "family": "sidecar",
+      "original_true_switch": "no",
+      "current_backend_status": "partial",
+      "frontend_exposure_policy": "read_only",
+      "blocked_reason": "DFS forcing is implemented; complete original report parity remains open.",
+      "evidence_basis": "Active hydrographs reach DFS staging and volume accounting.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "sidecar.outflow.txt",
+      "raw_label": "outflow.txt",
+      "family": "sidecar",
+      "original_true_switch": "no",
+      "current_backend_status": "partial",
+      "frontend_exposure_policy": "read_only",
+      "blocked_reason": "The dedicated mask/order/export chain is implemented; exact active numerical oracle parity is pending.",
+      "evidence_basis": "Generic boundary metadata is isolated from accepted pre-clear sidecar sampling.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "rheology.debrisflowmanning",
+      "raw_label": "debrisflowmanning",
+      "family": "parameter",
+      "original_true_switch": "no",
+      "current_backend_status": "production_consumed",
+      "frontend_exposure_policy": "editable",
+      "blocked_reason": null,
+      "evidence_basis": "Chamoli dfs.F90 uses debrisflowmanning when cv>cvtol in the erosion-rate Manning-bar branch.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "rheology.cvlandslide",
+      "raw_label": "cvlandslide",
+      "family": "parameter",
+      "original_true_switch": "no",
+      "current_backend_status": "production_consumed",
+      "frontend_exposure_policy": "editable",
+      "blocked_reason": null,
+      "evidence_basis": "Original dfs.F90:561 uses cvlandslide as the triggering-slide mixture concentration.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "rheology.cvglacier",
+      "raw_label": "cvglacier",
+      "family": "parameter",
+      "original_true_switch": "no",
+      "current_backend_status": "parsed_only",
+      "frontend_exposure_policy": "read_only",
+      "blocked_reason": "Chamoli dfs.F90 rhoero=cvglacier assignment is commented out.",
+      "evidence_basis": "Parsed for provenance only.",
+      "canonical_switch_key": null
+    },
+    {
+      "key": "extension_flags.simulate_buildings",
+      "raw_label": "buildingsimul",
+      "family": "run_mode",
+      "original_true_switch": "yes",
+      "current_backend_status": "parsed_only",
+      "frontend_exposure_policy": "read_only",
+      "blocked_reason": "Original dfs.F90:58 ARF/WRF branch is not wired end to end.",
+      "evidence_basis": "Chamoli-only extension flag; not part of the 45-switch BJ_HXL registry.",
+      "canonical_switch_key": null
+    }
+  ],
+  "frontend_exposure": {
+    "inspector_binding_fields": [
+      "dem.primary",
+      "zones.primary",
+      "slope.primary",
+      "thickness.primary",
+      "trigger.primary",
+      "inflow.primary",
+      "outflow.primary"
+    ],
+    "editable_parameter_keys": [
+      "boundary_conditions.default_type",
+      "boundary_conditions.include_nodata",
+      "boundary_conditions.mode",
+      "erosion.coedepo",
+      "erosion.d50",
+      "erosion.k_deposition",
+      "hydrology.K_sat",
+      "hydrology.depthwt_initial",
+      "hydrology.dfs_absubar_variant",
+      "hydrology.dfs_artivis_variant",
+      "hydrology.dfs_dry_face_velocity_variant",
+      "hydrology.dfs_face_flux_variant",
+      "hydrology.dfs_manningbar_variant",
+      "hydrology.rizero_initial",
+      "hydrology.use_background_flux_offset",
+      "manning.source",
+      "rainfall.mode",
+      "rainfall.periods",
+      "rainfall.timeline",
+      "rheology.alpha1",
+      "rheology.alpha2",
+      "rheology.beta1",
+      "rheology.beta2",
+      "rheology.cs",
+      "rheology.cvlandslide",
+      "rheology.debrisflowmanning",
+      "rheology.kresis",
+      "rheology.limitfr",
+      "rheology.n_manning",
+      "rheology.shallown",
+      "soil.c",
+      "soil.depth",
+      "soil.double_layer.lbstar",
+      "soil.double_layer.ltstar",
+      "soil.double_layer.min_slope_angle_deg",
+      "soil.double_layer.nzsb",
+      "soil.double_layer.nzst",
+      "soil.double_layer.uww",
+      "soil.gamma_s",
+      "soil.gamma_w",
+      "soil.phi",
+      "spatial_zones.zones",
+      "time.dt_decrease",
+      "time.dt_increase",
+      "time.dt_max",
+      "time.dt_min",
+      "time.dt_output",
+      "time.t_end",
+      "time.toldh",
+      "time.toldhp",
+      "time.wavemax"
+    ],
+    "readonly_display_parameter_keys": [
+      "erosion.ctao",
+      "erosion.k_erosion",
+      "erosion.tau_c",
+      "rheology.cvglacier",
+      "spatial_zones.zone_file"
+    ],
+    "buildingsimul_registry_policy": "extension_flags only; not a 46th core switch"
+  },
+  "remaining_gaps": [
+    "buildingsimul ARF/WRF is parsed only; Chamoli dfs.F90:58 is not wired",
+    "save_max_solid_depth is absent from Chamoli Fortran; Taichi treats null as off",
+    "WFS remains fail-closed when debrissimul=F",
+    "UNSFIN/LS_Scar active BJ production schedule remains fail-closed (BJ production schedule closure blocked). Chamoli auto now skips the native UNSFIN provider",
+    "zone-row porosity is parsed but not a production field",
+    "Numerical Chamoli CUDA vs Fortran is not claimed as parity; t=45 A/B rasters are identical to each other (Flow_depth vs Fortran still ~0.076 m). t=900 absubar Flow_depth max-abs 35.02 m RMSE 0.821, erosion volume ratio 1.72 at t=900 (t=45 ratio 1.001)"
+  ]
+}

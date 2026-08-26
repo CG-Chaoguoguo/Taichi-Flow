@@ -39,6 +39,8 @@ EDITABLE_PARAMETERS = {
     "rheology.cs",
     "rheology.kresis",
     "rheology.shallown",
+    "rheology.debrisflowmanning",
+    "rheology.cvlandslide",
     "erosion.d50",
     "erosion.coedepo",
     "erosion.k_deposition",
@@ -56,17 +58,49 @@ EDITABLE_PARAMETERS = {
     "rainfall.timeline",
     "rainfall.periods",
     "manning.source",
+    # Source-detected DFS averaging variants (auto default + editable override)
+    "hydrology.dfs_face_flux_variant",
+    "hydrology.dfs_manningbar_variant",
+    "hydrology.dfs_dry_face_velocity_variant",
+    "hydrology.dfs_artivis_variant",
+    "hydrology.dfs_absubar_variant",
+    "hydrology.dfs_failure_source_policy",
+    "experimental.enable_live_doublelayer_in_dfs",
+    "boundary_conditions.mode",
+    "boundary_conditions.default_type",
+    "boundary_conditions.include_nodata",
+    "spatial_zones.zones",
 }
 
 # edda_in field -> display metadata (Chinese name + English abbrev + group).
 PARAMETER_META: Dict[str, Dict[str, str]] = {
     "hydrology.use_background_flux_offset": {"label_zh": "背景入渗偏移", "abbrev": "background_flux_offset", "group": "hydrology"},
-    "hydrology.K_sat": {"label_zh": "饱和导水率", "abbrev": "K_sat", "group": "hydrology"},
+    "hydrology.K_sat": {
+        "label_zh": "饱和导水率",
+        "abbrev": "K_sat",
+        "group": "hydrology",
+        "description_zh": "多分区案例由分区矩阵决定；单分区时可编辑。",
+    },
     "hydrology.rizero_initial": {"label_zh": "初始入渗率", "abbrev": "rizero", "group": "hydrology"},
     "hydrology.depthwt_initial": {"label_zh": "初始地下水深", "abbrev": "depth", "group": "hydrology"},
-    "soil.gamma_s": {"label_zh": "土体重度", "abbrev": "gamma_s", "group": "soil"},
-    "soil.c": {"label_zh": "黏聚力", "abbrev": "c", "group": "soil"},
-    "soil.phi": {"label_zh": "内摩擦角", "abbrev": "phi", "group": "soil"},
+    "soil.gamma_s": {
+        "label_zh": "土体重度",
+        "abbrev": "gamma_s",
+        "group": "soil",
+        "description_zh": "多分区案例由分区矩阵决定；单分区时可编辑。",
+    },
+    "soil.c": {
+        "label_zh": "黏聚力",
+        "abbrev": "c",
+        "group": "soil",
+        "description_zh": "多分区案例由分区矩阵决定；单分区时可编辑。",
+    },
+    "soil.phi": {
+        "label_zh": "内摩擦角",
+        "abbrev": "phi",
+        "group": "soil",
+        "description_zh": "多分区案例由分区矩阵决定；单分区时可编辑。",
+    },
     "soil.gamma_w": {"label_zh": "水重度", "abbrev": "uww", "group": "soil"},
     "soil.depth": {"label_zh": "土层厚度", "abbrev": "depth", "group": "soil"},
     "soil.double_layer.lbstar": {"label_zh": "下层厚度", "abbrev": "lbstar", "group": "soil"},
@@ -84,9 +118,30 @@ PARAMETER_META: Dict[str, Dict[str, str]] = {
     "rheology.cs": {"label_zh": "悬移质系数", "abbrev": "cs", "group": "rheology"},
     "rheology.kresis": {"label_zh": "粘滞阻力系数", "abbrev": "kresis", "group": "rheology"},
     "rheology.shallown": {"label_zh": "浅水摩阻系数", "abbrev": "shallown", "group": "rheology"},
+    "rheology.debrisflowmanning": {"label_zh": "泥石流曼宁", "abbrev": "debrisflowmanning", "group": "rheology"},
+    "rheology.cvlandslide": {"label_zh": "滑坡体积浓度", "abbrev": "cvlandslide", "group": "rheology"},
+    "rheology.cvglacier": {"label_zh": "冰川体积浓度", "abbrev": "cvglacier", "group": "rheology"},
     "erosion.d50": {"label_zh": "中值粒径", "abbrev": "d50", "group": "erosion"},
     "erosion.coedepo": {"label_zh": "淤积系数", "abbrev": "coedepo", "group": "erosion"},
     "erosion.k_deposition": {"label_zh": "淤积速率系数", "abbrev": "coedepo", "group": "erosion"},
+    "erosion.tau_c": {
+        "label_zh": "临界剪应力",
+        "abbrev": "ctao",
+        "group": "erosion",
+        "description_zh": "由分区矩阵 ctao 决定；全局值仅作单分区回退。",
+    },
+    "erosion.ctao": {
+        "label_zh": "侵蚀临界剪应力",
+        "abbrev": "ctao",
+        "group": "erosion",
+        "description_zh": "由分区矩阵 ctao 决定；全局值仅作单分区回退。",
+    },
+    "erosion.k_erosion": {
+        "label_zh": "侵蚀系数",
+        "abbrev": "kero",
+        "group": "erosion",
+        "description_zh": "由分区矩阵 kero 决定；全局值仅作单分区回退。",
+    },
     "time.t_end": {"label_zh": "模拟结束时间", "abbrev": "simul", "group": "time"},
     "time.dt_max": {"label_zh": "最大时间步", "abbrev": "dtmax", "group": "time"},
     "time.dt_min": {"label_zh": "最小时间步", "abbrev": "dtmin", "group": "time"},
@@ -97,16 +152,197 @@ PARAMETER_META: Dict[str, Dict[str, str]] = {
     "time.dt_output": {"label_zh": "输出间隔", "abbrev": "tout", "group": "time"},
     "time.wavemax": {"label_zh": "动波稳定系数", "abbrev": "wavemax", "group": "time"},
     "spatial_zones.zone_file": {"label_zh": "分区栅格文件", "abbrev": "zonfil", "group": "spatial_zones"},
-    "spatial_zones.zones": {"label_zh": "分区参数", "abbrev": "zones", "group": "spatial_zones"},
+    "spatial_zones.zones": {
+        "label_zh": "分区参数",
+        "abbrev": "zones",
+        "group": "spatial_zones",
+        "description_zh": "每个分区独立的双层土与侵蚀参数；厚度 ltstar/lbstar 为栅格/标量，不进分区表。",
+    },
     "rainfall.mode": {"label_zh": "降雨模式", "abbrev": "rainfall_mode", "group": "inputs"},
     "rainfall.timeline": {"label_zh": "降雨时间轴", "abbrev": "capt", "group": "inputs"},
     "rainfall.periods": {"label_zh": "降雨时段", "abbrev": "cri", "group": "inputs"},
     "manning.source": {"label_zh": "曼宁来源", "abbrev": "manning_source", "group": "inputs"},
+    "hydrology.dfs_face_flux_variant": {
+        "label_zh": "面通量平均变种",
+        "abbrev": "dfs_face_flux_variant",
+        "group": "hydrology",
+    },
+    "hydrology.dfs_manningbar_variant": {
+        "label_zh": "曼宁面平均变种",
+        "abbrev": "dfs_manningbar_variant",
+        "group": "hydrology",
+    },
+    "hydrology.dfs_dry_face_velocity_variant": {
+        "label_zh": "干面速度清零变种",
+        "abbrev": "dfs_dry_face_velocity_variant",
+        "group": "hydrology",
+    },
+    "hydrology.dfs_artivis_variant": {
+        "label_zh": "人工黏性权重变种",
+        "abbrev": "dfs_artivis_variant",
+        "group": "hydrology",
+    },
+    "hydrology.dfs_absubar_variant": {
+        "label_zh": "侵蚀速度模变种",
+        "abbrev": "dfs_absubar_variant",
+        "group": "hydrology",
+    },
+    "hydrology.dfs_failure_source_policy": {
+        "label_zh": "失稳源策略",
+        "abbrev": "dfs_failure_source_policy",
+        "group": "hydrology",
+        "description_zh": "按 fssimul 与 Fortran 源码自动识别，或显式覆盖浅层失稳台账实现。triggerslide 不受此策略控制。",
+    },
+    "experimental.enable_live_doublelayer_in_dfs": {
+        "label_zh": "解锁实时双层实验路径",
+        "abbrev": "enable_live_doublelayer_in_dfs",
+        "group": "experimental",
+        "description_zh": "仅解锁 Settings 中的实时双层选项，本身不改变计算模式。",
+    },
+    "boundary_conditions.mode": {"label_zh": "边界模式", "abbrev": "boundary_mode", "group": "boundary"},
+    "boundary_conditions.default_type": {"label_zh": "默认边界类型", "abbrev": "boundary_default_type", "group": "boundary"},
+    "boundary_conditions.include_nodata": {"label_zh": "含NODATA边界", "abbrev": "boundary_include_nodata", "group": "boundary"},
 }
 
 READONLY_DISPLAY_PARAMETERS = {
     "spatial_zones.zone_file",
-    "spatial_zones.zones",
+    "rheology.cvglacier",
+    "erosion.tau_c",
+    "erosion.ctao",
+    "erosion.k_erosion",
+}
+
+# Global scalars that the solver reads from per-zone fields when nzon > 1.
+ZONE_TAKEN_OVER_PARAMETERS = frozenset({
+    "soil.c",
+    "soil.phi",
+    "soil.gamma_s",
+    "hydrology.K_sat",
+    "erosion.tau_c",
+    "erosion.ctao",
+    "erosion.k_erosion",
+})
+
+STATIC_GATE_PARAMETER_KEYS = frozenset({
+    "edda.registry_version",
+    "hydrology.dfs_face_flux_variant",
+    "hydrology.dfs_manningbar_variant",
+    "hydrology.dfs_dry_face_velocity_variant",
+    "hydrology.dfs_artivis_variant",
+    "hydrology.dfs_absubar_variant",
+    "hydrology.dfs_failure_source_policy",
+    "experimental.enable_live_doublelayer_in_dfs",
+    "boundary_conditions.mode",
+    "boundary_conditions.default_type",
+    "boundary_conditions.include_nodata",
+})
+
+# Editable enum contracts for hydrology DFS variants (not part of the 45 EDDA switches).
+PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
+    "hydrology.dfs_face_flux_variant": {
+        "value_type": "enum",
+        "allowed_values": [
+            "both_thin_weighted",
+            "arithmetic_mean_chamoli",
+            "asymmetric_head_guard",
+        ],
+        "value_labels_zh": {
+            "both_thin_weighted": "双薄层加权平均（BJ 默认）",
+            "arithmetic_mean_chamoli": "算术平均（Chamoli）",
+            "asymmetric_head_guard": "非对称水头保护",
+        },
+    },
+    "hydrology.dfs_manningbar_variant": {
+        "value_type": "enum",
+        "allowed_values": [
+            "exponential_cv",
+            "debrisflowmanning_cvtol",
+        ],
+        "value_labels_zh": {
+            "exponential_cv": "指数浓度加权（BJ 默认）",
+            "debrisflowmanning_cvtol": "泥石流曼宁阈值（Chamoli）",
+        },
+    },
+    "hydrology.dfs_dry_face_velocity_variant": {
+        "value_type": "enum",
+        "allowed_values": [
+            "keep_velocity_bj",
+            "zero_dry_face_chamoli",
+        ],
+        "value_labels_zh": {
+            "keep_velocity_bj": "保持预测速度（BJ 默认）",
+            "zero_dry_face_chamoli": "干面上游清零（Chamoli）",
+        },
+    },
+    "hydrology.dfs_artivis_variant": {
+        "value_type": "enum",
+        "allowed_values": [
+            "depth_ratio_bj",
+            "velocity_ratio_chamoli",
+        ],
+        "value_labels_zh": {
+            "depth_ratio_bj": "水深比权重（BJ 默认）",
+            "velocity_ratio_chamoli": "速度比权重（Chamoli）",
+        },
+    },
+    "hydrology.dfs_absubar_variant": {
+        "value_type": "enum",
+        "allowed_values": [
+            "max_component_bj",
+            "signed_mean_chamoli",
+        ],
+        "value_labels_zh": {
+            "max_component_bj": "分量最大模（BJ 默认）",
+            "signed_mean_chamoli": "有符号合成速度（Chamoli）",
+        },
+    },
+    "hydrology.dfs_failure_source_policy": {
+        "value_type": "enum",
+        "allowed_values": [
+            "disabled",
+            "precomputed",
+            "live",
+        ],
+        "value_labels_zh": {
+            "disabled": "关闭浅层失稳台账（triggerslide 不受影响）",
+            "precomputed": "串行预计算 UNSFIN 台账（原 EDDA/BJ）",
+            "live": "实时双层（Taichi 实验）",
+        },
+    },
+    "experimental.enable_live_doublelayer_in_dfs": {
+        "value_type": "boolean",
+        "allowed_values": [False, True],
+        "value_labels_zh": {
+            "false": "锁定",
+            "true": "已解锁",
+        },
+    },
+    "boundary_conditions.mode": {
+        "value_type": "enum",
+        "allowed_values": ["auto", "file", "manual"],
+        "value_labels_zh": {
+            "auto": "自动检测",
+            "file": "边界文件",
+            "manual": "手动指定",
+        },
+    },
+    "boundary_conditions.default_type": {
+        "value_type": "enum",
+        "allowed_values": ["outflow", "wall", "periodic"],
+        "value_labels_zh": {
+            "outflow": "出流",
+            "wall": "固壁",
+            "periodic": "周期",
+        },
+    },
+    "boundary_conditions.include_nodata": {
+        "value_type": "boolean",
+        "allowed_values": [False, True],
+        "value_labels_zh": {
+            "false": "否",
+            "true": "是",
+        },
+    },
 }
 
 # ``background_flux_offset`` now has one canonical, strict EDDA control path.
@@ -241,6 +477,9 @@ CASE_CONFIG_OVERRIDE_PATHS = {
     "coedepo": ["erosion.coedepo", "erosion.k_deposition"],
     "cs": ["rheology.cs"],
     "d50": ["erosion.d50"],
+    "cvlandslide": ["rheology.cvlandslide"],
+    "cvglacier": ["rheology.cvglacier"],
+    "debrisflowmanning": ["rheology.debrisflowmanning"],
     "depth": ["soil.depth", "hydrology.depthwt_initial"],
     "dtmax": ["time.dt_max"],
     "dtmin": ["time.dt_min"],
@@ -276,6 +515,10 @@ CONFIG_PATHS = {
     "initial_infiltration_source": "hydrology.rizero_initial",
     "dfs_infiltration_variant": "hydrology.dfs_infiltration_variant",
     "dfs_face_flux_variant": "hydrology.dfs_face_flux_variant",
+    "dfs_manningbar_variant": "hydrology.dfs_manningbar_variant",
+    "dfs_dry_face_velocity_variant": "hydrology.dfs_dry_face_velocity_variant",
+    "dfs_artivis_variant": "hydrology.dfs_artivis_variant",
+    "dfs_absubar_variant": "hydrology.dfs_absubar_variant",
     "dfs_failure_source_variant": "hydrology.dfs_failure_source_variant",
     "outflow_point_source": "native_inputs.files.outflow",
     "inflow_source": "native_inputs.files.inflow",
@@ -289,7 +532,10 @@ LABELS = {
     "beta2": "Quadratic rheology beta2",
     "coedepo": "Deposition coefficient",
     "cs": "Suspension coefficient",
+    "cvglacier": "Glacier volumetric concentration",
+    "cvlandslide": "Landslide volumetric concentration",
     "d50": "Median particle diameter",
+    "debrisflowmanning": "Debris-flow Manning coefficient",
     "depth": "Soil depth / initial water table fallback",
     "dtmax": "Maximum timestep",
     "dtmin": "Minimum timestep",
@@ -309,7 +555,7 @@ LABELS = {
     "tout": "Output interval",
     "uww": "Water unit weight",
     "wavemax": "Dynamic-wave stability coefficient",
-    "zones": "Spatial zone parameters",
+    "spatial_zones.zones": "Spatial zone parameters",
     "zonfil": "Zone raster file",
     "hydrology.use_background_flux_offset": "Background infiltration offset",
     "hydrology.K_sat": "Saturated hydraulic conductivity",
@@ -330,6 +576,20 @@ LABELS = {
     "initial_infiltration_source": "Initial infiltration source",
     "dfs_infiltration_variant": "DFS infiltration variant",
     "dfs_face_flux_variant": "DFS face-flux variant",
+    "hydrology.dfs_face_flux_variant": "DFS face-flux variant",
+    "dfs_manningbar_variant": "DFS Manning-bar variant",
+    "hydrology.dfs_manningbar_variant": "DFS Manning-bar variant",
+    "dfs_dry_face_velocity_variant": "DFS dry-face velocity variant",
+    "hydrology.dfs_dry_face_velocity_variant": "DFS dry-face velocity variant",
+    "dfs_artivis_variant": "DFS artificial-viscosity variant",
+    "hydrology.dfs_artivis_variant": "DFS artificial-viscosity variant",
+    "dfs_absubar_variant": "DFS erosion velocity-magnitude variant",
+    "hydrology.dfs_absubar_variant": "DFS erosion velocity-magnitude variant",
+    "hydrology.dfs_failure_source_policy": "Failure-source policy",
+    "experimental.enable_live_doublelayer_in_dfs": "Unlock live double-layer experiment",
+    "boundary_conditions.mode": "Boundary mode",
+    "boundary_conditions.default_type": "Default boundary type",
+    "boundary_conditions.include_nodata": "Include NODATA as boundary",
     "dfs_failure_source_variant": "Failure-source variant",
     "outflow_point_source": "Outflow observation source",
     "inflow_source": "Inflow forcing source",
@@ -365,7 +625,7 @@ def _entry_from_audit(row: Dict[str, Any]) -> Dict[str, Any]:
     evidence = row.get("evidence") or {}
     status = _runtime_status(row)
     meta = _meta_for(key)
-    return {
+    entry = {
         "key": key,
         "label": LABELS.get(key, key.replace("_", " ").replace(".", " / ")),
         "label_zh": meta.get("label_zh"),
@@ -383,6 +643,36 @@ def _entry_from_audit(row: Dict[str, Any]) -> Dict[str, Any]:
         "output_evidence": row.get("output_evidence") or [],
         "evidence": evidence,
     }
+    _apply_enum_spec(entry, PARAMETER_ENUM_SPECS.get(key))
+    return entry
+
+
+def is_gate_parameter_key(key: str) -> bool:
+    text = str(key or "")
+    if text in STATIC_GATE_PARAMETER_KEYS:
+        return True
+    return (
+        text.startswith("edda.run_controls.")
+        or text.startswith("edda.output_controls.")
+        or text.startswith("experimental.")
+    )
+
+
+def gate_parameter_keys() -> set[str]:
+    keys = set(STATIC_GATE_PARAMETER_KEYS)
+    for spec in EDDA_SWITCH_REGISTRY:
+        keys.add(spec.taichi_config_path)
+    return keys
+
+
+def _apply_enum_spec(entry: Dict[str, Any], enum_spec: Optional[Dict[str, Any]]) -> None:
+    if not enum_spec:
+        return
+    entry["value_type"] = enum_spec["value_type"]
+    if enum_spec.get("allowed_values") is not None:
+        entry["allowed_values"] = list(enum_spec["allowed_values"])
+    if enum_spec.get("value_labels_zh"):
+        entry["allowed_value_labels_zh"] = dict(enum_spec["value_labels_zh"])
 
 
 def _unsupported_entries(provenance: Optional[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
@@ -444,23 +734,26 @@ def build_static_parameter_catalog() -> Dict[str, Any]:
             continue
         meta = _meta_for(key)
         editable = key in EDITABLE_PARAMETERS
-        parameters.append(
-            {
-                "key": key,
-                "label": LABELS.get(key, key),
-                "label_zh": meta.get("label_zh") or LABELS.get(key, key),
-                "abbrev": meta.get("abbrev") or key.split(".")[-1],
-                "group": meta.get("group") or key.split(".")[0],
-                "config_path": CONFIG_PATHS.get(key) or key,
-                "parser_field": meta.get("abbrev"),
-                "runtime_consumer": CONFIG_PATHS.get(key) or key,
-                "activation_condition": "direct_config_payload",
-                "runtime_status": "production_consumed" if editable else "mapped_only",
-                "editable": editable,
-                "output_evidence": [],
-                "evidence": {"source": "static_catalog", "edda_in": True},
-            }
-        )
+        entry = {
+            "key": key,
+            "label": LABELS.get(key, key),
+            "label_zh": meta.get("label_zh") or LABELS.get(key, key),
+            "description_zh": meta.get("description_zh"),
+            "abbrev": meta.get("abbrev") or key.split(".")[-1],
+            "group": meta.get("group") or key.split(".")[0],
+            "config_path": CONFIG_PATHS.get(key) or key,
+            "parser_field": meta.get("abbrev"),
+            "runtime_consumer": CONFIG_PATHS.get(key) or key,
+            "activation_condition": "direct_config_payload",
+            "runtime_status": "production_consumed" if editable else "mapped_only",
+            "editable": editable,
+            "output_evidence": [],
+            "evidence": {"source": "static_catalog", "edda_in": True},
+        }
+        if key == "spatial_zones.zones":
+            entry["value_type"] = "structured"
+        _apply_enum_spec(entry, PARAMETER_ENUM_SPECS.get(key))
+        parameters.append(entry)
     for spec in EDDA_SWITCH_REGISTRY:
         localized = EDDA_CONTROL_META_ZH.get(spec.key, {})
         parameters.append(
@@ -525,6 +818,7 @@ def build_static_parameter_catalog() -> Dict[str, Any]:
                 spec.frontend_policy != "editable" for spec in EDDA_SWITCH_REGISTRY
             ),
         },
+        "gate_parameter_keys": sorted(gate_parameter_keys()),
     }
 
 
@@ -614,8 +908,11 @@ def build_case_config_interface(parsed: ReferenceConfigParseResult) -> Dict[str,
             "manning_global": parsed.manning_global,
             "limitfr": parsed.limitfr,
             "shallown": parsed.shallown,
+            "debrisflowmanning": getattr(parsed, "debrisflowmanning", None),
             "d50": parsed.d50,
             "cvstar": parsed.cvstar,
+            "cvglacier": getattr(parsed, "cvglacier", None),
+            "cvlandslide": getattr(parsed, "cvlandslide", None),
             "coedepo": parsed.coedepo,
             "cs": parsed.cs,
         },

@@ -17,6 +17,11 @@ def _create_project(client: TestClient, root: Path, name: str = "Slope study") -
 
 
 def _create_ready_scenario(client: TestClient, project: dict, name: str) -> dict:
+    gates = client.put(
+        "/api/settings/compute-gates",
+        json={"values": {"edda.run_controls.simulate_rainfall": False}},
+    )
+    assert gates.status_code == 200
     dem = client.post(
         f"/api/projects/{project['project_id']}/uploads/dem",
         files={"file": (f"{name}.asc", b"ncols 1\nnrows 1\ncellsize 1\n1\n", "text/plain")},
@@ -117,7 +122,7 @@ def test_content_addressed_revision_and_evidence_gated_scenario(tmp_path: Path) 
         assert rejected.json()["code"] == "parameter_not_editable"
 
 
-def test_edda_compute_controls_round_trip_through_scenario_public_api(tmp_path: Path) -> None:
+def test_edda_compute_controls_round_trip_through_global_settings_api(tmp_path: Path) -> None:
     with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
         project = _create_project(client, tmp_path / "compute-controls")
         created = client.post(
@@ -126,7 +131,7 @@ def test_edda_compute_controls_round_trip_through_scenario_public_api(tmp_path: 
         )
         assert created.status_code == 201
         scenario = created.json()
-        assert scenario["parameter_template_id"] == "pt-bj-hxl-v3"
+        assert scenario["parameter_template_id"] == "pt-bj-hxl-v4"
         assert scenario["parameter_baseline"]["edda.registry_version"] == "1.0.0"
         assert sum(
             key.startswith(("edda.run_controls.", "edda.output_controls."))
@@ -137,31 +142,35 @@ def test_edda_compute_controls_round_trip_through_scenario_public_api(tmp_path: 
             "edda.run_controls.simulate_rainfall": False,
             "edda.output_controls.save_flow_depth": False,
         }
-        saved = client.patch(
+        stripped = client.patch(
             f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
             json={"parameter_patch": patch, "expected_version": scenario["version"]},
         )
-        assert saved.status_code == 200
-        assert saved.json()["parameter_patch"] == patch
-        assert saved.json()["effective_parameters"]["edda.run_controls.simulate_rainfall"] is False
-        assert saved.json()["effective_parameters"]["edda.output_controls.save_flow_depth"] is False
-        assert saved.json()["effective_parameters"]["edda.output_controls.save_max_flow_depth"] is True
+        assert stripped.status_code == 200
+        assert stripped.json()["parameter_patch"] == {}
+        assert stripped.json()["effective_parameters"]["edda.run_controls.simulate_rainfall"] is True
+
+        written = client.put("/api/settings/compute-gates", json={"values": patch})
+        assert written.status_code == 200
+        refreshed = client.get(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}"
+        )
+        assert refreshed.status_code == 200
+        assert refreshed.json()["parameter_patch"] == {}
+        assert refreshed.json()["effective_parameters"]["edda.run_controls.simulate_rainfall"] is False
+        assert refreshed.json()["effective_parameters"]["edda.output_controls.save_flow_depth"] is False
+        assert refreshed.json()["effective_parameters"]["edda.output_controls.save_max_flow_depth"] is True
 
         configuration = client.get(
             f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}/configuration"
         )
         assert configuration.status_code == 200
-        assert configuration.json()["overrides"] == patch
+        assert configuration.json()["overrides"] == {}
         assert configuration.json()["effective"]["edda.run_controls.simulate_rainfall"] is False
 
-        restricted = client.patch(
-            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
-            json={
-                "parameter_patch": {
-                    "edda.run_controls.simulate_debris_flow": False,
-                },
-                "expected_version": saved.json()["version"],
-            },
+        restricted = client.put(
+            "/api/settings/compute-gates",
+            json={"values": {"edda.run_controls.simulate_debris_flow": False}},
         )
         assert restricted.status_code == 422
         assert restricted.json()["code"] == "parameter_not_editable"
@@ -201,3 +210,58 @@ def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> Non
         persisted = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
         assert {item["status"] for item in persisted} == {"queued", "cancelled"}
         assert any(item["retry_of"] == first.json()["queue_item_id"] for item in persisted)
+
+
+def test_queue_freezes_policy_and_retry_reuses_original_snapshot(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "freeze-project")
+        scenario = _create_ready_scenario(client, project, "Frozen policy")
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+
+        queued = client.post(queue_url, json={"scenario_id": scenario["scenario_id"]})
+        assert queued.status_code == 201
+        original = queued.json()
+        assert original["compute_policy_resolution"]["status"] == "resolved"
+        original_mode = original["compute_policy_resolution"]["effective"]["mode"]
+
+        changed = client.put(
+            "/api/settings/compute-gates",
+            json={"values": {"hydrology.dfs_failure_source_policy": "disabled"}},
+        )
+        assert changed.status_code == 200
+
+        persisted = client.get(queue_url).json()["items"]
+        current = next(item for item in persisted if item["queue_item_id"] == original["queue_item_id"])
+        assert current["compute_policy_resolution"]["effective"]["mode"] == original_mode
+
+        cancelled = client.delete(f"{queue_url}/{original['queue_item_id']}")
+        assert cancelled.status_code == 200
+        retried = client.post(f"{queue_url}/{original['queue_item_id']}/retry")
+        assert retried.status_code == 201
+        assert retried.json()["compute_policy_resolution"]["effective"]["mode"] == original_mode
+
+
+def test_claim_copies_queue_policy_into_simulation_and_runtime_payload(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "claim-freeze-project")
+        scenario = _create_ready_scenario(client, project, "Claim frozen policy")
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+        queued = client.post(queue_url, json={"scenario_id": scenario["scenario_id"]})
+        assert queued.status_code == 201
+        item = queued.json()
+
+        changed = client.put(
+            "/api/settings/compute-gates",
+            json={"values": {"hydrology.dfs_failure_source_policy": "disabled"}},
+        )
+        assert changed.status_code == 200
+
+        store = client.app.state.workbench
+        context = store.claim_queue_item(project["project_id"], item["queue_item_id"])
+        expected = item["compute_policy_resolution"]
+        assert context["compute_policy_resolution"] == expected
+        simulation = store.public_simulation(
+            project["project_id"],
+            store.simulation_row(project["project_id"], context["simulation_id"]),
+        )
+        assert simulation["compute_policy_resolution"] == expected

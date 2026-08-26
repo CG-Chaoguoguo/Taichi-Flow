@@ -9,6 +9,7 @@ import type {
   ParameterCatalog,
   ParameterImportPreview,
   ParameterTemplate,
+  ComputeGateDefaults,
   ProjectInfo,
   RuntimeLock,
   QueueItem,
@@ -325,7 +326,7 @@ export const migrationApi = {
 
 export const queueApi = {
   getQueue: async (projectId: string): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue`)).items,
-  enqueueScenario: (projectId: string, scenarioId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId })),
+  enqueueScenario: (projectId: string, scenarioId: string, runtimeProfile?: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId, runtime_profile: runtimeProfile })),
   reorderQueue: async (projectId: string, itemId: string, newPosition: number): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue/order`, putJson({ item_id: itemId, new_position: newPosition }))).items,
   cancelQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stopRunningItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/stop`, json({})),
@@ -368,6 +369,11 @@ export const systemApi = {
   health: () => request<{ status: string }>("/health"),
   parameterCatalog: () => request<ParameterCatalog>("/parameters/catalog"),
   directories: (path?: string) => request<DirectoryListing>(`/system/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+};
+
+export const settingsApi = {
+  getComputeGates: () => request<ComputeGateDefaults>("/settings/compute-gates"),
+  putComputeGates: (values: Record<string, unknown>) => request<ComputeGateDefaults>("/settings/compute-gates", { method: "PUT", body: JSON.stringify({ values }) }),
 };
 
 export { request };

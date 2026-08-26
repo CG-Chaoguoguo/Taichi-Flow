@@ -161,6 +161,8 @@ class RuntimeRunExecutor:
                 case_input_files=context.get("case_input_files") or {},
                 runtime_profile_name=context.get("runtime_profile"),
                 session_id=simulation_id,
+                frozen_effective_config=context.get("effective_config"),
+                frozen_compute_policy_resolution=context.get("compute_policy_resolution"),
             )
             # The queue id is the durable identity; preparation creates a
             # transient UUID for standalone legacy calls, so replace it here.

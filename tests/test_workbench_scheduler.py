@@ -182,4 +182,38 @@ def test_schema_v6_migrates_structured_error_columns(tmp_path: Path) -> None:
         ).fetchone()["value"]
 
     assert {"error_code", "error_details_json"} <= columns
-    assert version == "7"
+    assert version == "9"
+
+
+def test_schema_v8_migrates_compute_policy_snapshot_columns(tmp_path: Path) -> None:
+    database = ProjectDatabase(tmp_path / "legacy-v8-project")
+    database.initialize(
+        project_id="prj-legacy-v8",
+        name="Legacy v8",
+        description="compute policy migration fixture",
+        created_at="2026-08-25T00:00:00+00:00",
+    )
+    with database.connect() as connection:
+        connection.execute("ALTER TABLE simulation_runs DROP COLUMN compute_policy_resolution_json")
+        connection.execute("ALTER TABLE queue_items DROP COLUMN effective_config_json")
+        connection.execute("ALTER TABLE queue_items DROP COLUMN compute_policy_resolution_json")
+        connection.execute("UPDATE schema_metadata SET value='8' WHERE key='schema_version'")
+
+    database.ensure_schema()
+
+    with database.connect() as connection:
+        simulation_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+        }
+        queue_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()["value"]
+
+    assert "compute_policy_resolution_json" in simulation_columns
+    assert {"effective_config_json", "compute_policy_resolution_json"} <= queue_columns
+    assert version == "9"

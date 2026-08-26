@@ -2,13 +2,13 @@ import { FileDiff, RotateCcw, Search, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parameterApi } from "../../api/taichiFlowAdapter";
 import { Button } from "../../components/Button";
-import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
 import { ManningModeEditor } from "../../components/ManningModeEditor";
+import { ZoneSoilEditor, ZONE_TAKEN_OVER_KEYS, countSpatialZones } from "../../components/ZoneSoilEditor";
 import { ParameterGroupSection } from "../../components/ParameterGroupSection";
-import { deriveRainfallTimeline, regularTimeline, resizeRainfallTimeline } from "../../rainfallTimeline";
+import { isGateParameterKey } from "../../constants/computeGates";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
-import type { InputBinding, ParameterCatalogEntry, ParameterImportPreview, RainfallPeriod, RainfallTimeline, Scenario, ValidationIssue, ValidationState } from "../../types";
+import type { InputBinding, ParameterCatalogEntry, ParameterImportPreview, Scenario, ValidationIssue, ValidationState } from "../../types";
 
 const EMPTY_VALIDATION_ISSUES: ValidationIssue[] = [];
 
@@ -32,7 +32,7 @@ const GROUP_LABELS: Record<string, string> = {
 
 const GROUP_ORDER = ["time", "hydrology", "soil", "rheology", "erosion", "spatial_zones", "inputs", "runtime"];
 
-const MODE_EDITOR_KEYS = new Set(["rainfall.mode", "rainfall.periods", "rainfall.timeline", "manning.source"]);
+const MODE_EDITOR_KEYS = new Set(["rainfall.mode", "rainfall.periods", "rainfall.timeline", "manning.source", "spatial_zones.zones"]);
 const UNIT_BY_KEY: Record<string, string> = {
   "time.t_start": "s",
   "time.t_end": "s",
@@ -42,20 +42,10 @@ const UNIT_BY_KEY: Record<string, string> = {
   "rheology.rho_s": "kg/m³",
   "rheology.d50": "m",
   "rheology.n_manning": "—",
+  "rheology.debrisflowmanning": "—",
+  "rheology.cvlandslide": "—",
+  "rheology.cvglacier": "—",
 };
-
-function getPeriods(draftPatch: Record<string, unknown>, baseline: Record<string, unknown>): RainfallPeriod[] {
-  const value = draftPatch["rainfall.periods"] ?? baseline["rainfall.periods"];
-  return Array.isArray(value) ? value as RainfallPeriod[] : [];
-}
-
-function getTimeline(draftPatch: Record<string, unknown>, baseline: Record<string, unknown>, periods: RainfallPeriod[]): RainfallTimeline {
-  const value = draftPatch["rainfall.timeline"] ?? baseline["rainfall.timeline"];
-  if (value && typeof value === "object" && Array.isArray((value as RainfallTimeline).boundaries_s)) {
-    return value as RainfallTimeline;
-  }
-  return deriveRainfallTimeline(periods);
-}
 
 export function ParameterModule({
   scenario,
@@ -64,7 +54,6 @@ export function ParameterModule({
   draftBindings = [],
   onDraftChange,
   onBindingsChange = () => undefined,
-  onOpenRainfall = () => undefined,
   validation,
 }: {
   scenario: Scenario;
@@ -91,7 +80,6 @@ export function ParameterModule({
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<ParameterImportPreview | null>(null);
   const [importing, setImporting] = useState(false);
-  const [pendingEndTime, setPendingEndTime] = useState<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(["time"]));
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -99,23 +87,31 @@ export function ParameterModule({
     if (!catalog) void fetchParameterCatalog();
   }, [catalog, fetchParameterCatalog]);
 
+  const rainfallEnabled = (
+    scenario.effective_parameters?.["edda.run_controls.simulate_rainfall"]
+    ?? scenario.parameter_baseline?.["edda.run_controls.simulate_rainfall"]
+  ) !== false;
+
   const entries = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return (catalog?.parameters || []).filter((entry) => {
-      if (entry.control_family === "edda") return false;
+      if (entry.control_family === "edda" || isGateParameterKey(entry.key)) return false;
       if (MODE_EDITOR_KEYS.has(entry.key)) return false;
+      if (entry.key === "time.t_end" && rainfallEnabled) return false;
       if (!(entry.editable || entry.label_zh || entry.abbrev)) return false;
       if (!needle) return true;
       return [entry.label, entry.label_zh, entry.abbrev, entry.key, entry.parser_field]
         .filter(Boolean).join(" ").toLowerCase().includes(needle);
     });
-  }, [catalog, search]);
-  const eddaControlEntries = useMemo(
-    () => (catalog?.parameters || []).filter((entry) => entry.control_family === "edda"),
-    [catalog],
-  );
+  }, [catalog, rainfallEnabled, search]);
 
   const canEdit = !readOnly && (scenario.status === "draft" || scenario.status === "ready");
+  const zoneCount = countSpatialZones(
+    draftPatch["spatial_zones.zones"] === undefined
+      ? scenario.parameter_baseline?.["spatial_zones.zones"]
+      : draftPatch["spatial_zones.zones"],
+  );
+  const multiZone = zoneCount > 1;
   const groups = useMemo(() => {
     const grouped = new Map<string, ParameterCatalogEntry[]>();
     for (const entry of entries) {
@@ -133,66 +129,19 @@ export function ParameterModule({
   const issueCountForGroup = (groupEntries: ParameterCatalogEntry[]) => groupEntries.reduce((count, entry) => count + issueForEntry(entry).length, 0);
   const autoExpandedGroups = useMemo(() => {
     const next = new Set<string>(["time"]);
+    if (zoneCount > 0) next.add("soil");
     for (const [group, groupEntries] of groups) {
       if (groupEntries.some((entry) => draftPatch[entry.key] !== undefined) || issueCountForGroup(groupEntries) > 0) next.add(group);
     }
     return next;
-  }, [draftPatch, groups, validationIssues]);
+  }, [draftPatch, groups, validationIssues, zoneCount]);
   useEffect(() => {
     setExpandedGroups(autoExpandedGroups);
   }, [scenario.scenario_id, autoExpandedGroups]);
-  const periods = getPeriods(draftPatch, scenario.parameter_baseline || {});
-  const rainfallTimeline = getTimeline(draftPatch, scenario.parameter_baseline || {}, periods);
-  const uniformCount = periods.filter((period) => !["raster", "rifil", "raster_rifil"].includes(String(period.source))).length;
-  const rasterCount = periods.length - uniformCount;
-  const rainfallIssues = validationIssues.filter((issue) => issue.parameter_key?.startsWith("rainfall.") || issue.binding_key?.startsWith("rainfall."));
   const manningIssues = validationIssues.filter((issue) => issue.parameter_key?.startsWith("manning.") || issue.parameter_key === "rheology.n_manning" || issue.binding_key === "manning.raster");
-  const reconciledTimeline = useMemo(() => {
-    if (pendingEndTime == null) return { value: null, error: null };
-    const interval = rainfallTimeline.interval_s
-      ?? (rainfallTimeline.boundaries_s.length > 1 ? rainfallTimeline.boundaries_s[1] - rainfallTimeline.boundaries_s[0] : 0);
-    try {
-      return {
-        value: regularTimeline(Number(rainfallTimeline.start_s ?? 0), pendingEndTime, Number(interval), "simulation_end_sync"),
-        error: null,
-      };
-    } catch (reason) {
-      return { value: null, error: reason instanceof Error ? reason.message : "无法按当前间隔重算降雨时段。" };
-    }
-  }, [pendingEndTime, rainfallTimeline]);
 
   const changeParameter = (entry: ParameterCatalogEntry, raw: string) => {
-    const value = parseValue(raw);
-    if (entry.key === "time.t_end" && typeof value === "number" && periods.length) {
-      const currentEnd = Number(periods[periods.length - 1]?.end_s || 0);
-      if (value !== currentEnd) {
-        setPendingEndTime(value);
-        return;
-      }
-    }
-    onDraftChange({ ...draftPatch, [entry.key]: value });
-  };
-
-  const confirmEndTime = (mode: "sync" | "simulation-only") => {
-    if (pendingEndTime == null) return;
-    if (mode === "sync") {
-      if (!reconciledTimeline.value) return;
-      const resized = resizeRainfallTimeline(periods, draftBindings, reconciledTimeline.value);
-      onDraftChange({
-        ...draftPatch,
-        "time.t_end": pendingEndTime,
-        "rainfall.timeline": reconciledTimeline.value,
-        "rainfall.periods": resized.periods,
-      });
-      onBindingsChange(resized.bindings);
-      setPendingEndTime(null);
-      return;
-    }
-    onDraftChange({
-      ...draftPatch,
-      "time.t_end": pendingEndTime,
-    });
-    setPendingEndTime(null);
+    onDraftChange({ ...draftPatch, [entry.key]: parseValue(raw) });
   };
 
   const previewImport = async (file: File) => {
@@ -246,48 +195,6 @@ export function ParameterModule({
         </section>
       ) : null}
 
-      {pendingEndTime != null ? (
-        <section className="tf-time-reconcile">
-          <strong>终止时间与降雨时间轴不一致</strong>
-          <div className="tf-caption tf-text-tertiary">
-            新模拟终止时间为 {pendingEndTime} s。请选择是否按现有间隔重新计算时段，系统不会静默拉长最后一段。
-          </div>
-          {reconciledTimeline.value ? (
-            <div className="tf-caption">同步后为 {reconciledTimeline.value.period_count} 个时段，每段 {reconciledTimeline.value.interval_s} s。</div>
-          ) : (
-            <div className="tf-caption tf-text-danger">{reconciledTimeline.error}</div>
-          )}
-          <div className="tf-row tf-gap-2">
-            <Button size="small" disabled={!reconciledTimeline.value} onClick={() => confirmEndTime("sync")}>
-              {pendingEndTime > Number(rainfallTimeline.end_s || 0) ? "扩展并重算时段" : "截断并重算时段"}
-            </Button>
-            <Button variant="ghost" size="small" onClick={() => confirmEndTime("simulation-only")}>仅修改模拟终点</Button>
-            <Button variant="ghost" size="small" onClick={() => setPendingEndTime(null)}>取消</Button>
-          </div>
-        </section>
-      ) : null}
-
-      {catalog?.control_registry && eddaControlEntries.length ? (
-        <EddaComputeControlsSection
-          entries={eddaControlEntries}
-          controlRegistry={catalog.control_registry}
-          baseline={scenario.parameter_baseline || {}}
-          draftPatch={draftPatch}
-          canEdit={canEdit}
-          onDraftChange={onDraftChange}
-        />
-      ) : null}
-
-      <section className="tf-card tf-card-flush tf-rainfall-summary-card">
-        <div className="tf-body tf-group-header tf-font-semibold">降雨过程</div>
-        <div className="tf-card-body-sm tf-stack tf-gap-2">
-          <div className="tf-rainfall-summary-metrics"><span><strong>{periods.length}</strong> 时段</span><span><strong>{uniformCount}</strong> 均匀</span><span><strong>{rasterCount}</strong> 栅格</span></div>
-          <div className="tf-caption tf-text-tertiary">雨强默认按 mm/h 编辑，后端统一存储 m/s；栅格通过逐时段资产绑定表达。</div>
-          <Button size="small" fullWidth disabled={!periods.length} onClick={onOpenRainfall}>在中央工作区编辑降雨过程</Button>
-          {rainfallIssues[0] ? <div className="tf-caption tf-text-danger" role="status">{rainfallIssues[0].message}</div> : null}
-        </div>
-      </section>
-
       <ManningModeEditor
         draftPatch={draftPatch}
         baseline={scenario.parameter_baseline || {}}
@@ -299,6 +206,18 @@ export function ParameterModule({
         readOnly={readOnly}
       />
       {manningIssues[0] ? <div className="tf-caption tf-text-danger" role="status">{manningIssues[0].message}</div> : null}
+      <ZoneSoilEditor
+        draftPatch={draftPatch}
+        baseline={scenario.parameter_baseline || {}}
+        onDraftChange={onDraftChange}
+        canEdit={canEdit}
+        readOnly={readOnly}
+      />
+      {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0] ? (
+        <div className="tf-caption tf-text-danger" role="status">
+          {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0].message}
+        </div>
+      ) : null}
 
       {!catalog && (catalogLoading || !catalogError) ? <div className="tf-empty tf-body tf-text-tertiary" role="status">正在加载参数证据目录…</div> : null}
       {!catalog && catalogError ? (
@@ -325,18 +244,20 @@ export function ParameterModule({
           })}
         >
             {groupEntries.map((entry) => {
+              const takenOver = multiZone && ZONE_TAKEN_OVER_KEYS.includes(entry.key as typeof ZONE_TAKEN_OVER_KEYS[number]);
+              const fieldEntry = takenOver ? { ...entry, editable: false } : entry;
               const defaultValue = scenario.parameter_baseline?.[entry.key];
-              const overrideValue = draftPatch[entry.key];
+              const overrideValue = takenOver ? undefined : draftPatch[entry.key];
               const effectiveValue = overrideValue === undefined ? defaultValue : overrideValue;
               return (
                 <EffectiveParameterField
                   key={entry.key}
-                  entry={entry}
+                  entry={fieldEntry}
                   defaultValue={defaultValue}
                   overrideValue={overrideValue}
                   effectiveValue={effectiveValue}
                   unit={UNIT_BY_KEY[entry.key]}
-                  disabled={!canEdit}
+                  disabled={!canEdit || takenOver}
                   onChange={(value) => changeParameter(entry, value)}
                   onReset={() => { const next = { ...draftPatch }; delete next[entry.key]; onDraftChange(next); }}
                 />

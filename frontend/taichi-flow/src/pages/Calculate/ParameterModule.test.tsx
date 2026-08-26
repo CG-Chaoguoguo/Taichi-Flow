@@ -32,6 +32,32 @@ const catalog: ParameterCatalog = {
       dependencies: [],
       dependency_paths: [],
     },
+    {
+      key: "hydrology.dfs_face_flux_variant",
+      label: "DFS face-flux variant",
+      label_zh: "面通量平均变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["both_thin_weighted"],
+    },
+    {
+      key: "time.dt_max",
+      label: "Max dt",
+      label_zh: "最大时间步",
+      group: "time",
+      runtime_status: "production_consumed",
+      editable: true,
+    },
+    {
+      key: "soil.c",
+      label: "Cohesion",
+      label_zh: "黏聚力",
+      group: "soil",
+      runtime_status: "production_consumed",
+      editable: true,
+    },
   ],
 };
 
@@ -44,11 +70,18 @@ const scenario: Scenario = {
   parameter_baseline: {
     "edda.registry_version": "1.0.0",
     "edda.run_controls.simulate_rainfall": true,
+    "time.dt_max": 2,
+    "soil.c": 10000,
+    "spatial_zones.zones": {
+      "1": { zone_id: 1, phi: 42, K_sat_top: 8e-6, K_sat_bottom: 2e-7, cvero: 0.6 },
+      "2": { zone_id: 2, phi: 20, K_sat_top: 4e-6, K_sat_bottom: 9e-7, cvero: 0.3 },
+    },
   },
   parameter_patch: {},
   effective_parameters: {
     "edda.registry_version": "1.0.0",
     "edda.run_controls.simulate_rainfall": true,
+    "time.dt_max": 2,
   },
   input_bindings: [],
   status: "draft",
@@ -69,7 +102,7 @@ describe("ParameterModule compute controls integration", () => {
     });
   });
 
-  it("places canonical compute controls first and shares the scenario draft", () => {
+  it("keeps scientific parameters and hides compute gates and rainfall summary", () => {
     const onDraftChange = vi.fn();
     const { container } = render(
       <ParameterModule
@@ -80,10 +113,28 @@ describe("ParameterModule compute controls integration", () => {
       />,
     );
 
-    const compute = screen.getByTestId("edda-compute-controls");
-    const rainfall = container.querySelector(".tf-rainfall-summary-card");
-    expect(rainfall).not.toBeNull();
-    expect(compute.compareDocumentPosition(rainfall as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "模拟降雨" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("edda-compute-controls")).toBeNull();
+    expect(container.querySelector(".tf-rainfall-summary-card")).toBeNull();
+    expect(screen.queryByText("面通量平均变种")).toBeNull();
+    expect(screen.queryByText("干面速度清零变种")).toBeNull();
+    expect(screen.queryByText("人工黏性权重变种")).toBeNull();
+    expect(screen.queryByText("侵蚀速度模变种")).toBeNull();
+    expect(screen.getByText("最大时间步")).toBeInTheDocument();
+  });
+
+  it("shows the zone soil editor and locks global cohesion when multiple zones exist", () => {
+    const onDraftChange = vi.fn();
+    const { container } = render(
+      <ParameterModule
+        scenario={scenario}
+        draftPatch={{}}
+        draftBindings={[]}
+        onDraftChange={onDraftChange}
+      />,
+    );
+    expect(screen.getByTestId("zone-soil-editor")).toBeInTheDocument();
+    expect(screen.getByText("按分区编辑双层土参数")).toBeInTheDocument();
+    const cohesion = container.querySelector('[data-parameter-key="soil.c"]');
+    expect(cohesion?.textContent).toMatch(/只读/);
   });
 });

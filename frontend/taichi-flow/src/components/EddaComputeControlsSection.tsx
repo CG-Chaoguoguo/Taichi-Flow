@@ -24,6 +24,10 @@ export function EddaComputeControlsSection({
   draftPatch,
   canEdit,
   onDraftChange,
+  title = "计算",
+  subtitle = "原 EDDA 控制按语义证据门禁写入当前计算方案",
+  overrideChipLabel = "方案覆盖",
+  baselineChipLabel = "模板默认",
 }: {
   entries: ParameterCatalogEntry[];
   controlRegistry: EddaControlRegistrySummary;
@@ -31,6 +35,10 @@ export function EddaComputeControlsSection({
   draftPatch: Record<string, unknown>;
   canEdit: boolean;
   onDraftChange: (patch: Record<string, unknown>) => void;
+  title?: string;
+  subtitle?: string;
+  overrideChipLabel?: string;
+  baselineChipLabel?: string;
 }) {
   const byPath = new Map(entries.map((entry) => [entry.key, entry]));
   const editable = entries.filter((entry) => entry.editable && entry.value_type === "boolean");
@@ -53,7 +61,7 @@ export function EddaComputeControlsSection({
         <div className="tf-edda-control-copy">
           <div className="tf-row tf-gap-1 tf-items-center">
             <span className="tf-body tf-font-medium">{title}</span>
-            <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? "方案覆盖" : "模板默认"}</span>
+            <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? overrideChipLabel : baselineChipLabel}</span>
           </div>
           {entry.description_zh ? <div className="tf-caption tf-text-tertiary">{entry.description_zh}</div> : null}
           {missingDependencies.length ? (
@@ -100,8 +108,8 @@ export function EddaComputeControlsSection({
       <header className="tf-edda-compute-header">
         <Calculator size={17} aria-hidden="true" />
         <div className="tf-flex-1">
-          <h2 className="tf-body tf-font-semibold">计算</h2>
-          <div className="tf-caption tf-text-tertiary">原 EDDA 控制按语义证据门禁写入当前计算方案</div>
+          <h2 className="tf-body tf-font-semibold">{title}</h2>
+          <div className="tf-caption tf-text-tertiary">{subtitle}</div>
         </div>
         <span className="tf-edda-control-count">{controlRegistry.editable_count} 项可编辑</span>
       </header>

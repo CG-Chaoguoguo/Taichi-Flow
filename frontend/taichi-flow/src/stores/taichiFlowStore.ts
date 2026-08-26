@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueItem, ResultFamily, Scenario, ScenarioConfiguration, SimulationRun, SystemMetrics, Toast } from "../types";
-import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, systemApi } from "../api/taichiFlowAdapter";
+import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type Scenario, type ScenarioConfiguration, type SimulationRun, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
+import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, settingsApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
 import { applyTheme, TAICHI_FLOW_PREFERENCES_STORAGE_KEY, type ThemeMode } from "../themePreference";
@@ -70,6 +70,7 @@ interface TaichiFlowStore {
   serviceOnline: boolean;
   metrics: SystemMetrics;
   parameterCatalog: ParameterCatalog | null;
+  computeGateDefaults: ComputeGateDefaults | null;
   parameterTemplates: ParameterTemplate[];
   scenarioConfigurations: Record<string, ScenarioConfiguration>;
   caseConfigInterface: CaseConfigInterface | null;
@@ -129,7 +130,7 @@ interface TaichiFlowStore {
   toggleLayerVisibility: (fileId: string) => void;
   createInputRevision: (uploadIds: string[], versionTag?: string) => Promise<InputRevision>;
   fetchQueue: () => Promise<void>;
-  enqueueScenario: (scenarioId: string) => Promise<void>;
+  enqueueScenario: (scenarioId: string, runtimeProfile?: string) => Promise<void>;
   reorderQueue: (itemId: string, newPosition: number) => Promise<void>;
   cancelQueueItem: (itemId: string) => Promise<void>;
   stopRunningItem: (itemId: string) => Promise<void>;
@@ -140,6 +141,8 @@ interface TaichiFlowStore {
   refreshMetrics: () => Promise<void>;
   checkService: () => Promise<void>;
   fetchParameterCatalog: () => Promise<void>;
+  fetchComputeGateDefaults: () => Promise<void>;
+  saveComputeGateDefaults: (values: Record<string, unknown>) => Promise<void>;
   fetchParameterTemplates: () => Promise<void>;
   fetchScenarioConfiguration: (scenarioId: string) => Promise<ScenarioConfiguration | null>;
   fetchCaseConfigInterface: (revisionId?: string | null) => Promise<CaseConfigInterface | null>;
@@ -173,6 +176,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       serviceOnline: false,
       metrics: { cpu_percent: null, gpu_percent: null, gpu_name: null },
       parameterCatalog: null,
+      computeGateDefaults: null,
       parameterTemplates: [],
       scenarioConfigurations: {},
       caseConfigInterface: null,
@@ -438,6 +442,9 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
               baseline: scenario.parameter_baseline || {},
               overrides: scenario.parameter_patch || {},
               effective: scenario.effective_parameters || {},
+              compute_policy_resolution: scenario.compute_policy_resolution
+                || state.scenarioConfigurations[scenarioId]?.compute_policy_resolution
+                || EMPTY_COMPUTE_POLICY_RESOLUTION,
               bindings: scenario.input_bindings || [],
               validation: state.scenarioConfigurations[scenarioId]?.validation || { valid: false, errors: [], warnings: [] },
               version: scenario.version || 1,
@@ -607,10 +614,10 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
           set((state) => ({ errors: { ...state.errors, queue: errorMessage(error) } }));
         }
       },
-      enqueueScenario: async (scenarioId) => {
+      enqueueScenario: async (scenarioId, runtimeProfile) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.enqueueScenario(project.project_id, scenarioId);
+        await queueApi.enqueueScenario(project.project_id, scenarioId, runtimeProfile);
         await get().fetchQueue();
         await get().fetchScenarios();
         set({ dockTab: "queue" });
@@ -691,6 +698,27 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
           set((state) => ({ errors: { ...state.errors, parameters: errorMessage(error) } }));
         } finally {
           set((state) => ({ loading: { ...state.loading, parameters: false } }));
+        }
+      },
+      fetchComputeGateDefaults: async () => {
+        set((state) => ({ loading: { ...state.loading, computeGates: true }, errors: { ...state.errors, computeGates: null } }));
+        try {
+          set({ computeGateDefaults: await settingsApi.getComputeGates() });
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, computeGates: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, computeGates: false } }));
+        }
+      },
+      saveComputeGateDefaults: async (values) => {
+        set((state) => ({ loading: { ...state.loading, computeGates: true }, errors: { ...state.errors, computeGates: null } }));
+        try {
+          set({ computeGateDefaults: await settingsApi.putComputeGates(values) });
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, computeGates: errorMessage(error) } }));
+          throw error;
+        } finally {
+          set((state) => ({ loading: { ...state.loading, computeGates: false } }));
         }
       },
       fetchParameterTemplates: async () => {

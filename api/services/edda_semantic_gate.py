@@ -6,10 +6,13 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from api.services.edda_switch_registry import (
+    EDDA_SWITCH_BY_KEY,
     EDDA_SWITCH_REGISTRY,
     REGISTRY_VERSION,
+    canonical_control_value,
 )
 from edda.config.edda_runtime_plan import EddaRuntimeControlPlan
+from api.services.compute_policy_resolver import compute_policy_resolution_identity
 
 
 @dataclass
@@ -160,7 +163,68 @@ def validate_runtime_control_plan(
             runtime_input_manifest.get("input_source_registry", {})
             .get("dfs_failure_source_variant", {})
         )
-        if not bool(failure_source.get("runtime_active")):
+        resolution = runtime_input_manifest.get("compute_policy_resolution") or {}
+        if resolution:
+            expected_id, expected_hash = compute_policy_resolution_identity(resolution)
+            if resolution.get("resolution_id") not in {None, expected_id} or resolution.get("resolution_hash") not in {None, expected_hash}:
+                _raise(
+                    "compute_policy_resolution_identity_mismatch",
+                    "Runtime manifest policy identity does not match its frozen resolution payload.",
+                    expected_resolution_id=expected_id,
+                    configured_resolution_id=resolution.get("resolution_id"),
+                    expected_resolution_hash=expected_hash,
+                    configured_resolution_hash=resolution.get("resolution_hash"),
+                )
+        if str(resolution.get("status") or "resolved") != "resolved":
+            issue = resolution.get("blocking_issue") or {}
+            _raise(
+                str(issue.get("code") or "compute_policy_resolution_blocked"),
+                str(issue.get("message") or "Failure-source policy resolution is blocked."),
+                resolution=resolution,
+            )
+        effective_mode = failure_source.get("effective_mode") or (resolution.get("effective") or {}).get("mode")
+        if (
+            effective_mode == "disabled"
+            or failure_source.get("skip_reason") == "control_off"
+        ):
+            _raise(
+                "compute_policy_invariant_violation",
+                "simulate_shallow_landslide=true cannot run with a disabled failure-source policy.",
+                control="simulate_shallow_landslide",
+                configured_value=True,
+                effective_mode=effective_mode,
+                selected_source=failure_source.get("selected_source"),
+            )
+        elif effective_mode == "live":
+            if not bool(failure_source.get("runtime_active")) or not bool(
+                failure_source.get("runtime_equivalent_implemented")
+            ) or not bool(failure_source.get("runtime_capability_verified", False)):
+                _raise(
+                    "edda_live_failure_source_unavailable",
+                    "live failure-source policy requires a verified double-layer runtime capability.",
+                    control="simulate_shallow_landslide",
+                    selected_source=failure_source.get("selected_source"),
+                    blocked_reason=failure_source.get("blocked_reason"),
+                    runtime_capability_verified=failure_source.get("runtime_capability_verified"),
+                )
+        elif effective_mode == "precomputed" and (
+            failure_source.get("schedule_loaded") is not True
+            or failure_source.get("schedule_validated") is not True
+            or failure_source.get("schedule_configured_into_solver") is not True
+            or not bool(failure_source.get("runtime_active"))
+        ):
+            _raise(
+                "edda_unsfin_schedule_required",
+                "simulate_shallow_landslide=true requires a validated UNSFIN schedule configured into DFS.",
+                control="simulate_shallow_landslide",
+                configured_value=True,
+                selected_source=failure_source.get("selected_source"),
+                blocked_reason=failure_source.get("blocked_reason"),
+                schedule_loaded=failure_source.get("schedule_loaded"),
+                schedule_validated=failure_source.get("schedule_validated"),
+                schedule_configured_into_solver=failure_source.get("schedule_configured_into_solver"),
+            )
+        elif not bool(failure_source.get("runtime_active")):
             _raise(
                 "edda_unsfin_schedule_required",
                 "simulate_shallow_landslide=true requires a validated UNSFIN schedule configured into DFS.",
@@ -178,22 +242,25 @@ def validate_runtime_control_plan(
     }
 
 
+def _canonical_control_map(prefix: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    controls: dict[str, Any] = {}
+    for key, value in parameters.items():
+        if not str(key).startswith(prefix):
+            continue
+        control_key = str(key)[len(prefix) :]
+        spec = EDDA_SWITCH_BY_KEY.get(control_key)
+        controls[control_key] = canonical_control_value(spec, value) if spec else value
+    return controls
+
+
 def validate_flat_edda_controls(parameters: Mapping[str, Any]) -> dict[str, Any]:
     """Apply the same gate to the workbench's path-free dotted contract."""
     registry_version = parameters.get("edda.registry_version")
     run_prefix = "edda.run_controls."
     output_prefix = "edda.output_controls."
     extension_prefix = "edda.extension_controls."
-    run_controls = {
-        str(key)[len(run_prefix):]: value
-        for key, value in parameters.items()
-        if str(key).startswith(run_prefix)
-    }
-    output_controls = {
-        str(key)[len(output_prefix):]: value
-        for key, value in parameters.items()
-        if str(key).startswith(output_prefix)
-    }
+    run_controls = _canonical_control_map(run_prefix, parameters)
+    output_controls = _canonical_control_map(output_prefix, parameters)
     extension_controls = {
         str(key)[len(extension_prefix):]: value
         for key, value in parameters.items()

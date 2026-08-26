@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from api.routes import cases, parameters, realtime, results_v2, workbench
+from api.routes import cases, parameters, realtime, results_v2, settings, workbench
 from api.services.runmode_capabilities import build_runmode_capabilities
 from api.services.directory_picker import DirectoryPickerService
 from api.services.scheduler import (
@@ -243,6 +243,7 @@ def create_app(
     application.include_router(realtime.router, tags=["realtime"])
     application.include_router(cases.router, prefix="/api/cases", tags=["cases"])
     application.include_router(parameters.router, prefix="/api/parameters", tags=["parameters"])
+    application.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
     @application.get("/api/system/directories", tags=["system"], response_model=DirectoryListingResponse)
     async def system_directories(request: Request, path: Optional[str] = None):

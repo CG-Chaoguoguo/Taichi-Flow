@@ -504,6 +504,24 @@ def build_parameter_audit(
                     output_evidence=outputs,
                 ),
                 _source_registry_parameter_entry(
+                    "dfs_dry_face_velocity_variant",
+                    input_source_registry.get("dfs_dry_face_velocity_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_artivis_variant",
+                    input_source_registry.get("dfs_artivis_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_absubar_variant",
+                    input_source_registry.get("dfs_absubar_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
                     "dfs_failure_source_variant",
                     input_source_registry.get("dfs_failure_source_variant"),
                     consumed=True,

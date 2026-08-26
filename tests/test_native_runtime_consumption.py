@@ -506,7 +506,8 @@ def test_real_solver_loads_original_precomputed_unsfin_schedule_artifacts(tmp_pa
     manifest = {entry["family"]: entry for entry in runtime_input_manifest["inputs"]}
 
     assert registry["selected_source"] == "precomputed_unsfin_schedule"
-    assert registry["schedule_provider"] == "original_tfail_artifacts"
+    assert registry["schedule_provider"] == "uploaded_schedule"
+    assert registry["schedule_provider_detail"] == "original_tfail_artifacts"
     assert registry["schedule_loaded"] is True
     assert registry["runtime_equivalent_implemented"] is True
     assert registry["runtime_active"] is True

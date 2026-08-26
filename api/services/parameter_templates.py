@@ -4,12 +4,17 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict
 
-from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY, REGISTRY_VERSION
+from api.services.edda_switch_registry import (
+    EDDA_SWITCH_REGISTRY,
+    REGISTRY_VERSION,
+    canonical_control_value,
+)
 from api.services.rainfall_timeline import timeline_from_boundaries
 
 BJ_HXL_TEMPLATE_V1_ID = "pt-bj-hxl-v1"
 BJ_HXL_TEMPLATE_V2_ID = "pt-bj-hxl-v2"
-BJ_HXL_TEMPLATE_ID = "pt-bj-hxl-v3"
+BJ_HXL_TEMPLATE_V3_ID = "pt-bj-hxl-v3"
+BJ_HXL_TEMPLATE_ID = "pt-bj-hxl-v4"
 BJ_HXL_SOURCE_HASH = "6ed94a70bd075d392c4cd1ea2659416efc62e2beb0e9c8ca247648ff50cd9689"
 
 BJ_HXL_SWITCH_VALUES: Dict[str, Any] = {
@@ -156,6 +161,7 @@ def _bj_hxl_values() -> Dict[str, Any]:
 
 
 def _template_payload(template_id: str, version: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    topology = values.get("hydrology.dfs_failure_source_variant") or "precomputed_unsfin_schedule"
     return {
         "template_id": template_id,
         "version": version,
@@ -167,6 +173,22 @@ def _template_payload(template_id: str, version: str, values: Dict[str, Any]) ->
         "field_provenance": {
             key: {"source": "BJ_HXL_Text/edda_in.txt", "source_hash": BJ_HXL_SOURCE_HASH}
             for key in values
+        } | {
+            "_compute_policy": {
+                "source_mode": "bundled_case",
+                "source_files": ["BJ_HXL_Text/edda_in.txt", "dfs.F90", "edda main program.F90"],
+                "original_fssimul": values.get("edda.run_controls.simulate_shallow_landslide", True),
+                "topology": topology,
+                "topology_status": "recognized",
+                "evidence": [
+                    {
+                        "active_statement": "bundled BJ template topology",
+                        "matched": True,
+                        "source": "BJ_HXL_Text",
+                    }
+                ],
+                "detector_version": "template-v1",
+            }
         },
     }
 
@@ -193,26 +215,48 @@ def builtin_bj_hxl_template_v2() -> Dict[str, Any]:
     return _template_payload(BJ_HXL_TEMPLATE_V2_ID, "2", _bj_hxl_v2_values())
 
 
-def builtin_bj_hxl_template() -> Dict[str, Any]:
-    """Return current BJ_HXL defaults with the exact 45-control snapshot."""
+def _bj_hxl_v3_values() -> Dict[str, Any]:
     values = _bj_hxl_v2_values()
     values["edda.registry_version"] = REGISTRY_VERSION
     for spec in EDDA_SWITCH_REGISTRY:
         values[spec.taichi_config_path] = deepcopy(BJ_HXL_SWITCH_VALUES[spec.key])
-    return _template_payload(BJ_HXL_TEMPLATE_ID, "3", values)
+    return values
+
+
+def builtin_bj_hxl_template_v3() -> Dict[str, Any]:
+    """Keep the 45-control v3 snapshot immutable for existing scenarios."""
+    return _template_payload(BJ_HXL_TEMPLATE_V3_ID, "3", _bj_hxl_v3_values())
+
+
+def builtin_bj_hxl_template() -> Dict[str, Any]:
+    """Return current BJ_HXL defaults with failure-source topology recorded."""
+    values = _bj_hxl_v3_values()
+    values["hydrology.dfs_failure_source_variant"] = "precomputed_unsfin_schedule"
+    return _template_payload(BJ_HXL_TEMPLATE_ID, "4", values)
 
 
 def builtin_parameter_templates() -> list[Dict[str, Any]]:
     return [
         builtin_bj_hxl_template_v1(),
         builtin_bj_hxl_template_v2(),
+        builtin_bj_hxl_template_v3(),
         builtin_bj_hxl_template(),
     ]
 
 
+def canonicalize_edda_control_parameters(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce parser-absent boolean switches to False without changing key count."""
+    canonical = deepcopy(values)
+    for spec in EDDA_SWITCH_REGISTRY:
+        path = spec.taichi_config_path
+        if path in canonical:
+            canonical[path] = canonical_control_value(spec, canonical[path])
+    return canonical
+
+
 def merge_parameter_values(baseline: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     """Merge the flat, dotted scenario parameter contract deterministically."""
-    return {**deepcopy(baseline), **deepcopy(patch)}
+    return canonicalize_edda_control_parameters({**deepcopy(baseline), **deepcopy(patch)})
 
 
 def normalize_rainfall_patch(patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -257,6 +301,9 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
         "rheology.cs": "cs",
         "rheology.kresis": "kresis",
         "rheology.shallown": "shallown",
+        "rheology.debrisflowmanning": "debrisflowmanning",
+        "rheology.cvlandslide": "cvlandslide",
+        "rheology.cvglacier": "cvglacier",
         "erosion.d50": "d50",
         "erosion.coedepo": "coedepo",
         "erosion.k_deposition": "coedepo",
@@ -276,7 +323,8 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
             values[key] = value
 
     ltstar_raw = float(getattr(parsed, "ltstar_raw", values["soil.double_layer.ltstar"]))
-    if ltstar_raw < 0:
+    raster_ltstar = ltstar_raw < 0
+    if raster_ltstar:
         ltstar_raw = max(0.0, float(getattr(parsed, "zmax", 0.0)) - float(getattr(parsed, "lbstar", 0.0)))
     values["soil.double_layer.ltstar"] = ltstar_raw
 
@@ -289,6 +337,9 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
                 "soil.gamma_s": default_zone.top.gamma_s,
                 "soil.c": default_zone.top.c,
                 "soil.phi": default_zone.top.phi,
+                "erosion.tau_c": default_zone.top.ctao,
+                "erosion.ctao": default_zone.top.ctao,
+                "erosion.k_erosion": default_zone.top.kero,
             }
         )
         normalized_zones: Dict[str, Any] = {}
@@ -320,7 +371,12 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
                 "phib": zone.top.phib,
                 "kero": zone.top.kero,
                 "ctao": zone.top.ctao,
-                "ltstar": ltstar_raw,
+                "cvero": zone.top.cvero,
+                "c_bottom": zone.bottom.c,
+                "phi_bottom": zone.bottom.phi,
+                "phib_bottom": zone.bottom.phib,
+                "gamma_s_bottom": zone.bottom.gamma_s,
+                "ltstar": 0.0 if raster_ltstar else ltstar_raw,
                 "lbstar": float(getattr(parsed, "lbstar", 1.0)),
             }
         values["spatial_zones.zones"] = normalized_zones
@@ -351,13 +407,39 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
     mode = str(getattr(parsed, "rainfall_mode", "uniform_cri"))
     values["rainfall.mode"] = "raster" if mode == "raster_rifil" else "mixed" if mode == "mixed" else "uniform"
     values["manning.source"] = "raster" if "raster" in str(getattr(parsed, "manning_source", "")) else "global"
+    face_flux = getattr(parsed, "dfs_face_flux_variant", None)
+    if face_flux is not None:
+        values["hydrology.dfs_face_flux_variant"] = str(face_flux)
+    manningbar = getattr(parsed, "dfs_manningbar_variant", None)
+    if manningbar is not None:
+        values["hydrology.dfs_manningbar_variant"] = str(manningbar)
+    dry_face = getattr(parsed, "dfs_dry_face_velocity_variant", None)
+    if dry_face is not None:
+        values["hydrology.dfs_dry_face_velocity_variant"] = str(dry_face)
+    artivis = getattr(parsed, "dfs_artivis_variant", None)
+    if artivis is not None:
+        values["hydrology.dfs_artivis_variant"] = str(artivis)
+    absubar = getattr(parsed, "dfs_absubar_variant", None)
+    if absubar is not None:
+        values["hydrology.dfs_absubar_variant"] = str(absubar)
+    failure_source = getattr(parsed, "dfs_failure_source_variant", None)
+    topology_status = str(getattr(parsed, "dfs_failure_source_topology_status", "") or "")
+    if failure_source and topology_status in {"", "recognized"}:
+        values["hydrology.dfs_failure_source_variant"] = str(failure_source)
+    elif topology_status in {"unknown", "conflict", "missing_source"}:
+        values.pop("hydrology.dfs_failure_source_variant", None)
+    values.setdefault("boundary_conditions.mode", "auto")
+    values.setdefault("boundary_conditions.default_type", "outflow")
+    values.setdefault("boundary_conditions.include_nodata", True)
     snapshot = getattr(parsed, "switch_snapshot", None)
     if snapshot is not None:
         snapshot_values = snapshot.values
         values["edda.registry_version"] = snapshot.registry_version
         for spec in EDDA_SWITCH_REGISTRY:
             group = "output_controls" if spec.group in {"legacy_output", "process_output"} else "run_controls"
-            values[f"edda.{group}.{spec.key}"] = snapshot_values[spec.key]
+            values[f"edda.{group}.{spec.key}"] = canonical_control_value(
+                spec, snapshot_values[spec.key]
+            )
         for key, value in (getattr(parsed, "extension_flags", {}) or {}).items():
             values[f"edda.extension_controls.{key}"] = value
     return values

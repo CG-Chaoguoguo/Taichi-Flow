@@ -545,6 +545,34 @@
   border-bottom: none;
 }
 
+.tf-table-compact th,
+.tf-table-compact td {
+  padding: 6px 8px;
+  height: 34px;
+  font-size: 12px;
+}
+
+.tf-zone-soil-table-wrap {
+  max-height: 280px;
+}
+
+.tf-zone-soil-table {
+  min-width: 640px;
+}
+
+.tf-zone-soil-table .tf-input-compact {
+  width: 88px;
+  min-width: 72px;
+  height: 28px;
+  padding: 0 6px;
+}
+
+.tf-zone-soil-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ── Dialog — Smoke + Acrylic ── */
 .tf-dialog-overlay {
   position: fixed;
@@ -1413,6 +1441,14 @@
 
 .tf-mb-4 {
   margin-bottom: var(--space-4);
+}
+
+.tf-mt-4 {
+  margin-top: var(--space-4);
+}
+
+.tf-compute-gate-settings .tf-edda-compute-card {
+  box-shadow: none;
 }
 
 .tf-dialog-narrow {

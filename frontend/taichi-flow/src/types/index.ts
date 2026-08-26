@@ -158,6 +158,7 @@ export type InputFamily =
   | "slope"
   | "zones"
   | "thickness"
+  | "trigger"
   | "manning"
   | "rainfall"
   | "groundwater"
@@ -218,6 +219,7 @@ export type Scenario = {
   parameter_baseline?: Record<string, unknown>;
   parameter_patch: Record<string, unknown>;
   effective_parameters: Record<string, unknown>;
+  compute_policy_resolution?: ComputePolicyResolution;
   input_bindings?: InputBinding[];
   binding_state?: "draft" | "runtime_snapshot";
   version?: number;
@@ -249,6 +251,8 @@ export type SimulationRun = {
   elapsed_seconds: number;
   terminal_log?: string[];
   output_dir?: string;
+  effective_config?: Record<string, unknown>;
+  compute_policy_resolution: ComputePolicyResolution;
   resource_summary?: Record<string, unknown>;
 };
 
@@ -265,6 +269,9 @@ export type QueueItem = {
   input_revision_id?: string | null;
   cancel_reason?: string | null;
   retry_of?: string | null;
+  runtime_profile?: string | null;
+  effective_config: Record<string, unknown>;
+  compute_policy_resolution: ComputePolicyResolution;
   enqueued_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -350,6 +357,7 @@ export type ParameterCatalogEntry = {
   frontend_policy?: "editable" | "read_only" | string;
   value_type?: "boolean" | "integer" | "number_array" | "enum" | string;
   allowed_values?: unknown[];
+  allowed_value_labels_zh?: Record<string, string> | null;
   dependencies?: string[];
   dependency_paths?: string[];
   affected_output_families?: string[];
@@ -363,12 +371,33 @@ export type EddaControlRegistrySummary = {
   editable_count: number;
   restricted_count: number;
 };
+export type RuntimeProfileOption = {
+  name: string;
+  default_backend?: string;
+  label_zh?: string;
+  description_zh?: string;
+  description?: string;
+};
+
 export type ParameterCatalog = {
   catalog_version: string;
   editable_statuses: string[];
   parameters: ParameterCatalogEntry[];
   status_counts: Record<string, number>;
   control_registry?: EddaControlRegistrySummary | null;
+  gate_parameter_keys?: string[];
+  runtime_profiles?: {
+    default_profile?: string;
+    user_selectable?: RuntimeProfileOption[];
+  } | null;
+};
+
+export type ComputeGateDefaults = {
+  catalog_version: string;
+  values: Record<string, unknown>;
+  baseline: Record<string, unknown>;
+  effective: Record<string, unknown>;
+  updated_at?: string | null;
 };
 
 export type RainfallPeriod = {
@@ -421,6 +450,59 @@ export type ValidationState = {
   issues?: ValidationIssue[];
 };
 
+export type ComputePolicyDetected = {
+  simulate_shallow_landslide: boolean | null;
+  dfs_failure_source_variant: string | null;
+  topology?: string | null;
+  topology_status?: string | null;
+  evidence: Array<Record<string, unknown>>;
+};
+
+export type ComputePolicyEffective = {
+  mode: "disabled" | "precomputed" | "live" | null;
+  simulate_shallow_landslide: boolean | null;
+  configured_variant?: string | null;
+  active_variant?: string | null;
+};
+
+export type ComputePolicyResolutionCommon = {
+  source: "auto" | "global_override" | "direct_api_compatibility" | string;
+  requested: "auto" | "disabled" | "precomputed" | "live" | string;
+  detected: ComputePolicyDetected;
+  effective: ComputePolicyEffective;
+  numeric_variants: Record<string, { source?: string; value?: unknown }>;
+  settings_snapshot: Record<string, unknown>;
+  warnings: string[];
+  resolution_id: string;
+  resolution_hash: string;
+};
+
+export type ComputePolicyResolution =
+  | (ComputePolicyResolutionCommon & { status: "resolved" })
+  | (ComputePolicyResolutionCommon & {
+      status: "blocked";
+      blocking_issue: { code: string; severity?: string; message: string; details?: Record<string, unknown> };
+    })
+  | (ComputePolicyResolutionCommon & { status: "legacy_unrecorded" });
+
+export const EMPTY_COMPUTE_POLICY_RESOLUTION: ComputePolicyResolution = {
+  status: "blocked",
+  source: "auto",
+  requested: "auto",
+  detected: {
+    simulate_shallow_landslide: null,
+    dfs_failure_source_variant: null,
+    evidence: [],
+  },
+  effective: { mode: null, simulate_shallow_landslide: null, active_variant: null },
+  numeric_variants: {},
+  settings_snapshot: {},
+  warnings: [],
+  blocking_issue: { code: "configuration_refresh_required", message: "正在等待方案计算策略解析。" },
+  resolution_id: "cpr-unresolved",
+  resolution_hash: "unresolved",
+};
+
 export type ScenarioConfiguration = {
   scenario_id: string;
   parameter_template_id?: string | null;
@@ -429,6 +511,7 @@ export type ScenarioConfiguration = {
   effective: Record<string, unknown>;
   bindings: InputBinding[];
   validation: ValidationState;
+  compute_policy_resolution: ComputePolicyResolution;
   version: number;
 };
 
@@ -516,6 +599,7 @@ export type CaseConfigInterface = {
     rainfall_mode?: string;
     manning_source?: string;
     flags?: Record<string, unknown>;
+    extension_flags?: Record<string, unknown>;
     recognized_unsupported_fields?: string[];
     audit_notes?: string[];
   };

@@ -106,6 +106,7 @@ class LegacyMigrationCommitRequest(BaseModel):
 
 class QueueCreate(BaseModel):
     scenario_id: str = Field(..., min_length=1)
+    runtime_profile: Optional[str] = None
 
 
 class QueueReorder(BaseModel):
@@ -654,7 +655,11 @@ async def list_queue(request: Request, project_id: str):
 
 @router.post("/projects/{project_id}/queue", status_code=status.HTTP_201_CREATED)
 async def enqueue_scenario(request: Request, project_id: str, payload: QueueCreate):
-    return request.app.state.workbench.enqueue_scenario(project_id, payload.scenario_id)
+    return request.app.state.workbench.enqueue_scenario(
+        project_id,
+        payload.scenario_id,
+        runtime_profile=payload.runtime_profile,
+    )
 
 
 @router.patch("/projects/{project_id}/queue/order")
