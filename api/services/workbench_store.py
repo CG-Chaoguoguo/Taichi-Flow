@@ -14,10 +14,12 @@ from uuid import uuid4
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import shutil
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class WorkbenchError(Exception):
@@ -239,6 +241,7 @@ class ProjectDatabase:
                     base_scenario_id TEXT REFERENCES scenarios(scenario_id),
                     parameter_template_id TEXT,
                     parameter_patch_json TEXT NOT NULL,
+                    control_overrides_json TEXT NOT NULL DEFAULT '{}',
                     effective_parameters_json TEXT NOT NULL,
                     draft_validation_json TEXT NOT NULL DEFAULT '{}',
                     version INTEGER NOT NULL DEFAULT 1,
@@ -747,6 +750,15 @@ class ProjectDatabase:
                 """,
                 (migration_now,),
             )
+        if version < 10:
+            scenario_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(scenarios)").fetchall()
+            }
+            if "control_overrides_json" not in scenario_columns:
+                connection.execute(
+                    "ALTER TABLE scenarios ADD COLUMN control_overrides_json TEXT NOT NULL DEFAULT '{}'"
+                )
         from api.services.parameter_templates import builtin_parameter_templates
 
         for template in builtin_parameter_templates():
@@ -930,14 +942,23 @@ class WorkbenchStore:
         *,
         gates: Optional[Dict[str, Any]] = None,
         template_id: Optional[str] = None,
+        template_metadata: Optional[Mapping[str, Any]] = None,
+        control_overrides: Optional[Mapping[str, Any]] = None,
+        reference_owned: bool = False,
     ) -> Dict[str, Any]:
         from api.services.compute_gate_defaults import resolve_scenario_compute_snapshot, strip_gate_parameters
 
+        metadata = dict(template_metadata or {})
+        policy = metadata.get("_compute_policy")
+        owned = bool(reference_owned or (isinstance(policy, Mapping) and policy.get("ownership") == "reference_case"))
         snapshot = resolve_scenario_compute_snapshot(
             baseline,
             strip_gate_parameters(patch),
             global_gates=gates if gates is not None else self.get_compute_gate_values(),
+            scenario_controls=control_overrides,
+            reference_owned=owned,
             template_id=template_id,
+            template_metadata=metadata,
             source_mode="workbench",
             strict_reference=bool(template_id),
         )
@@ -1017,6 +1038,433 @@ class WorkbenchStore:
                 ),
             )
         return self.get_project(str(metadata["project_id"]))
+
+    @staticmethod
+    def _case_config_path(source_root: Path) -> Path:
+        for candidate in (source_root / "edda_in.txt", source_root / "EDDA_in.txt"):
+            if candidate.is_file():
+                return candidate
+        raise WorkbenchError(
+            "case_config_not_found",
+            "指定目录中未找到 edda_in.txt。",
+            status_code=422,
+            details={"source_root": str(source_root)},
+        )
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise WorkbenchError(
+                "case_file_unreadable",
+                f"无法读取兼容算例文件：{path.name}",
+                status_code=422,
+                details={"path": str(path), "error": str(exc)},
+            ) from exc
+        return digest.hexdigest()
+
+    @classmethod
+    def _case_fingerprint(cls, config_path: Path, plan: Mapping[str, Any]) -> str:
+        """Hash config plus active existing inputs without hashing source paths."""
+        digest = hashlib.sha256()
+        digest.update(b"taichi-flow-reference-case-v1\0")
+        digest.update(b"edda_in\0")
+        try:
+            with config_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise WorkbenchError(
+                "case_file_unreadable",
+                f"无法读取 edda_in.txt：{exc}",
+                status_code=422,
+            ) from exc
+        references = sorted(
+            (
+                item
+                for item in plan.get("file_references", [])
+                if item.get("exists") and item.get("active") and Path(str(item.get("path") or "")).is_file()
+            ),
+            key=lambda item: (str(item.get("native_family")), int(item.get("ordinal") or 0)),
+        )
+        for item in references:
+            label = f"{item.get('native_family')}:{int(item.get('ordinal') or 0)}\0".encode("utf-8")
+            digest.update(label)
+            path = Path(str(item["path"]))
+            try:
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError as exc:
+                raise WorkbenchError(
+                    "case_file_unreadable",
+                    f"无法读取活动输入：{path.name}",
+                    status_code=422,
+                    details={"path": str(path), "error": str(exc)},
+                ) from exc
+        return digest.hexdigest()
+
+    @staticmethod
+    def _case_dimensions(config_path: Path) -> Dict[str, Any]:
+        pattern = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,")
+        try:
+            for line in config_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                match = pattern.match(line)
+                if match:
+                    return {
+                        "imax": int(match.group(1)),
+                        "rows": int(match.group(2)),
+                        "cols": int(match.group(3)),
+                    }
+        except OSError:
+            pass
+        return {}
+
+    @staticmethod
+    def _case_sidecar_summary(path: Optional[Path], family: str) -> Dict[str, Any]:
+        if not path or not path.is_file():
+            return {"family": family, "exists": False, "line_count": 0, "preview": []}
+        try:
+            lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        return {
+            "family": family,
+            "exists": True,
+            "line_count": len(lines),
+            "preview": lines[:4],
+            "path_name": path.name,
+        }
+
+    def preview_case_import(self, source_root: str) -> Dict[str, Any]:
+        """Parse a legacy case and expose a commit-safe, path-aware preview."""
+        from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY
+        from api.services.legacy_migration import build_legacy_migration_plan
+        from api.services.parameter_templates import normalized_parameter_values
+        from api.services.reference_config_parser import parse_reference_config_file
+
+        source = Path(source_root).expanduser().resolve()
+        if not source.is_dir():
+            raise WorkbenchError("case_source_not_found", "兼容算例目录不存在或不可访问。", status_code=422, details={"source_root": str(source)})
+        config_path = self._case_config_path(source)
+        try:
+            parsed = parse_reference_config_file(str(config_path), str(source))
+        except Exception as exc:
+            raise WorkbenchError("case_config_parse_failed", f"解析 Chamoli edda_in 失败：{exc}", status_code=422) from exc
+        config_hash = self._sha256_file(config_path)
+        plan = build_legacy_migration_plan(parsed, source_hash=config_hash)
+        fingerprint = self._case_fingerprint(config_path, plan)
+        values = normalized_parameter_values(parsed)
+        snapshot_values = dict(parsed.switch_snapshot.values)
+        run_controls = {
+            spec.key: snapshot_values.get(spec.key)
+            for spec in EDDA_SWITCH_REGISTRY
+            if spec.group == "run_control"
+        }
+        output_controls = {
+            spec.key: snapshot_values.get(spec.key)
+            for spec in EDDA_SWITCH_REGISTRY
+            if spec.group in {"legacy_output", "process_output"}
+        }
+        unresolved = list(plan.get("unresolved_active_bindings") or [])
+        issues: list[Dict[str, Any]] = [
+            {
+                "severity": "error",
+                "code": "active_input_missing",
+                "message": f"活动输入缺失：{item.get('native_family')} ({item.get('path')})",
+                "binding_key": item.get("binding_key"),
+            }
+            for item in unresolved
+        ]
+        issues.extend(
+            {
+                "severity": "warning",
+                "code": "unsupported_control",
+                "message": f"原 EDDA 控制保持只读：{item.get('flag') or item.get('parameter')}",
+            }
+            for item in (parsed.unsupported_flags or [])
+        )
+        references_by_family = {
+            family: [item for item in plan.get("file_references", []) if item.get("native_family") == family]
+            for family in parsed.file_inputs
+        }
+        sidecar_paths = {
+            family: next((Path(str(item["path"])) for item in plan.get("file_references", []) if item.get("native_family") == family and item.get("exists")), None)
+            for family in ("inflow.txt", "outflow.txt")
+        }
+        active_bindings = [dict(item) for item in plan.get("proposed_bindings", [])]
+        return {
+            "source_root": str(source),
+            "case_config_file": str(config_path),
+            "case_name": source.name,
+            "config_sha256": config_hash,
+            "case_fingerprint": fingerprint,
+            "case_summary": {
+                "dimensions": self._case_dimensions(config_path),
+                "nzon": int(parsed.nzon),
+                "simul_s": float(parsed.simul),
+                "tout_s": float(parsed.tout),
+                "rainfall_period_count": int(parsed.nper),
+                "rainfall_mode": parsed.rainfall_mode,
+                "zmax": float(parsed.zmax),
+                "ltstar_raw": float(parsed.ltstar_raw),
+                "lbstar": float(parsed.lbstar),
+                "active_binding_count": len(active_bindings),
+                "missing_reference_count": int(plan.get("missing_file_count") or 0),
+            },
+            "controls": {
+                "run": run_controls,
+                "output": output_controls,
+                "extension": dict(parsed.extension_flags or {}),
+                "raw_flags": dict(parsed.flags or {}),
+                "normalized_values": values,
+            },
+            "variants": {
+                "face_flux": parsed.dfs_face_flux_variant,
+                "manningbar": parsed.dfs_manningbar_variant,
+                "dry_face_velocity": parsed.dfs_dry_face_velocity_variant,
+                "artivis": parsed.dfs_artivis_variant,
+                "absubar": parsed.dfs_absubar_variant,
+                "failure_source": parsed.dfs_failure_source_variant,
+                "failure_source_topology_status": parsed.dfs_failure_source_topology_status,
+            },
+            "capabilities": {
+                "reference_output_expectations": parsed.reference_output_expectations,
+                "unsupported_flags": list(parsed.unsupported_flags or []),
+                "file_inputs": {
+                    family: {
+                        "active": any(bool(item.get("active")) for item in items),
+                        "existing": sum(bool(item.get("exists")) for item in items),
+                        "declared": len(items),
+                        "runtime_status": getattr(parsed.file_inputs.get(family), "production_status", None),
+                    }
+                    for family, items in references_by_family.items()
+                },
+            },
+            "bindings": active_bindings,
+            "sidecars": {
+                "inflow": self._case_sidecar_summary(sidecar_paths.get("inflow.txt"), "inflow"),
+                "outflow": self._case_sidecar_summary(sidecar_paths.get("outflow.txt"), "outflow"),
+            },
+            "issues": issues,
+            "commit_allowed": not unresolved and any(item.get("family") == "dem" for item in active_bindings),
+            "plan": plan,
+        }
+
+    def _existing_reference_import(self, destination: Path, fingerprint: str) -> Optional[Dict[str, Any]]:
+        database = ProjectDatabase(destination)
+        if not database.database_path.is_file():
+            return None
+        database.ensure_schema()
+        with database.connect() as connection:
+            rows = connection.execute(
+                "SELECT scenario_id, parameter_template_id FROM scenarios ORDER BY created_at"
+            ).fetchall()
+            match = None
+            for row in rows:
+                metadata = self._parameter_template_metadata(connection, row["parameter_template_id"])
+                policy = metadata.get("_compute_policy") if isinstance(metadata, Mapping) else None
+                if isinstance(policy, Mapping) and str(policy.get("case_fingerprint") or "") == fingerprint:
+                    match = str(row["scenario_id"])
+                    break
+        if not match:
+            return None
+        metadata = database.metadata()
+        if not metadata:
+            return None
+        project = self.create_or_open_project(
+            name=str(metadata.get("name") or destination.name),
+            root_path=str(destination),
+            description=str(metadata.get("description") or ""),
+        )
+        return {
+            "project": project,
+            "scenario": self._public_scenario(project["project_id"], self._scenario_row(project["project_id"], match)),
+            "case_fingerprint": fingerprint,
+            "idempotent": True,
+        }
+
+    def commit_case_import(
+        self,
+        source_root: str,
+        destination_root: str,
+        *,
+        expected_fingerprint: str,
+        name: Optional[str] = None,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        """Atomically stage a path-free reference-case project and register it."""
+        from api.services.legacy_migration import build_legacy_migration_plan
+        from api.services.parameter_templates import normalized_parameter_values
+        from api.services.reference_config_parser import parse_reference_config_file
+
+        preview = self.preview_case_import(source_root)
+        fingerprint = str(preview["case_fingerprint"])
+        if fingerprint != str(expected_fingerprint):
+            raise WorkbenchError(
+                "case_fingerprint_mismatch",
+                "源算例在预览后发生变化，请重新预览。",
+                status_code=409,
+                details={"expected_fingerprint": expected_fingerprint, "actual_fingerprint": fingerprint},
+            )
+        if not bool(preview.get("commit_allowed")):
+            raise WorkbenchError(
+                "case_import_not_ready",
+                "活动输入或 DEM 绑定未通过校验，不能提交 Chamoli 兼容项目。",
+                status_code=422,
+                details={
+                    "issues": list(preview.get("issues") or []),
+                    "bindings": list(preview.get("bindings") or []),
+                },
+            )
+        source = Path(str(preview["source_root"])).resolve()
+        destination = Path(destination_root).expanduser().resolve()
+        if destination == source or source in destination.parents:
+            raise WorkbenchError("case_destination_invalid", "目标目录必须独立于原始算例目录。", status_code=422)
+        existing = self._existing_reference_import(destination, fingerprint) if destination.exists() else None
+        if existing:
+            return existing
+        if destination.exists():
+            try:
+                next(destination.iterdir())
+            except StopIteration:
+                pass
+            else:
+                raise WorkbenchError("case_destination_not_empty", "目标目录必须为空，避免覆盖现有项目。", status_code=409)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.parent / f".{destination.name}.import-{uuid4().hex}"
+        project_id: Optional[str] = None
+        moved = False
+        try:
+            staged_project = self.create_or_open_project(
+                name=(name or "").strip() or str(preview["case_name"]),
+                root_path=str(staging),
+                description=description,
+            )
+            project_id = str(staged_project["project_id"])
+            parsed = parse_reference_config_file(str(preview["case_config_file"]), str(source))
+            plan = build_legacy_migration_plan(parsed, source_hash=str(preview["config_sha256"]))
+            assets: list[Dict[str, Any]] = []
+            bindings: list[Dict[str, Any]] = []
+
+            config_asset = self.ingest_upload_from_path(project_id, family="config", path=str(preview["case_config_file"]))
+            assets.append(config_asset)
+            bindings.append({
+                "binding_key": "legacy.config",
+                "asset_id": config_asset["asset_id"],
+                "family": "config",
+                "role": "legacy-config",
+                "ordinal": 1,
+                "active": True,
+                "metadata": {"case_fingerprint": fingerprint, "source_kind": "reference_case"},
+            })
+            for item in plan["proposed_bindings"]:
+                asset = self.ingest_upload_from_path(project_id, family=str(item["family"]), path=str(item["path"]))
+                assets.append(asset)
+                bindings.append({
+                    "binding_key": item["binding_key"],
+                    "asset_id": asset["asset_id"],
+                    "family": item["family"],
+                    "role": item["role"],
+                    "period_id": item.get("period_id"),
+                    "ordinal": item.get("ordinal"),
+                    "active": bool(item.get("active", True)),
+                    "metadata": {
+                        "native_family": item.get("native_family"),
+                        "source_hash": asset["sha256"],
+                        "case_fingerprint": fingerprint,
+                    },
+                })
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                resolved_bindings, manifest = self._resolve_binding_assets(connection, bindings)
+                revision_id, revision_status, _, _ = self._insert_input_revision(
+                    connection,
+                    bindings=resolved_bindings,
+                    manifest=manifest,
+                    parent_revision_id=None,
+                    version_tag="Chamoli reference v1",
+                )
+                if revision_status != "ready":
+                    raise WorkbenchError("case_input_invalid", "导入的活动输入未通过内容校验。", status_code=422)
+                values = normalized_parameter_values(parsed)
+                template_id = f"pt-reference-{fingerprint[:24]}"
+                provenance = {
+                    key: {"source": "Chamoli/edda_in.txt", "source_hash": str(preview["config_sha256"])}
+                    for key in values
+                }
+                provenance["_compute_policy"] = {
+                    "ownership": "reference_case",
+                    "source_mode": "reference_case_import",
+                    "source_files": ["edda_in.txt"],
+                    "case_fingerprint": fingerprint,
+                    "original_fssimul": parsed.flags.get("simulate_shallow_landslide"),
+                    "topology": parsed.dfs_failure_source_variant or None,
+                    "topology_status": parsed.dfs_failure_source_topology_status,
+                    "evidence": list(parsed.dfs_failure_source_evidence or []),
+                    "detector_version": "reference-config-parser-v1",
+                }
+                now = utc_now()
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO parameter_templates(
+                        template_id, version, name, description, source_kind,
+                        source_hash, values_json, field_provenance_json, created_at
+                    ) VALUES(?, 1, ?, ?, 'reference_case', ?, ?, ?, ?)
+                    """,
+                    (
+                        template_id,
+                        f"Chamoli reference {fingerprint[:8]}",
+                        "由原始 Chamoli edda_in 导入；控制快照归方案所有，未注入 BJ 全局默认。",
+                        str(preview["config_sha256"]),
+                        json.dumps(values, ensure_ascii=False),
+                        json.dumps(provenance, ensure_ascii=False),
+                        now,
+                    ),
+                )
+            scenario = self.create_scenario(
+                project_id,
+                name=(name or "").strip() or "Chamoli reference",
+                input_revision_id=revision_id,
+                base_scenario_id=None,
+                parameter_patch={},
+                parameter_template_id=template_id,
+                control_overrides={},
+            )
+            old_root = str(staging)
+            staging.replace(destination)
+            moved = True
+            new_database = ProjectDatabase(destination)
+            with new_database.connect() as connection:
+                connection.execute("UPDATE uploads SET blob_path=replace(blob_path, ?, ?)", (old_root, str(destination)))
+                connection.execute("UPDATE input_revisions SET manifest_json=replace(manifest_json, ?, ?)", (old_root, str(destination)))
+            with self.catalog() as connection:
+                connection.execute(
+                    "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
+                    (str(destination), str(new_database.database_path), utc_now(), project_id),
+                )
+            project = self.get_project(project_id)
+            final_scenario = self._public_scenario(project_id, self._scenario_row(project_id, scenario["scenario_id"]))
+            return {
+                "project": project,
+                "scenario": final_scenario,
+                "case_fingerprint": fingerprint,
+                "input_revision_id": revision_id,
+                "asset_count": len(assets),
+                "idempotent": False,
+            }
+        except Exception:
+            if not moved:
+                if project_id:
+                    with self.catalog() as connection:
+                        connection.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     def update_project(self, project_id: str, *, name: Optional[str], description: Optional[str]) -> Dict[str, Any]:
         current = self.get_project(project_id)
@@ -1445,6 +1893,23 @@ class WorkbenchStore:
             "_compute_policy": json_loads(row["field_provenance_json"], {}).get("_compute_policy", {}),
         }
 
+    @staticmethod
+    def _reference_case_owned(metadata: Optional[Mapping[str, Any]]) -> bool:
+        policy = (metadata or {}).get("_compute_policy") if isinstance(metadata, Mapping) else None
+        return bool(isinstance(policy, Mapping) and policy.get("ownership") == "reference_case")
+
+    @staticmethod
+    def _validate_control_overrides(values: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        from api.services.compute_gate_defaults import ComputeGateValidationError, validate_compute_gate_values
+
+        payload = dict(values or {})
+        if not payload:
+            return {}
+        try:
+            return validate_compute_gate_values(payload)
+        except ComputeGateValidationError as exc:
+            raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
+
     def _scenario_compute_snapshot(
         self,
         connection: sqlite3.Connection,
@@ -1474,10 +1939,14 @@ class WorkbenchStore:
         metadata = self._parameter_template_metadata(connection, str(template_id))
         patch_json = scenario.get("parameter_patch_json") if isinstance(scenario, dict) else scenario["parameter_patch_json"]
         patch = strip_gate_parameters(canonicalize_edda_control_parameters(json_loads(patch_json, {})))
+        control_json = scenario.get("control_overrides_json", "{}") if isinstance(scenario, dict) else scenario["control_overrides_json"]
+        control_overrides = self._validate_control_overrides(json_loads(control_json, {}))
         return resolve_scenario_compute_snapshot(
             baseline,
             patch,
             global_gates=global_gates if global_gates is not None else self.get_compute_gate_values(),
+            scenario_controls=control_overrides,
+            reference_owned=self._reference_case_owned(metadata),
             template_id=str(template_id),
             template_metadata=metadata,
             source_mode="workbench",
@@ -1563,10 +2032,22 @@ class WorkbenchStore:
         asset_roles = list(roles or [ASSET_ROLE_BY_FAMILY.get(normalized_family, normalized_family)])
         raster_metadata: Dict[str, Any] = {}
         if normalized_family in RASTER_ASSET_FAMILIES:
+            metadata_path = blob_path
+            metadata_probe: Optional[Path] = None
+            source_suffix = Path(safe_name).suffix.lower()
+            # Content-addressed blobs intentionally have no filename suffix.
+            # Preserve the original raster suffix for ASCII grids so GDAL's
+            # AAIGrid driver reads xllcorner/yllcorner instead of falling back
+            # to an origin of (0, 0). This keeps draft and revision manifests
+            # geometrically equivalent after a scenario is duplicated.
+            if source_suffix in {".asc", ".tif", ".tiff", ".img", ".dem"} and blob_path.suffix.lower() != source_suffix:
+                metadata_probe = database.staging_dir / f"{upload_id}{source_suffix}"
+                shutil.copyfile(blob_path, metadata_probe)
+                metadata_path = metadata_probe
             try:
                 from edda.io.spatial_input_loader import SpatialInputLoader
 
-                data, metadata = SpatialInputLoader(str(blob_path)).read()
+                data, metadata = SpatialInputLoader(str(metadata_path)).read()
                 rows, cols = data.shape[:2]
                 bounds = metadata.get("bounds")
                 if bounds is not None and hasattr(bounds, "left"):
@@ -1590,6 +2071,9 @@ class WorkbenchStore:
                 }
             except Exception as exc:
                 warnings.append(f"栅格元数据读取失败：{exc}")
+            finally:
+                if metadata_probe is not None:
+                    metadata_probe.unlink(missing_ok=True)
         parse_summary: Optional[Dict[str, Any]] = None
         if normalized_family == "config":
             parse_summary = self._try_parse_config_upload(project_id, blob_path)
@@ -2816,6 +3300,9 @@ class WorkbenchStore:
                 connection,
                 data.get("parameter_template_id"),
             )
+            control_overrides = self._validate_control_overrides(
+                json_loads(data.get("control_overrides_json"), {})
+            )
             compute_snapshot = self._scenario_compute_snapshot(
                 connection,
                 row,
@@ -2838,6 +3325,10 @@ class WorkbenchStore:
             "parameter_template_id": data.get("parameter_template_id"),
             "parameter_baseline": parameter_baseline,
             "parameter_patch": parameter_patch,
+            "control_overrides": control_overrides,
+            "configuration_ownership": "reference_case" if self._reference_case_owned(parameter_metadata) else "global_defaults",
+            "case_fingerprint": ((parameter_metadata.get("_compute_policy") or {}).get("case_fingerprint")
+                                  if isinstance(parameter_metadata.get("_compute_policy"), Mapping) else None),
             "effective_parameters": compute_snapshot.effective_parameters,
             "compute_policy_resolution": compute_snapshot.resolution,
             "input_bindings": input_bindings,
@@ -2906,6 +3397,9 @@ class WorkbenchStore:
             "parameter_template_id": scenario.get("parameter_template_id"),
             "baseline": scenario.get("parameter_baseline") or {},
             "overrides": scenario.get("parameter_patch") or {},
+            "control_overrides": scenario.get("control_overrides") or {},
+            "configuration_ownership": scenario.get("configuration_ownership") or "global_defaults",
+            "case_fingerprint": scenario.get("case_fingerprint"),
             "effective": scenario.get("effective_parameters") or {},
             "bindings": scenario.get("input_bindings") or [],
             "binding_state": scenario.get("binding_state") or "draft",
@@ -2923,6 +3417,7 @@ class WorkbenchStore:
         base_scenario_id: Optional[str],
         parameter_patch: Dict[str, Any],
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from api.services.parameter_templates import BJ_HXL_TEMPLATE_ID, merge_parameter_values, normalize_rainfall_patch
         from api.services.compute_gate_defaults import strip_gate_parameters
@@ -2952,6 +3447,7 @@ class WorkbenchStore:
                 # and old revisions never become implicit scenario inputs.
                 revision = None
             baseline = self._parameter_template_values(connection, selected_template_id)
+            template_metadata = self._parameter_template_metadata(connection, selected_template_id)
         if revision and revision["status"] != "ready":
             raise WorkbenchError("input_revision_invalid", "方案只能引用已通过校验的输入修订。", status_code=409)
 
@@ -2959,10 +3455,17 @@ class WorkbenchStore:
         effective_patch.update(parameter_patch)
         effective_patch = strip_gate_parameters(normalize_rainfall_patch(effective_patch))
         self._validate_parameter_patch(effective_patch)
+        effective_controls = self._validate_control_overrides(
+            control_overrides
+            if control_overrides is not None
+            else (json_loads(base["control_overrides_json"], {}) if base is not None else {})
+        )
         effective_parameters = self._merged_effective_parameters(
             baseline,
             effective_patch,
             template_id=selected_template_id,
+            template_metadata=template_metadata,
+            control_overrides=effective_controls,
         )
         scenario_id = f"scn-{uuid4().hex}"
         now = utc_now()
@@ -2973,9 +3476,9 @@ class WorkbenchStore:
                 """
                 INSERT INTO scenarios(
                     scenario_id, name, input_revision_id, base_scenario_id,
-                    parameter_template_id, parameter_patch_json, effective_parameters_json, status,
-                    archived, latest_simulation_id, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    parameter_template_id, parameter_patch_json, control_overrides_json,
+                    effective_parameters_json, status, archived, latest_simulation_id, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
                 """,
                 (
                     scenario_id,
@@ -2984,6 +3487,7 @@ class WorkbenchStore:
                     base_scenario_id,
                     selected_template_id,
                     json.dumps(effective_patch, ensure_ascii=False),
+                    json.dumps(effective_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     status,
                     now,
@@ -3008,6 +3512,7 @@ class WorkbenchStore:
         input_revision_id: Optional[str] = None,
         input_bindings: Optional[list[Dict[str, Any]]] = None,
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         from api.services.parameter_templates import merge_parameter_values, normalize_rainfall_patch
@@ -3085,16 +3590,24 @@ class WorkbenchStore:
                 else parameter_template_id
             )
             baseline = self._parameter_template_values(connection, next_template_id)
+            template_metadata = self._parameter_template_metadata(connection, next_template_id)
+            next_controls = self._validate_control_overrides(
+                control_overrides
+                if control_overrides is not None
+                else json_loads(row["control_overrides_json"], {})
+            )
             effective_parameters = self._merged_effective_parameters(
                 baseline,
                 patch,
                 template_id=next_template_id,
+                template_metadata=template_metadata,
+                control_overrides=next_controls,
             )
             next_version = current_version + 1
             connection.execute(
                 """
                 UPDATE scenarios SET name=?, input_revision_id=?, parameter_template_id=?,
-                    parameter_patch_json=?, effective_parameters_json=?, version=?,
+                    parameter_patch_json=?, control_overrides_json=?, effective_parameters_json=?, version=?,
                     status=?, updated_at=? WHERE scenario_id=?
                 """,
                 (
@@ -3102,6 +3615,7 @@ class WorkbenchStore:
                     next_revision_id,
                     next_template_id,
                     json.dumps(patch, ensure_ascii=False),
+                    json.dumps(next_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
                     next_status,
@@ -3127,6 +3641,7 @@ class WorkbenchStore:
         input_revision_id: Optional[str] = None,
         input_bindings: Optional[list[Dict[str, Any]]] = None,
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Atomically update only mutable draft state; snapshots are scheduler-owned."""
@@ -3170,10 +3685,18 @@ class WorkbenchStore:
             self._validate_parameter_patch(patch)
             next_template_id = row["parameter_template_id"] if parameter_template_id is None else parameter_template_id
             baseline = self._parameter_template_values(connection, next_template_id)
+            template_metadata = self._parameter_template_metadata(connection, next_template_id)
+            next_controls = self._validate_control_overrides(
+                control_overrides
+                if control_overrides is not None
+                else json_loads(row["control_overrides_json"], {})
+            )
             effective_parameters = self._merged_effective_parameters(
                 baseline,
                 patch,
                 template_id=next_template_id,
+                template_metadata=template_metadata,
+                control_overrides=next_controls,
             )
 
             current_draft = self._bindings_for_draft_connection(connection, scenario_id)
@@ -3199,6 +3722,7 @@ class WorkbenchStore:
             draft_changed = (
                 current_projection != next_projection
                 or json_loads(row["parameter_patch_json"], {}) != patch
+                or json_loads(row["control_overrides_json"], {}) != next_controls
                 or str(row["name"]) != new_name
                 or row["parameter_template_id"] != next_template_id
                 or row["input_revision_id"] is not None
@@ -3210,7 +3734,7 @@ class WorkbenchStore:
                 """
                 UPDATE scenarios
                 SET name=?, input_revision_id=NULL, parameter_template_id=?,
-                    parameter_patch_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
+                    parameter_patch_json=?, control_overrides_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
                     status='draft', updated_at=?
                 WHERE scenario_id=?
                 """,
@@ -3218,6 +3742,7 @@ class WorkbenchStore:
                     new_name,
                     next_template_id,
                     json.dumps(patch, ensure_ascii=False),
+                    json.dumps(next_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
                     now,
@@ -3251,6 +3776,7 @@ class WorkbenchStore:
             base_scenario_id=scenario_id,
             parameter_patch=json_loads(source["parameter_patch_json"], {}),
             parameter_template_id=source["parameter_template_id"],
+            control_overrides=json_loads(source["control_overrides_json"], {}),
         )
 
     def duplicate_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
@@ -3263,6 +3789,7 @@ class WorkbenchStore:
             base_scenario_id=scenario_id,
             parameter_patch=dict(source["parameter_patch"]),
             parameter_template_id=source.get("parameter_template_id"),
+            control_overrides=dict(source.get("control_overrides") or {}),
         )
         bindings = list(source.get("input_bindings") or [])
         if not bindings:
@@ -3274,6 +3801,7 @@ class WorkbenchStore:
             parameter_patch=dict(source["parameter_patch"]),
             input_bindings=bindings,
             parameter_template_id=source.get("parameter_template_id"),
+            control_overrides=dict(source.get("control_overrides") or {}),
             expected_version=duplicate.get("version"),
         )
 

@@ -11,6 +11,7 @@ NATIVE_TO_ASSET_FAMILY = {
     "slofil": "slope",
     "zonfil": "zones",
     "zfil": "thickness",
+    "triggerslide": "trigger",
     "depfil": "groundwater",
     "rizerofil": "infiltration",
     "rifil": "rainfall",
@@ -33,6 +34,8 @@ def _binding_identity(native_family: str, asset_family: str, ordinal: int) -> tu
         return "slope.primary", "slope", None
     if native_family == "zfil":
         return "thickness.primary", "thickness", None
+    if native_family == "triggerslide":
+        return "trigger.primary", "trigger", None
     if native_family == "depfil":
         return "groundwater.initial", "groundwater", None
     if native_family == "rizerofil":

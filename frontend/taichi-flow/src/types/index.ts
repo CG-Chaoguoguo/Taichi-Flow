@@ -218,6 +218,9 @@ export type Scenario = {
   parameter_template_id?: string | null;
   parameter_baseline?: Record<string, unknown>;
   parameter_patch: Record<string, unknown>;
+  control_overrides?: Record<string, unknown>;
+  configuration_ownership?: "reference_case" | "global_defaults" | string;
+  case_fingerprint?: string | null;
   effective_parameters: Record<string, unknown>;
   compute_policy_resolution?: ComputePolicyResolution;
   input_bindings?: InputBinding[];
@@ -508,11 +511,57 @@ export type ScenarioConfiguration = {
   parameter_template_id?: string | null;
   baseline: Record<string, unknown>;
   overrides: Record<string, unknown>;
+  control_overrides?: Record<string, unknown>;
+  configuration_ownership?: "reference_case" | "global_defaults" | string;
+  case_fingerprint?: string | null;
   effective: Record<string, unknown>;
   bindings: InputBinding[];
   validation: ValidationState;
   compute_policy_resolution: ComputePolicyResolution;
   version: number;
+};
+
+export type CaseImportPreview = {
+  source_root: string;
+  case_config_file: string;
+  case_name: string;
+  config_sha256: string;
+  case_fingerprint: string;
+  case_summary: {
+    dimensions?: { imax?: number; rows?: number; cols?: number };
+    nzon: number;
+    simul_s: number;
+    tout_s: number;
+    rainfall_period_count: number;
+    rainfall_mode: string;
+    zmax: number;
+    ltstar_raw: number;
+    lbstar: number;
+    active_binding_count: number;
+    missing_reference_count: number;
+  };
+  controls: {
+    run: Record<string, unknown>;
+    output: Record<string, unknown>;
+    extension: Record<string, unknown>;
+    raw_flags: Record<string, unknown>;
+    normalized_values: Record<string, unknown>;
+  };
+  variants: Record<string, string | null>;
+  capabilities: Record<string, unknown>;
+  bindings: LegacyMigrationReference[];
+  sidecars: Record<string, { family: string; exists: boolean; line_count: number; preview: string[]; path_name?: string }>;
+  issues: Array<{ severity: "error" | "warning"; code: string; message: string; binding_key?: string }>;
+  commit_allowed: boolean;
+};
+
+export type CaseImportCommitResult = {
+  project: ProjectInfo;
+  scenario: Scenario;
+  case_fingerprint: string;
+  input_revision_id?: string;
+  asset_count?: number;
+  idempotent?: boolean;
 };
 
 export type ParameterImportPreview = {

@@ -102,6 +102,11 @@ _AUXILIARY_CAPABILITIES = (
         "importable_auditable", None, "Production native slope-grid loader.",
     ),
     _auxiliary_capability(
+        "native_inputs.triggerslide", "triggerslide / triggerslidefil", "input_family",
+        "production_consumed", "importable_auditable", None,
+        "Original triggering-slide grid is always read and injected once in dfs.F90 when tnow>0.",
+    ),
+    _auxiliary_capability(
         "native_inputs.zonfil", "zonfil", "input_family", "production_consumed",
         "importable_auditable", None,
         "Zone raster is consumed only when nzon>1; nzon=1 uses the uniform zone-1 branch.",
@@ -155,6 +160,28 @@ _AUXILIARY_CAPABILITIES = (
     _auxiliary_capability(
         "rheology.shallown", "shallown", "parameter", "parsed_only", "read_only",
         "The active WFS consumer is unavailable.", "Retain provenance until WFS is implemented.",
+    ),
+    _auxiliary_capability(
+        "rheology.debrisflowmanning", "debrisflowmanning", "parameter",
+        "production_consumed", "editable", None,
+        "Chamoli dfs.F90 uses debrisflowmanning when cv>cvtol in the erosion-rate Manning-bar branch.",
+    ),
+    _auxiliary_capability(
+        "rheology.cvlandslide", "cvlandslide", "parameter",
+        "production_consumed", "editable", None,
+        "Original dfs.F90:561 uses cvlandslide as the triggering-slide mixture concentration.",
+    ),
+    _auxiliary_capability(
+        "rheology.cvglacier", "cvglacier", "parameter", "parsed_only", "read_only",
+        "Chamoli dfs.F90 rhoero=cvglacier assignment is commented out.",
+        "Parsed for provenance only.",
+    ),
+    _auxiliary_capability(
+        "extension_flags.simulate_buildings", "buildingsimul", "run_mode",
+        "parsed_only", "read_only",
+        "Original dfs.F90:58 ARF/WRF branch is not wired end to end.",
+        "Chamoli-only extension flag; not part of the 45-switch BJ_HXL registry.",
+        original_true_switch="yes",
     ),
     _auxiliary_capability(
         "time.wavemax", "wavemax", "parameter", "parsed_only", "read_only",

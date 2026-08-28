@@ -1456,6 +1456,68 @@
   padding: var(--space-6);
 }
 
+.tf-dialog-wide {
+  width: min(980px, 100%);
+  max-height: min(860px, calc(100vh - 32px));
+}
+
+.tf-dialog-wide .tf-dialog-body {
+  max-height: min(640px, calc(100vh - 220px));
+  padding: var(--space-5);
+}
+
+.tf-form-grid {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.tf-form-grid--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tf-icon-badge {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: var(--radius-control);
+  color: var(--color-brand);
+  background: var(--layer-on-acrylic);
+  border: 1px solid var(--layer-stroke);
+}
+
+.tf-flex-wrap {
+  flex-wrap: wrap;
+}
+
+.tf-metric-grid--compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.tf-case-import-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(240px, .75fr);
+  gap: var(--space-3);
+}
+
+.tf-case-import-columns .tf-card {
+  min-width: 0;
+}
+
+.tf-case-import-columns .tf-card-body-sm {
+  max-height: 170px;
+  overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .tf-form-grid--two,
+  .tf-case-import-columns,
+  .tf-metric-grid--compact {
+    grid-template-columns: 1fr;
+  }
+}
+
 .tf-form-stack {
   display: flex;
   flex-direction: column;

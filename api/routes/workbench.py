@@ -84,6 +84,7 @@ class ScenarioCreate(BaseModel):
     base_scenario_id: Optional[str] = None
     parameter_patch: Dict[str, Any] = Field(default_factory=dict)
     parameter_template_id: Optional[str] = None
+    control_overrides: Optional[Dict[str, Any]] = None
 
 
 class ScenarioUpdate(BaseModel):
@@ -92,6 +93,7 @@ class ScenarioUpdate(BaseModel):
     input_revision_id: Optional[str] = None
     input_bindings: Optional[list[InputBindingPayload]] = None
     parameter_template_id: Optional[str] = None
+    control_overrides: Optional[Dict[str, Any]] = None
     expected_version: Optional[int] = Field(None, ge=1)
 
 
@@ -596,6 +598,7 @@ async def create_scenario(request: Request, project_id: str, payload: ScenarioCr
         base_scenario_id=payload.base_scenario_id,
         parameter_patch=payload.parameter_patch,
         parameter_template_id=payload.parameter_template_id,
+        control_overrides=payload.control_overrides,
     )
 
 
@@ -627,6 +630,7 @@ async def update_scenario(
         input_revision_id=payload.input_revision_id,
         input_bindings=[item.model_dump() for item in payload.input_bindings] if payload.input_bindings is not None else None,
         parameter_template_id=payload.parameter_template_id,
+        control_overrides=payload.control_overrides,
         expected_version=payload.expected_version,
     )
 

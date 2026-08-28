@@ -1,9 +1,10 @@
 """Case configuration endpoints for Taichi Flow."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
+from starlette.concurrency import run_in_threadpool
 
 from api.services.parameter_catalog import build_case_config_interface
 from api.services.reference_config_parser import parse_reference_config_file
@@ -19,6 +20,18 @@ class CaseConfigParseRequest(BaseModel):
     case_base_dir: Optional[str] = Field(None, description="Optional base directory for relative case paths")
 
 
+class CaseImportPreviewRequest(BaseModel):
+    source_root: str = Field(..., min_length=1, description="Directory containing edda_in.txt")
+
+
+class CaseImportCommitRequest(BaseModel):
+    source_root: str = Field(..., min_length=1)
+    destination_root: str = Field(..., min_length=1)
+    expected_fingerprint: str = Field(..., min_length=16)
+    name: Optional[str] = Field(None, min_length=1, max_length=160)
+    description: str = ""
+
+
 @router.post("/parse-config")
 async def parse_case_config(payload: CaseConfigParseRequest) -> Dict[str, Any]:
     """Parse a case config into a frontend-safe manifest."""
@@ -27,3 +40,22 @@ async def parse_case_config(payload: CaseConfigParseRequest) -> Dict[str, Any]:
         return build_case_config_interface(parsed)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse case config: {exc}") from exc
+
+
+@router.post("/imports/preview")
+async def preview_case_import(request: Request, payload: CaseImportPreviewRequest) -> Dict[str, Any]:
+    """Preview a legacy reference case without writing to its source directory."""
+    return await run_in_threadpool(request.app.state.workbench.preview_case_import, payload.source_root)
+
+
+@router.post("/imports/commit")
+async def commit_case_import(request: Request, payload: CaseImportCommitRequest) -> Dict[str, Any]:
+    """Stage and atomically register a path-free legacy reference case."""
+    return await run_in_threadpool(
+        request.app.state.workbench.commit_case_import,
+        payload.source_root,
+        payload.destination_root,
+        expected_fingerprint=payload.expected_fingerprint,
+        name=payload.name,
+        description=payload.description,
+    )

@@ -318,6 +318,16 @@ def prepare_runtime_from_payload(
     if isinstance(rainfall_payload, dict) and rainfall_payload.get("mode") == "uniform_periods":
         raw_overrides["rainfall"] = _write_frontend_uniform_rainfall(rainfall_payload, run_output_dir)
     run_flags = raw_overrides.get("run_flags") if isinstance(raw_overrides, dict) else None
+    # Structured workbench scenarios carry the frozen EDDA switches under
+    # ``edda.run_controls`` rather than the legacy direct-payload
+    # ``run_flags`` object.  Resolve both shapes before annotating native
+    # sidecars; otherwise an imported Chamoli ``inflow.txt`` is incorrectly
+    # marked inactive even though the frozen ``simulate_inflow_hydrograph``
+    # switch is true.
+    if not isinstance(run_flags, dict) and isinstance(raw_overrides, dict):
+        edda_overrides = raw_overrides.get("edda")
+        if isinstance(edda_overrides, dict) and isinstance(edda_overrides.get("run_controls"), dict):
+            run_flags = edda_overrides["run_controls"]
     raw_overrides = _deep_merge(raw_overrides, _case_input_overrides(case_input_files, run_flags if isinstance(run_flags, dict) else None))
     if not dem_file and isinstance(raw_overrides.get("dem_file"), str):
         dem_file = str(raw_overrides["dem_file"])

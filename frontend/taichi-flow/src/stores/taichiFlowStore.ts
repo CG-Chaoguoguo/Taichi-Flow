@@ -35,6 +35,7 @@ export type ScenarioUpdateDraft = {
   input_revision_id?: string | null;
   input_bindings?: InputBinding[];
   parameter_template_id?: string | null;
+  control_overrides?: Record<string, unknown>;
   expected_version?: number;
 };
 
@@ -441,6 +442,9 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
               parameter_template_id: scenario.parameter_template_id,
               baseline: scenario.parameter_baseline || {},
               overrides: scenario.parameter_patch || {},
+              control_overrides: scenario.control_overrides || {},
+              configuration_ownership: scenario.configuration_ownership,
+              case_fingerprint: scenario.case_fingerprint,
               effective: scenario.effective_parameters || {},
               compute_policy_resolution: scenario.compute_policy_resolution
                 || state.scenarioConfigurations[scenarioId]?.compute_policy_resolution

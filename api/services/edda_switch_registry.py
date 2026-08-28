@@ -284,6 +284,18 @@ def registry_payload() -> Dict[str, Any]:
     }
 
 
+def canonical_control_value(spec: EddaSwitchSpec, value: Any) -> Any:
+    """Map parser-absent booleans onto the workbench/runtime off contract.
+
+    Chamoli ``edda_in.txt`` has no ``maxsoliddepthsave`` prompt, so the parser
+    stores ``None``. The 45-switch runtime contract is still boolean, and the
+    writer is off when the prompt is absent (``bool(None) is False``).
+    """
+    if spec.value_type == "boolean" and value is None:
+        return False
+    return value
+
+
 def snapshot_config_payload(
     snapshot: EddaSwitchSnapshot,
     *,
@@ -294,12 +306,12 @@ def snapshot_config_payload(
     return {
         "registry_version": snapshot.registry_version,
         "run_controls": {
-            spec.key: values[spec.key]
+            spec.key: canonical_control_value(spec, values[spec.key])
             for spec in EDDA_SWITCH_REGISTRY
             if spec.group == "run_control"
         },
         "output_controls": {
-            spec.key: values[spec.key]
+            spec.key: canonical_control_value(spec, values[spec.key])
             for spec in EDDA_SWITCH_REGISTRY
             if spec.group in {"legacy_output", "process_output"}
         },

@@ -165,6 +165,8 @@ def resolve_scenario_compute_snapshot(
     patch: Optional[Mapping[str, Any]],
     *,
     global_gates: Optional[Mapping[str, Any]] = None,
+    scenario_controls: Optional[Mapping[str, Any]] = None,
+    reference_owned: bool = False,
     template_id: Optional[str] = None,
     template_metadata: Optional[Mapping[str, Any]] = None,
     source_mode: str = "workbench",
@@ -185,6 +187,7 @@ def resolve_scenario_compute_snapshot(
     )
 
     gates = extract_gate_parameters(global_gates)
+    owned_controls = extract_gate_parameters(scenario_controls)
     baseline_values = dict(baseline or {})
     policy_metadata = {}
     if isinstance(template_metadata, Mapping):
@@ -203,15 +206,26 @@ def resolve_scenario_compute_snapshot(
     if VARIANT_PATH not in baseline_values and policy_metadata.get("topology"):
         baseline_values[VARIANT_PATH] = policy_metadata["topology"]
 
-    merged = merge_compute_gate_defaults(
-        baseline_values,
-        patch,
-        scenario_gate_overrides(gates),
-    )
+    if reference_owned:
+        # Imported reference cases carry their own complete EDDA switch
+        # snapshot.  Only sparse scenario controls may overlay that snapshot;
+        # global BJ defaults must not leak into the reference path.
+        resolved_baseline = merge_parameter_values(baseline_values, owned_controls)
+        merged = merge_parameter_values(resolved_baseline, strip_gate_parameters(patch))
+        resolver_parameters = resolved_baseline
+        resolver_gates = owned_controls
+    else:
+        merged = merge_compute_gate_defaults(
+            baseline_values,
+            patch,
+            scenario_gate_overrides(gates),
+        )
+        resolver_parameters = baseline_values
+        resolver_gates = gates
     try:
         resolution = resolve_compute_policy(
-            baseline_values,
-            global_gates=gates,
+            resolver_parameters,
+            global_gates=resolver_gates,
             template_id=template_id,
             source_mode=source_mode,
             strict_reference=strict_reference,
@@ -219,20 +233,20 @@ def resolve_scenario_compute_snapshot(
             topology_status=policy_metadata.get("topology_status"),
         )
     except ComputePolicyResolutionError as exc:
-        requested = str(gates.get(POLICY_KEY) or "auto")
+        requested = str(resolver_gates.get(POLICY_KEY) or "auto")
         blocked = {
             "status": "blocked",
-            "source": "global_override" if requested != "auto" else "auto",
+            "source": "scenario_override" if reference_owned and requested != "auto" else ("global_override" if requested != "auto" else "auto"),
             "requested": requested,
             "detected": {
-                "simulate_shallow_landslide": baseline_values.get(FSSIMUL_PATH),
-                "dfs_failure_source_variant": baseline_values.get(VARIANT_PATH),
+                "simulate_shallow_landslide": resolver_parameters.get(FSSIMUL_PATH),
+                "dfs_failure_source_variant": resolver_parameters.get(VARIANT_PATH),
                 "topology_status": policy_metadata.get("topology_status"),
                 "evidence": list(policy_metadata.get("evidence") or []),
             },
             "effective": {"mode": None, "simulate_shallow_landslide": None, "active_variant": None},
-            "numeric_variants": _collect_snapshot_numeric_variants(baseline_values, gates),
-            "settings_snapshot": gates,
+            "numeric_variants": _collect_snapshot_numeric_variants(resolver_parameters, resolver_gates),
+            "settings_snapshot": resolver_gates,
             "warnings": [],
             "blocking_issue": {
                 "code": exc.code,

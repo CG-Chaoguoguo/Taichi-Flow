@@ -12,6 +12,7 @@ const FLAG_LABELS: Record<string, string> = {
   simulate_water_solid_separately: "水沙分离",
   simulate_drainage_flow: "模拟排水",
   simulate_barrier: "模拟拦挡",
+  simulate_buildings: "模拟建筑物 ARF/WRF",
   use_full_dynamic_wave: "全动态波方程",
   use_analytic_fillable_porosity: "解析可填充孔隙度",
   estimate_positive_pressure_head: "估计正压水头",
@@ -28,7 +29,10 @@ function formatFlag(value: unknown): string {
 }
 
 export function EddaFlagsSection({ caseConfig }: { caseConfig: CaseConfigInterface | null }) {
-  const flags = caseConfig?.audit?.flags || {};
+  const flags = {
+    ...(caseConfig?.audit?.flags || {}),
+    ...(caseConfig?.audit?.extension_flags || {}),
+  };
   const entries = Object.entries(flags);
   if (!entries.length) {
     return (

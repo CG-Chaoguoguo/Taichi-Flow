@@ -195,8 +195,36 @@ def restore_profile_environment(
             target[key] = value
 
 
+USER_SELECTABLE_RUNTIME_PROFILES = ("cuda_production_default", "compat_default_off")
+
+USER_RUNTIME_PROFILE_META: Dict[str, Dict[str, str]] = {
+    "cuda_production_default": {
+        "label_zh": "CUDA 加速",
+        "description_zh": "使用 GPU 运行生产求解器（默认）。仅影响本次入队任务。",
+    },
+    "compat_default_off": {
+        "label_zh": "CPU 兼容",
+        "description_zh": "使用 CPU 运行，适合无 GPU 环境或回归验证。仅影响本次入队任务。",
+    },
+}
+
+
+def resolve_user_runtime_profile(name: Optional[str]) -> RuntimeProfile:
+    requested = (name or DEFAULT_RUNTIME_PROFILE).strip() or DEFAULT_RUNTIME_PROFILE
+    if requested not in USER_SELECTABLE_RUNTIME_PROFILES:
+        raise ValueError(f"Unsupported user runtime_profile: {requested}")
+    return resolve_runtime_profile(requested)
+
+
 def runtime_profiles_catalog() -> Dict[str, Any]:
     return {
         "default_profile": DEFAULT_RUNTIME_PROFILE,
         "profiles": {name: profile.to_dict() for name, profile in RUNTIME_PROFILES.items()},
+        "user_selectable": [
+            {
+                **RUNTIME_PROFILES[name].to_dict(),
+                **USER_RUNTIME_PROFILE_META[name],
+            }
+            for name in USER_SELECTABLE_RUNTIME_PROFILES
+        ],
     }

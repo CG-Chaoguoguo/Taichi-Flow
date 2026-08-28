@@ -29,7 +29,7 @@ from tqdm import tqdm
 from edda.config.sim_config import SimulationConfig
 from edda.config.edda_runtime_plan import build_runtime_control_plan
 from edda.core.fields import EDDAFields
-from edda.backend.backend_manager import initialize_taichi
+from edda.backend.backend_manager import assert_live_cuda, initialize_taichi, live_backend_snapshot
 from edda.io.dem_reader import DEMReader
 from edda.io.hydrograph_exporter import write_hydrograph_file
 from edda.io.rainfall_reader import RainfallReader
@@ -221,11 +221,29 @@ class EDDASolver:
         logger.info("Initializing EDDA solver...")
 
         # Initialize Taichi backend
+        requested_backend = str(self.config.compute.backend).lower()
         initialize_taichi(
-            backend=self.config.compute.backend,
+            backend=requested_backend,
             use_double_precision=self.config.compute.use_double_precision,
-            num_threads=self.config.compute.num_threads
+            num_threads=self.config.compute.num_threads,
+            device_memory_GB=8.0 if requested_backend in {"cuda", "auto"} else 1.0,
         )
+        if requested_backend == "cuda":
+            snapshot = assert_live_cuda()
+            print(
+                "[edda] CUDA backend confirmed: "
+                f"arch={snapshot.get('live_arch')} "
+                f"gpu={snapshot.get('gpu_name')} "
+                f"vram={snapshot.get('gpu_memory_used_MB')}MB/"
+                f"{snapshot.get('gpu_memory_total_MB')}MB",
+                flush=True,
+            )
+        else:
+            snapshot = live_backend_snapshot()
+            print(
+                f"[edda] compute backend={requested_backend} live_arch={snapshot.get('live_arch')}",
+                flush=True,
+            )
 
         # Load DEM
         logger.info(f"Loading DEM: {self.config.dem_file}")
@@ -1789,7 +1807,9 @@ class EDDASolver:
             # Apply to Taichi fields
             self.fields.set_zone_parameters(zone_mask, zone_params)
 
-            # Initialize erodible thickness from soil depth
+            # Seed erodible thickness from soil depth unless zfil (ltstar<0)
+            # will replace both ltstar_field and inierodithick, matching
+            # edda main program.F90:79-81,174-190 (ltstar starts at 0).
             erodible_np = self.fields.depth_field.to_numpy()
             self.fields.erodible_thickness.from_numpy(erodible_np)
 
@@ -1882,7 +1902,8 @@ class EDDASolver:
             self.fields.ltstar_field.from_numpy(ltstar)
             self.fields.lbstar_field.from_numpy(lbstar)
 
-        # FIX 6a: Initialize erodible thickness from soil depth
+        # Seed erodible thickness from soil depth; apply_native_runtime_inputs
+        # may later replace this with ltstar_field (glacier.asc) when ltstar < 0.
         erodible_np = self.fields.depth_field.to_numpy()
         self.fields.erodible_thickness.from_numpy(erodible_np)
 
@@ -2511,11 +2532,37 @@ class EDDASolver:
             families["Total_depth_EDDA"] = total_depth_export
         if output_enabled("save_volumetric_sediment_concentration"):
             families["Volumetric_sediment_conceEDDA"] = cv_export
-        if output_enabled("save_fs_min_grid") and run_enabled("simulate_shallow_landslide"):
+        # Chamoli/BJ dfs.F90 write LS_Scar/faildph whenever fsminsave is true,
+        # independent of fssimul. With fssimul=F the arrays stay zeros.
+        if output_enabled("save_fs_min_grid"):
             families["LS_ScarEDDA"] = ls_scar
             families["faildphEDDA"] = failure_depth_export
         if output_enabled("save_max_solid_depth"):
             families["MaxsoliddepthEDDA"] = max_solid_depth_export
+        chamoli_regime = (
+            getattr(getattr(self.config, "hydrology", None), "dfs_manningbar_variant", "")
+            == "debrisflowmanning_cvtol"
+        )
+        if chamoli_regime and output_enabled("save_flow_depth"):
+            families["SFdepthEDDA"] = np.asarray(
+                state.get("sfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["DFdepthEDDA"] = np.asarray(
+                state.get("dfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["FFdepthEDDA"] = np.asarray(
+                state.get("ffh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+        if chamoli_regime and output_enabled("save_max_flow_depth"):
+            families["MaxSFdepthEDDA"] = np.asarray(
+                state.get("maxsfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["MaxDFdepthEDDA"] = np.asarray(
+                state.get("maxdfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["MaxFFdepthEDDA"] = np.asarray(
+                state.get("maxffh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
 
         for original_stem, data in families.items():
             self._write_edda_text_grid(original_stem, t, data, nodata_mask, nodata_value)

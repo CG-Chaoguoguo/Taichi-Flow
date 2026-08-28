@@ -24,6 +24,8 @@ import type {
   MapStateResponse,
   RasterIdentifyResponse,
   RasterProfile,
+  CaseImportPreview,
+  CaseImportCommitResult,
 } from "../types";
 
 type ApiErrorPayload = { code?: string; message?: string; details?: unknown; request_id?: string };
@@ -261,6 +263,15 @@ export const mapStateApi = {
 export const casesApi = {
   parseConfig: (payload: { case_config_file: string; case_base_dir?: string }) =>
     request<CaseConfigInterface>("/cases/parse-config", json(payload)),
+  previewImport: (sourceRoot: string) =>
+    request<CaseImportPreview>("/cases/imports/preview", json({ source_root: sourceRoot })),
+  commitImport: (payload: {
+    source_root: string;
+    destination_root: string;
+    expected_fingerprint: string;
+    name?: string;
+    description?: string;
+  }) => request<CaseImportCommitResult>("/cases/imports/commit", json(payload)),
 };
 
 export const scenarioApi = {
@@ -276,6 +287,7 @@ export const scenarioApi = {
       input_revision_id?: string | null;
       input_bindings?: InputBinding[];
       parameter_template_id?: string | null;
+      control_overrides?: Record<string, unknown>;
       expected_version?: number;
     },
   ) => request<Scenario>(

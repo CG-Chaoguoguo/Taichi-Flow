@@ -52,6 +52,9 @@ const BINDING_FIELDS: Array<{ key: string; label: string; family: InputFile["fam
   { key: "zones.primary", label: "分区栅格", family: "zones", role: "zones" },
   { key: "slope.primary", label: "坡度栅格", family: "slope", role: "slope" },
   { key: "thickness.primary", label: "土层厚度", family: "thickness", role: "thickness" },
+  { key: "trigger.primary", label: "触发滑坡", family: "trigger", role: "trigger" },
+  { key: "inflow.primary", label: "入流过程", family: "inflow", role: "inflow" },
+  { key: "outflow.primary", label: "出流边界", family: "outflow", role: "outflow" },
   { key: "groundwater.initial", label: "初始水深", family: "groundwater", role: "groundwater" },
   { key: "infiltration.initial", label: "入渗初值", family: "infiltration", role: "infiltration" },
 ];
@@ -62,10 +65,12 @@ type InspectorPanelProps = {
   onFocusLayer: (layerId: string) => void;
   draftPatch: Record<string, unknown>;
   draftBindings: InputBinding[];
+  draftControls: Record<string, unknown>;
   dirty: boolean;
   saving: boolean;
   onDraftChange: (patch: Record<string, unknown>) => void;
   onBindingsChange: (bindings: InputBinding[]) => void;
+  onControlsChange: (controls: Record<string, unknown>) => void;
   onSave: () => Promise<void>;
   onOpenRainfall: () => void;
   onToggleCollapse?: () => void;
@@ -128,10 +133,12 @@ export function InspectorPanel({
   onFocusLayer,
   draftPatch,
   draftBindings,
+  draftControls,
   dirty,
   saving,
   onDraftChange,
   onBindingsChange,
+  onControlsChange,
   onSave,
   onOpenRainfall,
   onToggleCollapse,
@@ -147,7 +154,7 @@ export function InspectorPanel({
   const configurations = useTaichiFlowStore((state) => state.scenarioConfigurations);
   const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const addToast = useTaichiFlowStore((state) => state.addToast);
-  const [tab, setTab] = useState<InspectorTab>("parameters");
+  const [tab, setTab] = useState<InspectorTab>("bindings");
 
   const scenarioFromSelection = editorSelection?.kind === "scenario" || editorSelection?.kind === "result"
     ? scenarios.find((item) => item.scenario_id === editorSelection.scenarioId)
@@ -222,9 +229,9 @@ export function InspectorPanel({
           {(kind === "scenario" || kind === "queue") && scenario ? (
             <>
               <nav className="tf-inspector-tabs" aria-label="方案检视器标签">
-                <button type="button" className={tab === "parameters" ? "is-active" : ""} onClick={() => setTab("parameters")}><SlidersHorizontal size={14} />参数</button>
-                <button type="button" className={tab === "bindings" ? "is-active" : ""} onClick={() => setTab("bindings")}><Database size={14} />输入绑定</button>
-                <button type="button" className={tab === "run" ? "is-active" : ""} onClick={() => setTab("run")}><Play size={14} />运行</button>
+                <button type="button" data-testid="inspector-tab-bindings" className={tab === "bindings" ? "is-active" : ""} onClick={() => setTab("bindings")}><Database size={14} />输入绑定</button>
+                <button type="button" data-testid="inspector-tab-parameters" className={tab === "parameters" ? "is-active" : ""} onClick={() => setTab("parameters")}><SlidersHorizontal size={14} />参数</button>
+                <button type="button" data-testid="inspector-tab-run" className={tab === "run" ? "is-active" : ""} onClick={() => setTab("run")}><Play size={14} />运行</button>
               </nav>
 
               {tab === "parameters" ? (
@@ -234,7 +241,7 @@ export function InspectorPanel({
                       <ArchiveRestore size={18} />
                       <strong>历史方案参数只读</strong>
                       <span>此方案仍按 edda_in 兼容链路运行。为避免把 -1 等内部哨兵值误显示为可编辑参数，请先通过显式迁移向导创建参数模板和输入绑定快照。</span>
-                      <Button variant="secondary" size="small" onClick={() => setTab("bindings")}>前往迁移向导</Button>
+                      <Button variant="secondary" size="small" onClick={() => setTab("bindings")}>前往输入绑定</Button>
                     </div>
                   </div>
                 ) : (
@@ -243,8 +250,10 @@ export function InspectorPanel({
                     readOnly={!canEdit}
                     draftPatch={draftPatch}
                     draftBindings={draftBindings}
+                    draftControls={draftControls}
                     onDraftChange={onDraftChange}
                     onBindingsChange={onBindingsChange}
+                    onControlsChange={onControlsChange}
                     onOpenRainfall={onOpenRainfall}
                     validation={configuration?.validation}
                   />
@@ -281,7 +290,7 @@ export function InspectorPanel({
               {tab === "run" ? (
                 <div className="tf-inspector-section tf-stack">
                   {isLegacy ? <div className="tf-validation-summary is-neutral">历史方案保持只读兼容；请复制或迁移后再发起新运行。</div> : <ValidationSummary validation={configuration?.validation} />}
-                  <RunModule scenario={displayScenario} readOnly={!configuration?.validation?.valid} />
+                  <RunModule scenario={displayScenario} readOnly={!canEdit} />
                   <button type="button" className="tf-link-button" onClick={() => setDockTab("queue")}>打开队列</button>
                 </div>
               ) : null}

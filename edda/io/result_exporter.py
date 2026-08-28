@@ -76,8 +76,14 @@ class ResultExporter:
             logger.warning("No transform provided, using default identity transform")
             self.transform = Affine.identity()
 
-        # Set default CRS if not provided
-        if self.crs is None:
+        # Set default CRS if not provided.  Rasterio-backed readers may expose
+        # an absent CRS as the string ``"None"`` (for example when an ESRI
+        # ASCII grid is staged without a companion .prj file).  Passing that
+        # sentinel through to GDAL makes the first result write fail with
+        # ``The WKT could not be parsed``; treat it exactly like a missing CRS.
+        if self.crs is None or (
+            isinstance(self.crs, str) and self.crs.strip().lower() in {"", "none", "null"}
+        ):
             logger.warning("No CRS provided, using EPSG:4326")
             self.crs = CRS.from_epsg(4326)
 

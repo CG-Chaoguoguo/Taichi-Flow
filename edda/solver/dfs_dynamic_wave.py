@@ -436,6 +436,27 @@ class DFSDynamicWaveSolver:
         self.rizero0 = float(config.hydrology.rizero_initial)
         self.depthwt0_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
         self.rizero0_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.triggerslide_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.slide1 = 1
+        self.isslidetriggered = 0
+        self.triggerslide_enabled = False
+        self.cvlandslide = float(getattr(config.rheology, "cvlandslide", None) or 0.0)
+        self.debrisflowmanning = float(
+            getattr(config.rheology, "debrisflowmanning", None)
+            or config.rheology.n_manning
+        )
+        self.dfs_manningbar_variant = str(
+            getattr(config.hydrology, "dfs_manningbar_variant", "exponential_cv")
+        )
+        self.dfs_dry_face_velocity_variant = str(
+            getattr(config.hydrology, "dfs_dry_face_velocity_variant", "keep_velocity_bj")
+        )
+        self.dfs_artivis_variant = str(
+            getattr(config.hydrology, "dfs_artivis_variant", "depth_ratio_bj")
+        )
+        self.dfs_absubar_variant = str(
+            getattr(config.hydrology, "dfs_absubar_variant", "max_component_bj")
+        )
 
         self.reject_flag = ti.field(dtype=ti.i32, shape=())
         self.suggested_dt = ti.field(dtype=self.fp, shape=())
@@ -874,6 +895,9 @@ class DFSDynamicWaveSolver:
         self.rizero0_field.from_numpy(
             np.full((fields.nx, fields.ny), self.rizero0, dtype=self.numpy_float_dtype)
         )
+        self.triggerslide_field.from_numpy(
+            np.zeros((fields.nx, fields.ny), dtype=self.numpy_float_dtype)
+        )
         self.outflow_candidate_depth.fill(0.0)
         self.outflow_candidate_density.fill(self.rhow)
         self.outflow_accepted_depth.fill(0.0)
@@ -931,6 +955,29 @@ class DFSDynamicWaveSolver:
                 f"Initial depthwt field shape {depthwt_np.shape} does not match solver shape {(self.fields.nx, self.fields.ny)}."
             )
         self.depthwt0_field.from_numpy(depthwt_np)
+
+    def set_triggerslide_field(self, trigger_field: np.ndarray | None) -> None:
+        """Load original `triggerslide` grid. Independent of `fssimul`.
+
+        Fortran: `edda main program.F90` always reads the raster; `dfs.F90:103`
+        copies it to `temptriggerslide`, then `dfs.F90:559-564` adds it once
+        when `slide1==1 .and. tnow>0`.
+        """
+        if trigger_field is None:
+            self.triggerslide_field.from_numpy(
+                np.zeros((self.fields.nx, self.fields.ny), dtype=self.numpy_float_dtype)
+            )
+            self.triggerslide_enabled = False
+            return
+        trigger_np = np.asarray(trigger_field, dtype=self.numpy_float_dtype)
+        if trigger_np.shape != (self.fields.nx, self.fields.ny):
+            raise ValueError(
+                f"Triggering-slide field shape {trigger_np.shape} does not match solver shape {(self.fields.nx, self.fields.ny)}."
+            )
+        self.triggerslide_field.from_numpy(trigger_np)
+        self.triggerslide_enabled = True
+        self.slide1 = 1
+        self.isslidetriggered = 0
 
     def set_initial_rizero_field(self, rizero_field: np.ndarray | None) -> None:
         if rizero_field is None:
@@ -6031,17 +6078,34 @@ class DFSDynamicWaveSolver:
             return
         fhpredi = np.asarray(self.fields.fhpredi.to_numpy(), dtype=np.float64)
         frhopredi = np.asarray(self.fields.frhopredi.to_numpy(), dtype=np.float64)
+        cell_area = np.asarray(self.fields.cell_area_cal.to_numpy(), dtype=np.float64)
         h_source = fhpredi[source_i, source_j]
         h_target = fhpredi[target_i, target_j]
+        area_source = cell_area[source_i, source_j]
+        area_target = cell_area[target_i, target_j]
         denominator = h_source + h_target
         valid = (denominator != 0.0) & ~((h_source <= TOL) & (h_target <= TOL))
         if not np.any(valid):
             return
         last_index = int(np.flatnonzero(valid)[-1])
-        cv_source_depth = (frhopredi[source_i[last_index], source_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
-        cv_target_depth = (frhopredi[target_i[last_index], target_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
-        para_source = max(float(cv_source_depth * h_source[last_index]), 0.0)
-        para_target = max(float(cv_target_depth * h_target[last_index]), 0.0)
+        cv_source = (frhopredi[source_i[last_index], source_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
+        cv_target = (frhopredi[target_i[last_index], target_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
+        cv_source = max(float(cv_source), 0.0)
+        cv_target = max(float(cv_target), 0.0)
+        if self.dfs_face_flux_variant == "arithmetic_mean_chamoli":
+            area_sum = float(area_source[last_index] + area_target[last_index])
+            if area_sum <= 0.0:
+                return
+            self.legacy_previous_face_cvbar_scalar = (
+                cv_source * float(area_source[last_index]) + cv_target * float(area_target[last_index])
+            ) / area_sum
+            return
+        if self.dfs_face_flux_variant == "asymmetric_head_guard":
+            self.legacy_previous_face_cvbar_scalar = 0.5 * (cv_source + cv_target)
+            return
+        # both_thin_weighted / default: depth-weighted Cv matching BJ face flux.
+        para_source = cv_source * float(h_source[last_index])
+        para_target = cv_target * float(h_target[last_index])
         self.legacy_previous_face_cvbar_scalar = (para_source + para_target) / float(denominator[last_index])
 
     def step(self, dt: float) -> dict:
@@ -6116,6 +6180,9 @@ class DFSDynamicWaveSolver:
             self._advance_double_layer_failure_sources(dt_used)
         else:
             self._zero_failure_source_staging()
+        if self.triggerslide_enabled and self.slide1 == 1 and self.current_time > 0.0:
+            self._apply_triggerslide_one_shot(self.rhow, self.rhos, self.cvlandslide)
+            self.isslidetriggered = 1
         self._record_stage_trace("SOURCE_STAGING", dt_used, event="POST_SOURCE_STAGING")
         self._merge_source_terms(dt_used, self.rhow, self.rhos, self.cvstar)
         self._run_erosion_deposition_kernel_diagnostic_if_enabled(dt_used)
@@ -6251,6 +6318,8 @@ class DFSDynamicWaveSolver:
             self.erosion_step_diagnostics.append(erosion_diag_record)
         if self.simulate_shallow_landslide:
             self._commit_precomputed_failure_schedule()
+        if self.isslidetriggered == 1:
+            self.slide1 = 0
         self._commit_cumulative_infiltration()
         self._sync_uv_from_fortran_velocity()
         self._sync_legacy_directional_velocity()
@@ -6275,6 +6344,24 @@ class DFSDynamicWaveSolver:
         for i, j in self.fields.tempfsh_flow:
             self.fields.tempfsh_flow[i, j] = 0.0
             self.fields.tempfsrho_flow[i, j] = 0.0
+
+    @ti.kernel
+    def _apply_triggerslide_one_shot(self, rho_water: ti.f64, rho_sediment: ti.f64, cvlandslide: ti.f64):
+        """Original `dfs.F90:559-564` one-shot triggering-slide injection.
+
+        if (slide1==1 .and. tnow>0) then
+            tempfsh(:)=tempfsh(:)+temptriggerslide(:)
+            tempfsrho(:)=(rhos-rhow)*cvlandslide+rhow
+            eleori(:)=ele(:)-tempfsh(:)
+            isslidetriggered=1
+        end if
+        """
+        for i, j in self.fields.tempfsh_flow:
+            if self.fields.is_nodata[i, j]:
+                continue
+            self.fields.tempfsh_flow[i, j] = self.fields.tempfsh_flow[i, j] + self.triggerslide_field[i, j]
+            self.fields.tempfsrho_flow[i, j] = (rho_sediment - rho_water) * cvlandslide + rho_water
+            self.fields.z_original[i, j] = self.fields.z_bed[i, j] - self.fields.tempfsh_flow[i, j]
 
     @ti.kernel
     def _stage_surface_forcing_without_infiltration(
@@ -7198,7 +7285,7 @@ class DFSDynamicWaveSolver:
         simulate_erosion: ti.i32,
         simulate_separate_deposition: ti.i32,
     ):
-        rhoero = cvstar * (rho_sediment - rho_water) + rho_water
+        rhodepo_cvstar = cvstar * (rho_sediment - rho_water) + rho_water
 
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
@@ -7209,7 +7296,7 @@ class DFSDynamicWaveSolver:
                 self.fields.absubar_vcomp_temp[i, j] = 0.0
                 self.fields.absubar_velocity_state_scale_temp[i, j] = 0.0
                 self.fields.absubar_selected_is_vorth_temp[i, j] = 0
-                self.fields.rhodepo_temp[i, j] = rhoero
+                self.fields.rhodepo_temp[i, j] = rhodepo_cvstar
                 self.fields.tau_temp[i, j] = 0.0
                 self.fields.taoc_temp[i, j] = 0.0
                 self.fields.taoc_old_temp[i, j] = 0.0
@@ -7274,31 +7361,49 @@ class DFSDynamicWaveSolver:
             if cv < 0.0:
                 cv = 0.0
 
+            fv0 = self.fields.fv_fortran[i, j, 0]
+            fv1 = self.fields.fv_fortran[i, j, 1]
+            fv2 = self.fields.fv_fortran[i, j, 2]
+            fv3 = self.fields.fv_fortran[i, j, 3]
+            fv4 = self.fields.fv_fortran[i, j, 4]
+            fv5 = self.fields.fv_fortran[i, j, 5]
+            fv6 = self.fields.fv_fortran[i, j, 6]
+            fv7 = self.fields.fv_fortran[i, j, 7]
             velocity_state_scale = 1.0
-            if ti.static(self.use_fortran_absubar_velocity_state):
-                # dfs.F90 resets fvpredi before the source-rate branch and
-                # computes fvpredi2=0.5*(fv+fvpredi), so vvmax=1 uses 0.5*fv.
-                velocity_state_scale = 0.5
-
-            fv0 = velocity_state_scale * self.fields.fv_fortran[i, j, 0]
-            fv1 = velocity_state_scale * self.fields.fv_fortran[i, j, 1]
-            fv2 = velocity_state_scale * self.fields.fv_fortran[i, j, 2]
-            fv3 = velocity_state_scale * self.fields.fv_fortran[i, j, 3]
-            fv4 = velocity_state_scale * self.fields.fv_fortran[i, j, 4]
-            fv5 = velocity_state_scale * self.fields.fv_fortran[i, j, 5]
-            fv6 = velocity_state_scale * self.fields.fv_fortran[i, j, 6]
-            fv7 = velocity_state_scale * self.fields.fv_fortran[i, j, 7]
-
-            vorth_x = 0.5 * (ti.abs(fv0) + ti.abs(fv4))
-            vorth_y = 0.5 * (ti.abs(fv2) + ti.abs(fv6))
-            vorth = ti.sqrt(vorth_x * vorth_x + vorth_y * vorth_y)
-
-            vcomp_x = 0.5 * (ti.abs(fv3) + ti.abs(fv7))
-            vcomp_y = 0.5 * (ti.abs(fv1) + ti.abs(fv5))
-            vcomp = ti.sqrt(vcomp_x * vcomp_x + vcomp_y * vcomp_y)
-            absubar = vorth
-            if vcomp > absubar:
-                absubar = vcomp
+            vorth = 0.0
+            vcomp = 0.0
+            absubar = 0.0
+            if ti.static(self.dfs_absubar_variant == "signed_mean_chamoli"):
+                # Chamoli dfs.F90:209-212 reconstructs a signed Cartesian speed
+                # from raw accepted `fv` (no fvpredi2 0.5 scale) with the
+                # Fortran literal 0.707 on diagonals.
+                diag = 0.707
+                vx = (fv4 - fv0) * 0.5 + (fv3 - fv7) * 0.5 * diag + (fv5 - fv1) * 0.5 * diag
+                vy = (fv2 - fv6) * 0.5 + (fv3 - fv7) * 0.5 * diag - (fv5 - fv1) * 0.5 * diag
+                absubar = ti.sqrt(vx * vx + vy * vy)
+                vorth = absubar
+            else:
+                if ti.static(self.use_fortran_absubar_velocity_state):
+                    # dfs.F90 resets fvpredi before the source-rate branch and
+                    # computes fvpredi2=0.5*(fv+fvpredi), so vvmax=1 uses 0.5*fv.
+                    velocity_state_scale = 0.5
+                fv0 = velocity_state_scale * fv0
+                fv1 = velocity_state_scale * fv1
+                fv2 = velocity_state_scale * fv2
+                fv3 = velocity_state_scale * fv3
+                fv4 = velocity_state_scale * fv4
+                fv5 = velocity_state_scale * fv5
+                fv6 = velocity_state_scale * fv6
+                fv7 = velocity_state_scale * fv7
+                vorth_x = 0.5 * (ti.abs(fv0) + ti.abs(fv4))
+                vorth_y = 0.5 * (ti.abs(fv2) + ti.abs(fv6))
+                vorth = ti.sqrt(vorth_x * vorth_x + vorth_y * vorth_y)
+                vcomp_x = 0.5 * (ti.abs(fv3) + ti.abs(fv7))
+                vcomp_y = 0.5 * (ti.abs(fv1) + ti.abs(fv5))
+                vcomp = ti.sqrt(vcomp_x * vcomp_x + vcomp_y * vcomp_y)
+                absubar = vorth
+                if vcomp > absubar:
+                    absubar = vcomp
             self.fields.absubar_temp[i, j] = absubar
             self.fields.absubar_vorth_temp[i, j] = vorth
             self.fields.absubar_vcomp_temp[i, j] = vcomp
@@ -7389,7 +7494,10 @@ class DFSDynamicWaveSolver:
 
                 manningbar = self.fields.n_manning_field[i, j]
                 if cv > CVTOL:
-                    manningbar = manningbar * self.manningb * ti.exp(self.manningm * cv)
+                    if ti.static(self.dfs_manningbar_variant == "debrisflowmanning_cvtol"):
+                        manningbar = self.debrisflowmanning
+                    else:
+                        manningbar = manningbar * self.manningb * ti.exp(self.manningm * cv)
                 # Match dfs.F90 literally: `manningbar**2./fhpredi1(i)**1.333`
                 coemanning = manningbar * manningbar / ti.pow(self.fields.fhpredi1[i, j], DFS_MANNING_EXP)
                 sfmanning = coemanning * absubar * absubar
@@ -7427,6 +7535,12 @@ class DFSDynamicWaveSolver:
                     erorate = self.fields.kero_field[i, j] * (tao - taoc)
                 self.fields.erorate_raw_temp[i, j] = erorate
 
+                # Chamoli dfs.F90:444 rhoero=cvero(zo); BJ dfs.F90:102 rhoero=cvstar.
+                cvero_local = self.fields.cvero_field[i, j]
+                if cvero_local < 0.0:
+                    cvero_local = cvstar
+                rhoero = cvero_local * (rho_sediment - rho_water) + rho_water
+
                 if (self.fields.frhopredi1[i, j] * self.fields.fhpredi1[i, j] + erorate * dt * rhoero) > (rholimit * (self.fields.fhpredi1[i, j] + erorate * dt)):
                     denominator = rhoero - rholimit
                     if denominator != 0.0 and dt != 0.0:
@@ -7444,7 +7558,8 @@ class DFSDynamicWaveSolver:
                 self.fields.erorate_clamped_temp[i, j] = erorate
 
             deporate = 0.0
-            rhodepo = rhoero
+            # Chamoli dfs.F90:113 rhodepo starts from cvstar even when rhoero uses cvero.
+            rhodepo = rhodepo_cvstar
             if cv > cvlimit and absubar < DFS_TWO_THIRDS * fvdepo:
                 self.fields.deposition_gate_temp[i, j] = 1
                 deporate = self.coedepo * (1.0 - 1.5 * absubar / fvdepo) * (cvlimit - cv) / cvstar * absubar
@@ -7488,8 +7603,6 @@ class DFSDynamicWaveSolver:
         rho_sediment: ti.f64,
         cvstar: ti.f64,
     ):
-        rhoero = cvstar * (rho_sediment - rho_water) + rho_water
-
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 self.fields.tempele[i, j] = self.fields.z_bed[i, j]
@@ -7514,6 +7627,11 @@ class DFSDynamicWaveSolver:
                 self.fields.frhopredi[i, j] = rho_water
             else:
                 self.fields.fhpredi[i, j] = fhpredi
+                # Chamoli dfs.F90:572 uses per-cell cvero for the erosion mass term.
+                cvero_local = self.fields.cvero_field[i, j]
+                if cvero_local < 0.0:
+                    cvero_local = cvstar
+                rhoero = cvero_local * (rho_sediment - rho_water) + rho_water
                 mass = (
                     self.fields.frhopredi1[i, j] * self.fields.fhpredi1[i, j]
                     + self.fields.erosion_rate[i, j] * dt * rhoero
@@ -7577,6 +7695,14 @@ class DFSDynamicWaveSolver:
                         hi = self.fields.fhpredi[i, j] + self.fields.tempele[i, j]
                         hn = self.fields.fhpredi[ni, nj] + self.fields.tempele[ni, nj]
                         use_both_thin_weighted = ti.static(self.dfs_face_flux_variant == "both_thin_weighted")
+                        use_arithmetic_mean_chamoli = ti.static(
+                            self.dfs_face_flux_variant == "arithmetic_mean_chamoli"
+                        )
+                        use_both_thin_gate = ti.static(use_both_thin_weighted or use_arithmetic_mean_chamoli)
+                        use_weighted_hbar = ti.static(use_both_thin_weighted or use_arithmetic_mean_chamoli)
+                        use_uniform_diagonal_width = ti.static(
+                            use_both_thin_weighted or use_arithmetic_mean_chamoli
+                        )
                         face_gate_tol = TOL + ti.static(self.dfs_face_gate_tol_eps)
 
                         gate_blocks_face = False
@@ -7597,7 +7723,7 @@ class DFSDynamicWaveSolver:
                                 (self.fields.fhpredi[i, j] <= face_gate_tol and hi >= hn)
                                 or (self.fields.fhpredi[ni, nj] <= face_gate_tol and hn >= hi)
                             )
-                        elif ti.static(use_both_thin_weighted):
+                        elif ti.static(use_both_thin_gate):
                             gate_blocks_face = (
                                 self.fields.fhpredi[i, j] <= face_gate_tol
                                 and self.fields.fhpredi[ni, nj] <= face_gate_tol
@@ -7703,7 +7829,7 @@ class DFSDynamicWaveSolver:
                             area_i = self.fields.cell_area_cal[i, j]
                             area_n = self.fields.cell_area_cal[ni, nj]
                             hbar = 0.5 * (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj])
-                            if ti.static(use_both_thin_weighted):
+                            if ti.static(use_weighted_hbar):
                                 hbar = (
                                     self.fields.fhpredi[i, j] * area_i
                                     + self.fields.fhpredi[ni, nj] * area_n
@@ -7757,6 +7883,9 @@ class DFSDynamicWaveSolver:
                                     )
                                     if depth_area > 0.0:
                                         cvbar = (parai * area_i + paran * area_n) / depth_area
+                                elif ti.static(use_arithmetic_mean_chamoli):
+                                    # Chamoli dfs.F90:634 — area-mean Cv without depth weighting.
+                                    cvbar = (cv_source * area_i + cv_neighbor * area_n) / (area_i + area_n)
 
                                 miubar = DFS_MIU_BASE + cvbar / CVTOL * (
                                     self.fields.alpha2_field[i, j] * ti.exp(self.fields.beta2_field[i, j] * CVTOL) - DFS_MIU_BASE
@@ -7766,7 +7895,8 @@ class DFSDynamicWaveSolver:
 
                                 manningbar = 0.5 * (ti.abs(self.fields.n_manning_field[i, j]) + ti.abs(self.fields.n_manning_field[ni, nj]))
                                 if cvbar > CVTOL:
-                                    manningbar = manningbar * self.manningb * ti.exp(self.manningm * cvbar)
+                                    if ti.static(self.dfs_manningbar_variant != "debrisflowmanning_cvtol"):
+                                        manningbar = manningbar * self.manningb * ti.exp(self.manningm * cvbar)
 
                                 frhobar = 0.5 * (self.fields.frhopredi[i, j] + self.fields.frhopredi[ni, nj])
                                 if ti.static(use_both_thin_weighted):
@@ -7779,6 +7909,7 @@ class DFSDynamicWaveSolver:
                                             self.fields.frhopredi[i, j] * self.fields.fhpredi[i, j] * area_i
                                             + self.fields.frhopredi[ni, nj] * self.fields.fhpredi[ni, nj] * area_n
                                         ) / depth_area
+                                # arithmetic_mean_chamoli and asymmetric keep 0.5*(ρi+ρnq).
                                 if frhobar < rho_water:
                                     frhobar = rho_water
                                 gammadeb = frhobar * self.g
@@ -7827,12 +7958,34 @@ class DFSDynamicWaveSolver:
                                         + self.fields.erosion_rate[i, j]
                                         + self.fields.deposition_rate[i, j]
                                     )
+                                    artivis_weight = (
+                                        DFS_ARTIVIS_COEFF
+                                        * ti.abs(self.fields.fhpredi[i, j] - self.fields.fhpredi[ni, nj])
+                                        / (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj])
+                                    )
+                                    if ti.static(self.dfs_artivis_variant == "velocity_ratio_chamoli"):
+                                        fv_neighbor = self.fields.fv_fortran[ni, nj, d]
+                                        artivis_weight = (
+                                            DFS_ARTIVIS_COEFF
+                                            * ti.abs(fv_neighbor - fv_old)
+                                            / (ti.abs(fv_neighbor) + ti.abs(fv_old) + 1.0)
+                                        )
+                                        if not (d == 0 or d == 2 or d == 4 or d == 6):
+                                            artivis_weight = artivis_weight / SQRT2
                                     dv = (
                                         (-grad - sf - vdiff_term) * self.g * dt
-                                        + DFS_ARTIVIS_COEFF * ti.abs(self.fields.fhpredi[i, j] - self.fields.fhpredi[ni, nj]) / (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj]) * artivis
+                                        + artivis_weight * artivis
                                         - fv_old * source_depth_rate * dt / ybar
                                     )
                                     fvpred = dv + fv_old
+
+                                    if ti.static(self.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"):
+                                        # Chamoli dfs.F90:736-737, after fvpredi=dv+fv and
+                                        # before the sign-reversal check.
+                                        if fvpred < 0.0 and self.fields.fhpredi[ni, nj] <= TOL:
+                                            fvpred = 0.0
+                                        if fvpred > 0.0 and self.fields.fhpredi[i, j] <= TOL:
+                                            fvpred = 0.0
 
                                     if fv_old * fvpred < 0.0:
                                         dt0 = -fv_old / (dv / dt)
@@ -7879,7 +8032,7 @@ class DFSDynamicWaveSolver:
                                     yflux = ti.min(self.fields.fhpredi[ni, nj], hbar)
                                     frhoflux = self.fields.frhopredi[ni, nj]
                                 width = _direction_width(self.fields.dx, d)
-                                if ti.static(use_both_thin_weighted):
+                                if ti.static(use_uniform_diagonal_width):
                                     width = self.fields.dx * (SQRT2 - 1.0)
                                 qqt = fvpred * yflux * width
                                 qq = qqt * (dt - dt0)
@@ -8368,6 +8521,9 @@ class DFSDynamicWaveSolver:
 
             self.fields.h[i, j] = self.fields.fhpredi2[i, j]
             self.fields.rho[i, j] = self.fields.frhopredi2[i, j]
+            # Chamoli dfs.F90:1115-1133 classifies with the PREVIOUS accepted cv
+            # against the NEW fhpredi2 depth, then dfs.F90:1284 updates cv.
+            prev_cv = self.fields.Cv[i, j]
             # dfs.F90 commits frho/cv before the final shallow-depth fh reset:
             #   frho=frhopredi2
             #   cv=(frho-rhow)/(rhos-rhow)
@@ -8400,6 +8556,22 @@ class DFSDynamicWaveSolver:
                 self.fields.max_solid_depth[i, j], solid_depth
             )
             self.fields.total_depth[i, j] = self.fields.h[i, j] + self.fields.depo_thickness[i, j]
+            if ti.static(self.dfs_manningbar_variant == "debrisflowmanning_cvtol"):
+                # Chamoli dfs.F90:184-186 zeros class depths each step, then
+                # :1115-1133 writes only the class matching the previous cv.
+                local_h = self.fields.h[i, j]
+                self.fields.sfh[i, j] = 0.0
+                self.fields.dfh[i, j] = 0.0
+                self.fields.ffh[i, j] = 0.0
+                if prev_cv >= 0.5:
+                    self.fields.sfh[i, j] = local_h
+                    self.fields.maxsfh[i, j] = ti.max(self.fields.maxsfh[i, j], local_h)
+                elif prev_cv >= 0.2:
+                    self.fields.dfh[i, j] = local_h
+                    self.fields.maxdfh[i, j] = ti.max(self.fields.maxdfh[i, j], local_h)
+                else:
+                    self.fields.ffh[i, j] = local_h
+                    self.fields.maxffh[i, j] = ti.max(self.fields.maxffh[i, j], local_h)
 
     @ti.kernel
     def _sync_uv_from_fortran_velocity(self):

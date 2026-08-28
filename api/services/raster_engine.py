@@ -35,6 +35,7 @@ CONTINUOUS_FAMILIES = {
     "dem",
     "slope",
     "thickness",
+    "trigger",
     "manning",
     "manningfil",
     "rainfall",

@@ -54,6 +54,7 @@ export function ProjectEditor() {
   const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "rainfall">("canvas");
   const [draftPatch, setDraftPatch] = useState<Record<string, unknown>>({});
   const [draftBindings, setDraftBindings] = useState<InputBinding[]>([]);
+  const [draftControls, setDraftControls] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
   const [compactWindow, setCompactWindow] = useState(() => typeof window !== "undefined" && window.innerWidth < 1280);
   const layoutCommitTimer = useRef<number | undefined>(undefined);
@@ -173,6 +174,7 @@ export function ProjectEditor() {
   useEffect(() => {
     setDraftPatch({ ...(selectedScenario?.parameter_patch || {}) });
     setDraftBindings([...(selectedScenario?.input_bindings || [])]);
+    setDraftControls({ ...(selectedScenario?.control_overrides || {}) });
     setWorkspaceMode("canvas");
     if (selectedScenario) void fetchScenarioConfiguration(selectedScenario.scenario_id);
   }, [fetchScenarioConfiguration, selectedScenario?.scenario_id, selectedScenario?.updated_at]);
@@ -188,6 +190,7 @@ export function ProjectEditor() {
   const dirty = Boolean(selectedScenario) && (
     JSON.stringify(draftPatch) !== JSON.stringify(selectedScenario?.parameter_patch || {})
     || JSON.stringify(draftBindings) !== JSON.stringify(selectedScenario?.input_bindings || [])
+    || JSON.stringify(draftControls) !== JSON.stringify(selectedScenario?.control_overrides || {})
   );
 
   const handleRainfallChange = (
@@ -214,10 +217,12 @@ export function ProjectEditor() {
       const saved = await updateScenario(selectedScenario.scenario_id, {
         parameter_patch: draftPatch,
         input_bindings: draftBindings,
+        control_overrides: draftControls,
         expected_version: selectedScenario.version || 1,
       });
       setDraftPatch({ ...(saved.parameter_patch || {}) });
       setDraftBindings([...(saved.input_bindings || [])]);
+      setDraftControls({ ...(saved.control_overrides || {}) });
       await fetchScenarioConfiguration(saved.scenario_id);
     } finally {
       setSaving(false);
@@ -336,10 +341,12 @@ export function ProjectEditor() {
                   onFocusLayer={focusAsset}
                   draftPatch={draftPatch}
                   draftBindings={draftBindings}
+                  draftControls={draftControls}
                   dirty={dirty}
                   saving={saving}
                   onDraftChange={setDraftPatch}
                   onBindingsChange={setDraftBindings}
+                  onControlsChange={setDraftControls}
                   onSave={saveScenario}
                   onOpenRainfall={() => setWorkspaceMode("rainfall")}
                   onToggleCollapse={() => togglePane("inspector")}

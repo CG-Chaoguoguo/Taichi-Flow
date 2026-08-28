@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parameterApi } from "../../api/taichiFlowAdapter";
 import { Button } from "../../components/Button";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
+import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { ManningModeEditor } from "../../components/ManningModeEditor";
 import { ZoneSoilEditor, ZONE_TAKEN_OVER_KEYS, countSpatialZones } from "../../components/ZoneSoilEditor";
 import { ParameterGroupSection } from "../../components/ParameterGroupSection";
@@ -52,16 +53,20 @@ export function ParameterModule({
   readOnly = false,
   draftPatch,
   draftBindings = [],
+  draftControls = {},
   onDraftChange,
   onBindingsChange = () => undefined,
+  onControlsChange = () => undefined,
   validation,
 }: {
   scenario: Scenario;
   readOnly?: boolean;
   draftPatch: Record<string, unknown>;
   draftBindings?: InputBinding[];
+  draftControls?: Record<string, unknown>;
   onDraftChange: (patch: Record<string, unknown>) => void;
   onBindingsChange?: (bindings: InputBinding[]) => void;
+  onControlsChange?: (controls: Record<string, unknown>) => void;
   onOpenRainfall?: () => void;
   validation?: ValidationState | null;
   onSave?: () => Promise<void>;
@@ -112,6 +117,10 @@ export function ParameterModule({
       : draftPatch["spatial_zones.zones"],
   );
   const multiZone = zoneCount > 1;
+  const eddaEntries = useMemo(
+    () => (catalog?.parameters || []).filter((entry) => entry.control_family === "edda"),
+    [catalog],
+  );
   const groups = useMemo(() => {
     const grouped = new Map<string, ParameterCatalogEntry[]>();
     for (const entry of entries) {
@@ -213,6 +222,25 @@ export function ParameterModule({
         canEdit={canEdit}
         readOnly={readOnly}
       />
+      {scenario.configuration_ownership === "reference_case" && catalog?.control_registry && eddaEntries.length ? (
+        <EddaComputeControlsSection
+          entries={eddaEntries}
+          controlRegistry={catalog.control_registry}
+          baseline={scenario.parameter_baseline || {}}
+          draftPatch={draftControls}
+          canEdit={canEdit}
+          onDraftChange={onControlsChange}
+          title="Chamoli 计算控制"
+          subtitle="原始 edda_in 快照归当前方案所有；BJ 全局设置不会覆盖这些值"
+          overrideChipLabel="方案覆盖"
+          baselineChipLabel="Chamoli 默认"
+        />
+      ) : null}
+      {scenario.configuration_ownership === "reference_case" ? (
+        <div className="tf-info-banner tf-caption">
+          zfil → glacier.asc 已作为 thickness.primary 绑定；ltstar=-1 按原始 Chamoli 语义由栅格厚度链路处理，未把它误当成可编辑标量。
+        </div>
+      ) : null}
       {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0] ? (
         <div className="tf-caption tf-text-danger" role="status">
           {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0].message}

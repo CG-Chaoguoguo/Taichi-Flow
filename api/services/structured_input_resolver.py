@@ -10,12 +10,23 @@ import numpy as np
 
 from api.services.edda_semantic_gate import SemanticGateViolation, validate_flat_edda_controls
 from api.services.edda_input_mapper import _write_geotiff_grid, _write_rainfall_file
+from api.services.parameter_catalog import PARAMETER_ENUM_SPECS
 from api.services.rainfall_timeline import regular_boundaries
+from api.services.scenario_config_overrides import (
+    ZONE_LAYER_FIELD_MAP,
+    ZONE_PATCH_PASSTHROUGH_KEYS,
+    _coerce_zone_id,
+)
 from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
 
 
 RASTER_SOURCES = {"raster", "rifil", "rifil_grid", "raster_rifil"}
 UNIFORM_SOURCES = {"uniform", "uniform_cri"}
+
+
+def _rainfall_is_active(parameters: Dict[str, Any]) -> bool:
+    """Rainfall hydrograph is a run contract only while ``rainsimul`` is on."""
+    return parameters.get("edda.run_controls.simulate_rainfall") is not False
 
 
 def _active_bindings(manifest: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
@@ -61,13 +72,21 @@ def validate_scenario_configuration(
     if "dem.primary" not in by_key:
         add_error("missing_dem_binding", "缺少活动的 DEM 主输入绑定（dem.primary）。", binding_key="dem.primary")
 
+    rainfall_active = _rainfall_is_active(parameters)
     periods = parameters.get("rainfall.periods")
-    if not isinstance(periods, list) or not periods:
+    if not rainfall_active:
+        add_warning(
+            "rainfall_inactive_schedule_ignored",
+            "模拟降雨已关闭；降雨过程仅作档案保留，不参与本次运行预检。",
+            parameter_key="edda.run_controls.simulate_rainfall",
+        )
+        periods = []
+    elif not isinstance(periods, list) or not periods:
         add_error("rainfall_periods_empty", "降雨过程至少需要一个时段。", parameter_key="rainfall.periods")
         periods = []
     timeline = parameters.get("rainfall.timeline")
     expected_boundaries: list[float] | None = None
-    if isinstance(timeline, dict):
+    if rainfall_active and isinstance(timeline, dict):
         timeline_mode = str(timeline.get("mode") or "regular").lower()
         if timeline_mode == "regular":
             try:
@@ -252,6 +271,115 @@ def validate_scenario_configuration(
             if dem_crs and crs and str(dem_crs) != str(crs):
                 add_error("grid_crs_mismatch", f"栅格 {binding.get('binding_key')} 的坐标参考系与 DEM 不一致。", binding_key=str(binding.get("binding_key") or ""))
 
+    zones_value = parameters.get("spatial_zones.zones")
+    if zones_value is not None:
+        if not isinstance(zones_value, dict):
+            add_error(
+                "spatial_zones_invalid",
+                "分区参数必须是以区号为键的对象。",
+                parameter_key="spatial_zones.zones",
+            )
+        else:
+            seen_zone_ids: set[int] = set()
+            for raw_key, raw_row in zones_value.items():
+                zone_id = _coerce_zone_id(raw_key, raw_row)
+                if zone_id is None:
+                    add_error(
+                        "spatial_zone_id_invalid",
+                        f"分区标识无效：{raw_key!r}。",
+                        parameter_key="spatial_zones.zones",
+                    )
+                    continue
+                if zone_id in seen_zone_ids:
+                    add_error(
+                        "spatial_zone_id_duplicate",
+                        f"分区 {zone_id} 重复。",
+                        parameter_key="spatial_zones.zones",
+                    )
+                seen_zone_ids.add(zone_id)
+                if not isinstance(raw_row, dict):
+                    add_error(
+                        "spatial_zone_row_invalid",
+                        f"分区 {zone_id} 不是有效对象。",
+                        parameter_key="spatial_zones.zones",
+                    )
+                    continue
+                numeric_fields: Dict[str, float] = {}
+                for field_name, value in raw_row.items():
+                    name = str(field_name)
+                    if name == "cvero" and value is None:
+                        continue
+                    if name in ZONE_PATCH_PASSTHROUGH_KEYS:
+                        continue
+                    if name not in ZONE_LAYER_FIELD_MAP:
+                        add_warning(
+                            "spatial_zone_field_ignored",
+                            f"分区 {zone_id} 忽略未知字段 {name}。",
+                            parameter_key="spatial_zones.zones",
+                        )
+                        continue
+                    if value is None:
+                        continue
+                    try:
+                        numeric_fields[name] = float(value)
+                    except (TypeError, ValueError):
+                        add_error(
+                            "spatial_zone_field_not_numeric",
+                            f"分区 {zone_id} 的 {name} 必须是数值。",
+                            parameter_key="spatial_zones.zones",
+                        )
+                for ksat_key, label in (
+                    ("K_sat_top", "顶层 K_sat"),
+                    ("K_sat_bottom", "底层 K_sat"),
+                    ("K_sat", "K_sat"),
+                ):
+                    if ksat_key in numeric_fields and numeric_fields[ksat_key] <= 0.0:
+                        add_error(
+                            "spatial_zone_ksat_nonpositive",
+                            f"分区 {zone_id} 的 {label} 必须大于 0。",
+                            parameter_key="spatial_zones.zones",
+                        )
+                top_sat = numeric_fields.get("theta_sat_top", numeric_fields.get("theta_s"))
+                top_res = numeric_fields.get("theta_res_top")
+                if top_sat is not None and top_res is not None and not (top_sat > top_res):
+                    add_error(
+                        "spatial_zone_theta_order_invalid",
+                        f"分区 {zone_id} 顶层 theta_sat 必须大于 theta_res。",
+                        parameter_key="spatial_zones.zones",
+                    )
+                bottom_sat = numeric_fields.get("theta_sat_bottom")
+                bottom_res = numeric_fields.get("theta_res_bottom")
+                if bottom_sat is not None and bottom_res is not None and not (bottom_sat > bottom_res):
+                    add_error(
+                        "spatial_zone_theta_order_invalid",
+                        f"分区 {zone_id} 底层 theta_sat 必须大于 theta_res。",
+                        parameter_key="spatial_zones.zones",
+                    )
+
+    for key, enum_spec in PARAMETER_ENUM_SPECS.items():
+        if key not in parameters:
+            continue
+        value = parameters.get(key)
+        allowed = list(enum_spec.get("allowed_values") or [])
+        if value is None:
+            continue
+        value_type = str(enum_spec.get("value_type") or "enum")
+        if value_type == "boolean":
+            if not isinstance(value, bool):
+                add_error(
+                    "parameter_enum_invalid",
+                    f"参数 {key} 必须为布尔值。",
+                    parameter_key=key,
+                )
+            continue
+        allowed_text = [str(item) for item in allowed]
+        if not isinstance(value, str) or value not in allowed_text:
+            add_error(
+                "parameter_enum_invalid",
+                f"参数 {key} 取值无效：{value!r}；允许值：{', '.join(allowed_text)}。",
+                parameter_key=key,
+            )
+
     return {
         "valid": not errors,
         "errors": errors,
@@ -265,6 +393,13 @@ def build_structured_rainfall_payload(
     parameters: Dict[str, Any],
     manifest: list[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    if not _rainfall_is_active(parameters):
+        return {
+            "mode": str(parameters.get("rainfall.mode") or "uniform"),
+            "units": "m/s",
+            "timeline": deepcopy(parameters.get("rainfall.timeline")),
+            "periods": [],
+        }
     bindings = _active_bindings(manifest)
     periods = deepcopy(parameters.get("rainfall.periods") or [])
     resolved = []
