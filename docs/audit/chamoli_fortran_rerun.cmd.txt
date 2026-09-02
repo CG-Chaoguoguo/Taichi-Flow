@@ -1,4 +1,0 @@
-exe=C:\Users\Administrator\Desktop\EDDA_test_project\Chamoli-EDDA file\Chamoli-EDDA file\edda.exe
-mode=console-minimized-no-redirect
-started=2026-08-20T01:50:14.0733046+08:00
-pid=48324

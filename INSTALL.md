@@ -1,4 +1,4 @@
-# EDDA-Taichi Installation Guide
+# Taichi-Flow Installation Guide
 
 ## System Requirements
 
@@ -50,13 +50,13 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 ```
 
-#### Step 3: Install EDDA-Taichi
+#### Step 3: Install Taichi-Flow
 
 **Option A: From source (for development)**
 ```bash
 # Clone repository
-git clone https://github.com/CG-Chaoguoguo/Edda-Taichi.git
-cd Edda-Taichi
+git clone https://github.com/CG-Chaoguoguo/Taichi-Flow.git
+cd Taichi-Flow
 
 # Install in editable mode
 pip install -e .
@@ -160,8 +160,8 @@ pip install gdal==$(gdal-config --version)
 
 #### Using Conda (Cross-platform)
 ```bash
-conda create -n edda python=3.11
-conda activate edda
+conda create -n taichi-flow python=3.11
+conda activate taichi-flow
 conda install -c conda-forge gdal
 pip install -e .
 ```
@@ -322,8 +322,8 @@ RUN apt-get update && apt-get install -y \
 
 # Clone and install
 WORKDIR /app
-RUN git clone https://github.com/CG-Chaoguoguo/Edda-Taichi.git
-WORKDIR /app/Edda-Taichi
+RUN git clone https://github.com/CG-Chaoguoguo/Taichi-Flow.git
+WORKDIR /app/Taichi-Flow
 RUN pip install -e .
 
 CMD ["python"]
@@ -331,8 +331,8 @@ CMD ["python"]
 
 Build and run:
 ```bash
-docker build -t edda-taichi .
-docker run -it --gpus all edda-taichi
+docker build -t taichi-flow .
+docker run -it --gpus all taichi-flow
 ```
 
 ## Next Steps
@@ -345,7 +345,7 @@ After successful installation:
 
 ## Support
 
-- **Issues**: https://github.com/CG-Chaoguoguo/Edda-Taichi/issues
+- **Issues**: https://github.com/CG-Chaoguoguo/Taichi-Flow/issues
 - **Documentation**: [docs/](docs/)
 - **Test Reports**: [PROJECT_REPORTS/FIX_LOGS/](PROJECT_REPORTS/FIX_LOGS/)
 
