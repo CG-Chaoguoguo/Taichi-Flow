@@ -34,6 +34,7 @@ from edda.io.dem_reader import DEMReader
 from edda.io.hydrograph_exporter import write_hydrograph_file
 from edda.io.rainfall_reader import RainfallReader
 from edda.io.result_exporter import ResultExporter
+from edda.io.async_result_writer import AsyncResultWriter, GridWriteJob
 from edda.io.topoindex_sidecar import build_rnoff_pre_dfs_period_precompute_contract
 from edda.io.zone_reader import ZoneReader
 from edda.physics.hydrology import HydrologyModel
@@ -81,6 +82,27 @@ class EDDASolver:
     """
 
     OUTPUT_STATE_EXCLUDED_FIELDS: Tuple[str, ...] = ("pt",)
+    PERIODIC_OUTPUT_FIELDS: Tuple[str, ...] = (
+        "h",
+        "Cv",
+        "z_bed",
+        "z_original",
+        "is_nodata",
+        "fv_fortran",
+        "erosion_depth",
+        "deposition_depth",
+        "max_flow_depth",
+        "max_flow_velocity",
+        "max_solid_depth",
+        "total_depth",
+        "fdepth",
+        "sfh",
+        "dfh",
+        "ffh",
+        "maxsfh",
+        "maxdfh",
+        "maxffh",
+    )
 
     def __init__(self, config: SimulationConfig):
         """
@@ -94,6 +116,16 @@ class EDDASolver:
         self.fields = None
         self.time_stepper = None
         self.results = []
+        self.backend_snapshot: Dict[str, Any] = {}
+        self.numerical_dt_history: List[float] = []
+        self.numerical_reject_reasons: Dict[str, int] = {}
+        self.numerical_reject_examples: Dict[str, Dict[str, Any]] = {}
+        self.numerical_max_abs_relative_error = 0.0
+        self.numerical_volume_violation_count = 0
+        self.numerical_dt_min_hits = 0
+        self.numerical_nonfinite_counts: Dict[str, int] = {}
+        self._async_output_writer: Optional[AsyncResultWriter] = None
+        self.numerical_observe_count = 0
 
         # Physics modules
         self.hydrology = None
@@ -219,6 +251,14 @@ class EDDASolver:
     def initialize(self):
         """Initialize all components."""
         logger.info("Initializing EDDA solver...")
+        self.numerical_dt_history = []
+        self.numerical_reject_reasons = {}
+        self.numerical_reject_examples = {}
+        self.numerical_max_abs_relative_error = 0.0
+        self.numerical_volume_violation_count = 0
+        self.numerical_dt_min_hits = 0
+        self.numerical_nonfinite_counts = {}
+        self.numerical_observe_count = 0
 
         # Initialize Taichi backend
         requested_backend = str(self.config.compute.backend).lower()
@@ -244,6 +284,17 @@ class EDDASolver:
                 f"[edda] compute backend={requested_backend} live_arch={snapshot.get('live_arch')}",
                 flush=True,
             )
+        self.backend_snapshot = {
+            "requested_backend": requested_backend,
+            **dict(snapshot),
+            "fallback_active": bool(
+                requested_backend == "cuda"
+                and (
+                    str(snapshot.get("manager_backend") or "").lower() != "cuda"
+                    or "cuda" not in str(snapshot.get("live_arch") or "").lower()
+                )
+            ),
+        }
 
         # Load DEM
         logger.info(f"Loading DEM: {self.config.dem_file}")
@@ -1310,6 +1361,206 @@ class EDDASolver:
         diagnostics["stormdrain_runtime"] = self.get_stormdrain_runtime_diagnostics()
         return diagnostics
 
+    def _observe_numerical_step(
+        self,
+        step_info: Dict[str, Any],
+        *,
+        accepted: bool,
+        attempted_dt: float,
+        force_volume: bool = False,
+    ) -> None:
+        """Collect scalar retry/volume evidence without changing the solver.
+
+        This is intentionally called after the existing physics step has made
+        its accept/reject decision.  The values are used only for the final
+        audit manifest and therefore cannot affect a retry, output, or state
+        commit.
+        """
+
+        attempted_dt = float(attempted_dt)
+        compute = getattr(self.config, "compute", None)
+        observe_stride = max(1, int(getattr(compute, "numerical_observe_stride", 20) or 20))
+        candidate_id = int(getattr(self, "dfs_candidate_step_id", 0) or 0)
+        sample_volume = (
+            force_volume
+            or (not accepted)
+            or (candidate_id <= 1)
+            or (observe_stride <= 1)
+            or (candidate_id % observe_stride == 0)
+        )
+        if sample_volume and self.dfs_dynamic_wave is not None:
+            try:
+                volume = self.dfs_dynamic_wave.get_volume_balance_snapshot()
+                self.numerical_observe_count += 1
+                relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+                if np.isfinite(relative_error):
+                    self.numerical_max_abs_relative_error = max(
+                        self.numerical_max_abs_relative_error,
+                        abs(relative_error),
+                    )
+                    if accepted and abs(relative_error) > 1.0e-3:
+                        self.numerical_volume_violation_count += 1
+                else:
+                    self.numerical_nonfinite_counts["volume_relative_error"] = (
+                        self.numerical_nonfinite_counts.get("volume_relative_error", 0) + 1
+                    )
+            except Exception as exc:
+                self.numerical_nonfinite_counts["volume_snapshot_error"] = (
+                    self.numerical_nonfinite_counts.get("volume_snapshot_error", 0) + 1
+                )
+                logger.debug("Unable to capture numerical volume snapshot: %s", exc)
+
+        if attempted_dt <= float(self.config.time.dt_min) * (1.0 + 1.0e-12):
+            self.numerical_dt_min_hits += 1
+
+        if accepted:
+            used_dt = float(step_info.get("used_dt", attempted_dt))
+            self.numerical_dt_history.append(used_dt)
+            return
+
+        first_reject = step_info.get("first_reject") or {}
+        reason_name = str(first_reject.get("first_reject_reason_name") or "unknown")
+        self.numerical_reject_reasons[reason_name] = (
+            self.numerical_reject_reasons.get(reason_name, 0) + 1
+        )
+        if reason_name not in self.numerical_reject_examples:
+            self.numerical_reject_examples[reason_name] = {
+                "t_start_s": float(
+                    first_reject.get(
+                        "t_start_s",
+                        self.time_stepper.t_current if self.time_stepper is not None else 0.0,
+                    )
+                    or (self.time_stepper.t_current if self.time_stepper is not None else 0.0)
+                ),
+                "dt_s": attempted_dt,
+                "value": first_reject.get("value"),
+                "threshold": first_reject.get("threshold"),
+                "cell_id": first_reject.get("cell_id"),
+                "neighbor_cell_id": first_reject.get("neighbor_cell_id"),
+                "direction_one_based": first_reject.get("direction_one_based"),
+            }
+
+    def get_numerical_diagnostics(self, *, status: Optional[str] = None) -> Dict[str, Any]:
+        """Build a JSON-safe numerical audit snapshot for the current run."""
+
+        time_stepper = self.time_stepper
+        stats = time_stepper.get_statistics() if time_stepper is not None else {}
+        dt_values = np.asarray(self.numerical_dt_history, dtype=np.float64)
+        if dt_values.size:
+            dt_stats: Dict[str, Any] = {
+                "accepted_min_s": float(np.min(dt_values)),
+                "accepted_max_s": float(np.max(dt_values)),
+                "accepted_mean_s": float(np.mean(dt_values)),
+                "accepted_std_s": float(np.std(dt_values)),
+            }
+        else:
+            dt_stats = {
+                "accepted_min_s": None,
+                "accepted_max_s": None,
+                "accepted_mean_s": None,
+                "accepted_std_s": None,
+            }
+
+        volume: Dict[str, Any] = {
+            "rainfall_m3": 0.0,
+            "inflow_m3": 0.0,
+            "erosion_m3": 0.0,
+            "failure_source_m3": 0.0,
+            "infiltration_m3": 0.0,
+            "outflow_m3": 0.0,
+            "deposition_flux_m3": 0.0,
+            "flow_storage_m3": 0.0,
+            "deposit_storage_m3": 0.0,
+            "source_total_m3": 0.0,
+            "sink_and_storage_total_m3": 0.0,
+            "denominator_m3": 0.0,
+            "residual_m3": 0.0,
+            "relative_error": 0.0,
+            "within_retry_tolerance": True,
+        }
+        trigger_inventory = 0.0
+        if self.dfs_dynamic_wave is not None:
+            try:
+                volume.update(self.dfs_dynamic_wave.get_volume_balance_snapshot())
+            except Exception as exc:
+                logger.debug("Unable to capture final numerical volume snapshot: %s", exc)
+            try:
+                trigger_grid = np.asarray(self.dfs_dynamic_wave.triggerslide_field.to_numpy(), dtype=np.float64)
+                area_grid = np.asarray(self.fields.cell_area_cal.to_numpy(), dtype=np.float64)
+                active_grid = np.asarray(self.fields.is_nodata.to_numpy(), dtype=np.int32) == 0
+                finite = np.isfinite(trigger_grid) & np.isfinite(area_grid) & active_grid
+                trigger_inventory = float(np.sum(np.maximum(trigger_grid[finite], 0.0) * area_grid[finite]))
+            except Exception as exc:
+                logger.debug("Unable to calculate trigger inventory: %s", exc)
+
+        nonfinite_counts = dict(self.numerical_nonfinite_counts)
+        if self.fields is not None:
+            active_mask = np.asarray(self.fields.is_nodata.to_numpy(), dtype=np.int32) == 0
+            for field_name in ("h", "u", "v", "rho", "Cv", "erosion_depth", "deposition_depth", "FS"):
+                field = getattr(self.fields, field_name, None)
+                if field is None:
+                    continue
+                try:
+                    values = np.asarray(field.to_numpy())
+                    nonfinite_counts[field_name] = int(np.count_nonzero(~np.isfinite(values[active_mask])))
+                except Exception:
+                    nonfinite_counts[field_name] = -1
+
+        global_relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+        return {
+            "schema_version": 1,
+            "status": status or ("running" if time_stepper and not time_stepper.is_finished() else "completed"),
+            "simulation": {
+                "current_time_s": float(time_stepper.t_current) if time_stepper is not None else 0.0,
+                "end_time_s": float(time_stepper.t_end) if time_stepper is not None else float(self.config.time.t_end),
+                "output_count": int(time_stepper.output_count) if time_stepper is not None else 0,
+            },
+            "backend": dict(self.backend_snapshot),
+            "time_integration": {
+                "accepted_steps": int(self.dfs_accepted_step_id),
+                "candidate_steps": int(self.dfs_candidate_step_id),
+                "rejected_steps": int(time_stepper.rejected_steps) if time_stepper is not None else 0,
+                "rejection_reasons": dict(self.numerical_reject_reasons),
+                "rejection_examples": dict(self.numerical_reject_examples),
+                "dt_min_configured_s": float(self.config.time.dt_min),
+                "dt_max_configured_s": float(self.config.time.dt_max),
+                "dt_min_hits": int(self.numerical_dt_min_hits),
+                "dt": dt_stats,
+                "time_stepper": {
+                    "step_count": int(stats.get("step_count", 0) or 0),
+                    "total_steps": int(stats.get("total_steps", 0) or 0),
+                    "current_dt_s": float(stats.get("dt_current", 0.0) or 0.0),
+                },
+            },
+            "local_conservation": {
+                "tolerance": 1.0e-3,
+                "max_abs_relative_error": float(self.numerical_max_abs_relative_error),
+                "accepted_step_violation_count": int(self.numerical_volume_violation_count),
+                "observe_stride": max(
+                    1,
+                    int(getattr(getattr(self.config, "compute", None), "numerical_observe_stride", 20) or 20),
+                ),
+                "observe_count": int(getattr(self, "numerical_observe_count", 0) or 0),
+                "last_step": dict(volume),
+            },
+            "global_volume_ledger": {
+                **volume,
+                "tolerance": 1.0e-3,
+                "passed": abs(global_relative_error) <= 1.0e-3,
+                "trigger_inventory_available_m3": trigger_inventory,
+                "trigger_inventory_role": "input inventory diagnostic; failure_source_m3 is the closure term",
+                "drainage_m3": 0.0,
+                "drainage_role": "no independent drainage volume counter is active in the current EDDA path",
+            },
+            "nonfinite_counts": nonfinite_counts,
+            "classification": {
+                "functional_e2e": None,
+                "conservation_closure": abs(global_relative_error) <= 1.0e-3,
+                "strict_code_parity": None,
+                "discretization_convergence": "not_assessed",
+            },
+        }
+
     def _update_outflow_process_state(self, dt_used: float) -> None:
         observer = getattr(self, "outflow_process_observer", None)
         if not observer or not observer["cells"]:
@@ -1931,6 +2182,7 @@ class EDDASolver:
         )
 
         try:
+            self._start_async_output_writer()
             # Main time loop
             while not self.time_stepper.is_finished():
                 # Get current time and time step
@@ -1985,6 +2237,15 @@ class EDDASolver:
 
                     # Physics sequence
                     step_info = self._physics_step(dt_candidate)
+                    self._observe_numerical_step(
+                        step_info,
+                        accepted=bool(step_info.get("accepted", True)),
+                        attempted_dt=dt_candidate,
+                        force_volume=bool(
+                            t + dt_candidate >= next_output_time - 1.0e-6
+                            or t + dt_candidate >= float(self.time_stepper.t_end) - 1.0e-6
+                        ),
+                    )
                     trace_candidate = self._step_lifecycle_trace_in_window(t, t + dt_candidate)
 
                     if not step_info.get("accepted", True):
@@ -2093,6 +2354,7 @@ class EDDASolver:
             raise
         finally:
             pbar.close()
+            self._stop_async_output_writer()
 
         # Final output is needed only when the simulation did not already emit
         # this exact accepted time at an output boundary.
@@ -2296,8 +2558,13 @@ class EDDASolver:
 
         logger.info(f"Writing output #{output_count} at t={t:.2f}s")
 
-        # Get current state
-        state = self.fields.get_full_state(exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS)
+        # Get current state.  Periodic writers only need the EDDA output-family
+        # fields; pulling the 60+ diagnostic arrays every `tout` is the main
+        # D2H cost on Chamoli-size grids.
+        state = self.fields.get_full_state(
+            include_fields=self.PERIODIC_OUTPUT_FIELDS,
+            exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS,
+        )
         state['erosion_depth_fortran_output'] = self._build_fortran_erosion_depth_output(state)
 
         # Store the full state history only for offline workflows that request
@@ -2344,44 +2611,36 @@ class EDDASolver:
             # Transpose from Taichi (nx, ny)=(cols, rows) to GeoTIFF (rows, cols)
             h_export = state['h'].T.copy()
             h_export[nodata_mask.T == 1] = nodata_value
-            if self.config.save_intermediate:
-                exporter = ResultExporter(
+            write_geotiff = self._write_geotiff_frames_enabled()
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_depth.tif"),
                     data=h_export,
-                    transform=self.export_metadata.get('transform'),
-                    crs=self.export_metadata.get('crs'),
-                    nodata_value=nodata_value
-                )
-                exporter.to_geotiff(
-                    str(self.output_dir / f"{filename_base}_depth.tif")
+                    nodata_value=nodata_value,
                 )
 
             # Export flow velocity with original EDDA writer semantics.
             velocity = self._build_fortran_flow_velocity_output(state).copy()
             velocity[nodata_mask.T == 1] = nodata_value
-            if self.config.save_intermediate:
-                exporter = ResultExporter(
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_velocity.tif"),
                     data=velocity,
-                    transform=self.export_metadata.get('transform'),
-                    crs=self.export_metadata.get('crs'),
-                    nodata_value=nodata_value
-                )
-                exporter.to_geotiff(
-                    str(self.output_dir / f"{filename_base}_velocity.tif")
+                    nodata_value=nodata_value,
                 )
 
             # Export concentration with original EDDA writer semantics:
             # dfs.F90 writes `cv(i)` but zeros cells with `fh(i)<0.005`.
             Cv_export = self._build_fortran_volumetric_sediment_output(state).T.copy()
             Cv_export[nodata_mask.T == 1] = nodata_value
-            if self.config.save_intermediate:
-                exporter = ResultExporter(
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_concentration.tif"),
                     data=Cv_export,
-                    transform=self.export_metadata.get('transform'),
-                    crs=self.export_metadata.get('crs'),
-                    nodata_value=nodata_value
-                )
-                exporter.to_geotiff(
-                    str(self.output_dir / f"{filename_base}_concentration.tif")
+                    nodata_value=nodata_value,
                 )
             if write_edda_text:
                 self._export_taichi_named_edda_text_outputs(
@@ -2433,13 +2692,12 @@ class EDDASolver:
             )
         data_to_write[nodata_mask == 1] = nodata_value
         filename = f"{original_stem.replace('EDDA', 'Taichi')}_{self._format_edda_output_time(t)}.txt"
-        exporter = ResultExporter(
+        self._enqueue_or_write_grid(
+            kind="ascii",
+            path=str(self.output_dir / filename),
             data=data_to_write,
-            transform=self.export_metadata.get('transform'),
-            crs=self.export_metadata.get('crs'),
             nodata_value=nodata_value,
         )
-        exporter.to_ascii_grid(str(self.output_dir / filename))
 
     def _export_taichi_named_edda_text_outputs(
         self,
@@ -2650,8 +2908,12 @@ class EDDASolver:
             format: Output format ('geotiff', 'netcdf', 'csv')
         """
         logger.info(f"Exporting final results in {format} format...")
+        self.flush_output_writer()
 
-        final_state = self.fields.get_full_state(exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS)
+        final_state = self.fields.get_full_state(
+            include_fields=self.PERIODIC_OUTPUT_FIELDS,
+            exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS,
+        )
         nodata_mask = final_state['is_nodata'].T  # Transpose to (rows, cols) for GeoTIFF
         nodata_value = self.export_metadata.get('nodata_value', -9999.0)
 
@@ -2931,6 +3193,69 @@ class EDDASolver:
             callback: Function(time_info: dict) -> None
         """
         self.progress_callback = callback
+
+    def _write_geotiff_frames_enabled(self) -> bool:
+        compute = getattr(self.config, "compute", None)
+        return bool(getattr(compute, "write_geotiff_frames", True))
+
+    def _start_async_output_writer(self) -> None:
+        compute = getattr(self.config, "compute", None)
+        if not bool(getattr(compute, "async_output", False)):
+            return
+        if self._async_output_writer is not None:
+            return
+        writer = AsyncResultWriter(max_queued_frames=4)
+        writer.start()
+        self._async_output_writer = writer
+        logger.info("Async result writer started (bounded queue=4)")
+
+    def flush_output_writer(self) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is not None:
+            writer.flush()
+
+    def _stop_async_output_writer(self) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.close()
+        finally:
+            self._async_output_writer = None
+
+    def _enqueue_or_write_grid(
+        self,
+        *,
+        kind: str,
+        path: str,
+        data: np.ndarray,
+        nodata_value: float,
+    ) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is None:
+            exporter = ResultExporter(
+                data=data,
+                transform=self.export_metadata.get("transform"),
+                crs=self.export_metadata.get("crs"),
+                nodata_value=nodata_value,
+            )
+            if kind == "geotiff":
+                exporter.to_geotiff(path)
+            elif kind == "ascii":
+                exporter.to_ascii_grid(path)
+            else:
+                raise ValueError(f"Unsupported result write kind: {kind}")
+            return
+        writer.submit(
+            GridWriteJob(
+                kind=kind,
+                path=path,
+                data=np.array(data, copy=True),
+                transform=self.export_metadata.get("transform"),
+                crs=self.export_metadata.get("crs"),
+                nodata_value=float(nodata_value),
+            )
+        )
 
     def set_output_callback(self, callback: Callable):
         """

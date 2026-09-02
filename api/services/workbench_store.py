@@ -1439,9 +1439,51 @@ class WorkbenchStore:
             staging.replace(destination)
             moved = True
             new_database = ProjectDatabase(destination)
+
+            # Uploaded blobs move with the staging directory.  The uploads
+            # table stores plain paths, but input revision manifests store JSON
+            # strings where Windows separators are escaped; SQL replace() on
+            # the raw prefix therefore leaves stale staging paths behind.
+            # Rebase parsed values instead, preserving reference files outside
+            # the staging root and every non-path manifest field verbatim.
+            old_normalized = os.path.normcase(os.path.normpath(old_root))
+            destination_root = str(destination)
+
+            def rebase_staging_path(value: Any) -> Any:
+                if isinstance(value, str):
+                    normalized = os.path.normcase(os.path.normpath(value))
+                    if normalized == old_normalized:
+                        return destination_root
+                    prefix = old_normalized + os.sep
+                    if normalized.startswith(prefix):
+                        return destination_root + value[len(old_root):]
+                    return value
+                if isinstance(value, list):
+                    return [rebase_staging_path(item) for item in value]
+                if isinstance(value, dict):
+                    return {key: rebase_staging_path(item) for key, item in value.items()}
+                return value
+
             with new_database.connect() as connection:
-                connection.execute("UPDATE uploads SET blob_path=replace(blob_path, ?, ?)", (old_root, str(destination)))
-                connection.execute("UPDATE input_revisions SET manifest_json=replace(manifest_json, ?, ?)", (old_root, str(destination)))
+                upload_rows = connection.execute("SELECT upload_id, blob_path FROM uploads").fetchall()
+                for row in upload_rows:
+                    rebased_path = rebase_staging_path(str(row["blob_path"]))
+                    if rebased_path != row["blob_path"]:
+                        connection.execute(
+                            "UPDATE uploads SET blob_path=? WHERE upload_id=?",
+                            (rebased_path, row["upload_id"]),
+                        )
+                revision_rows = connection.execute(
+                    "SELECT revision_id, manifest_json FROM input_revisions"
+                ).fetchall()
+                for row in revision_rows:
+                    manifest = json_loads(row["manifest_json"], [])
+                    rebased_manifest = rebase_staging_path(manifest)
+                    if rebased_manifest != manifest:
+                        connection.execute(
+                            "UPDATE input_revisions SET manifest_json=? WHERE revision_id=?",
+                            (json.dumps(rebased_manifest, ensure_ascii=False), row["revision_id"]),
+                        )
             with self.catalog() as connection:
                 connection.execute(
                     "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
@@ -3719,32 +3761,47 @@ class WorkbenchStore:
                 (self._binding_projection(binding) for binding in next_bindings),
                 key=lambda binding: binding["binding_key"],
             )
+            # Parameter-only edits must retain a ready immutable input revision.
+            # The editor submits its current binding projection with every save;
+            # turning that identical projection into a draft would lose input
+            # provenance without any input mutation.  Inputs only return to
+            # draft state when their projected binding identity actually changes.
+            preserve_input_revision = bool(
+                row["input_revision_id"]
+                and not current_draft
+                and current_projection == next_projection
+                and input_revision_id is None
+            )
+            next_input_revision_id = row["input_revision_id"] if preserve_input_revision else None
+            next_status = "ready" if preserve_input_revision else "draft"
             draft_changed = (
                 current_projection != next_projection
                 or json_loads(row["parameter_patch_json"], {}) != patch
                 or json_loads(row["control_overrides_json"], {}) != next_controls
                 or str(row["name"]) != new_name
                 or row["parameter_template_id"] != next_template_id
-                or row["input_revision_id"] is not None
             )
-            self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
+            if not preserve_input_revision:
+                self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
             now = utc_now()
             next_version = current_version + 1
             connection.execute(
                 """
                 UPDATE scenarios
-                SET name=?, input_revision_id=NULL, parameter_template_id=?,
+                SET name=?, input_revision_id=?, parameter_template_id=?,
                     parameter_patch_json=?, control_overrides_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
-                    status='draft', updated_at=?
+                    status=?, updated_at=?
                 WHERE scenario_id=?
                 """,
                 (
                     new_name,
+                    next_input_revision_id,
                     next_template_id,
                     json.dumps(patch, ensure_ascii=False),
                     json.dumps(next_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
+                    next_status,
                     now,
                     scenario_id,
                 ),
@@ -3782,6 +3839,16 @@ class WorkbenchStore:
     def duplicate_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
         """Copy any draft or historical bindings into a new mutable scenario."""
         source = self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
+        if source.get("input_revision_id"):
+            return self.create_scenario(
+                project_id,
+                name=f"{source['name']} (copy)",
+                input_revision_id=str(source["input_revision_id"]),
+                base_scenario_id=scenario_id,
+                parameter_patch=dict(source["parameter_patch"]),
+                parameter_template_id=source.get("parameter_template_id"),
+                control_overrides=dict(source.get("control_overrides") or {}),
+            )
         duplicate = self.create_scenario(
             project_id,
             name=f"{source['name']} (copy)",
@@ -4429,6 +4496,15 @@ class WorkbenchStore:
             else {}
         )
         profile_name = str(runtime_profile or "cuda_production_default")
+        template_metadata: Dict[str, Any] = {}
+        if scenario_dict.get("parameter_template_id"):
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                template_metadata = self._parameter_template_metadata(
+                    connection,
+                    str(scenario_dict["parameter_template_id"]),
+                )
+        reference_case_owned = self._reference_case_owned(template_metadata)
         if scenario_dict.get("parameter_template_id"):
             active_manifest = [dict(entry) for entry in manifest if bool(entry.get("active", True))]
             if str(effective_parameters.get("manning.source") or "global").lower() in {"global", "global_manning", "global_initiation_manning"}:
@@ -4437,6 +4513,13 @@ class WorkbenchStore:
             dem = by_binding.get("dem.primary")
             soil = by_binding.get("zones.primary") or by_binding.get("soil.primary")
             boundary = by_binding.get("boundary.primary")
+            config = by_binding.get("legacy.config")
+            if reference_case_owned and not (config and config.get("blob_path")):
+                raise WorkbenchError(
+                    "reference_case_config_missing",
+                    "参考案例缺少冻结的 edda_in 配置，不能退回通用参数模板运行。",
+                    status_code=409,
+                )
             case_input_files = {}
             for entry in active_manifest:
                 family = str(entry.get("family") or "")
@@ -4473,8 +4556,13 @@ class WorkbenchStore:
                 "rainfall_file": None,
                 "soil_zones_file": str(soil["blob_path"]) if soil else None,
                 "boundary_file": str(boundary["blob_path"]) if boundary else None,
-                "case_config_file": None,
-                "case_base_dir": None,
+                # Reference-owned imports must traverse the original edda_in
+                # mapper.  Their editable template is a UI projection, not a
+                # replacement for unexposed EDDA controls and numeric variants.
+                "case_config_file": str(config["blob_path"]) if reference_case_owned else None,
+                "case_base_dir": self._resolve_case_base_dir(project, active_manifest, config)
+                if reference_case_owned
+                else None,
                 "case_input_files": case_input_files,
                 "overrides": overrides,
                 "effective_config": effective_parameters,

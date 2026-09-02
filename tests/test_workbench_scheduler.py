@@ -8,7 +8,7 @@ from time import monotonic, sleep
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from api.services.workbench_store import ProjectDatabase
+from api.services.workbench_store import ProjectDatabase, SCHEMA_VERSION
 from tests.test_workbench_domain_api import _create_project, _create_ready_scenario
 
 
@@ -50,6 +50,28 @@ class BlockingRunExecutor:
             self.active_global -= 1
             self.active_by_project[project_id] -= 1
         return result
+
+
+class SignalRunExecutor:
+    """Minimal executor used to prove a queued item is eventually admitted."""
+
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+
+    def signature(self, context: dict) -> str:
+        return "test-compatible-runtime"
+
+    def request_stop(self, simulation_id: str) -> None:
+        self.release.set()
+
+    def execute(self, context: dict, on_update, stop_event: Event) -> dict:
+        self.started.set()
+        on_update({"status": "running", "progress": 1.0, "current_time": 0.0})
+        while not self.release.wait(0.01):
+            if stop_event.is_set():
+                return {"status": "stopped", "resource_summary": {"children": 0}}
+        return {"status": "completed", "progress": 100.0, "resource_summary": {"children": 0}}
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> None:
@@ -111,6 +133,45 @@ def test_scheduler_serializes_each_project_and_runs_two_projects_concurrently(tm
             json={"name": "must not mutate"},
         )
         assert immutable.status_code == 409
+
+
+def test_scheduler_recovers_after_transient_queue_scan_error(tmp_path: Path, monkeypatch) -> None:
+    """A single store exception must not silently kill the dispatch loop."""
+    executor = SignalRunExecutor()
+    app = create_app(
+        state_dir=tmp_path / "state",
+        scheduler_enabled=True,
+        run_executor=executor,
+        scheduler_poll_interval=0.01,
+    )
+    with TestClient(app) as client:
+        store = client.app.state.workbench
+        original_queue_candidates = store.queue_candidates
+        raised_once = False
+
+        def raise_once(active_projects):
+            nonlocal raised_once
+            if not raised_once:
+                raised_once = True
+                raise RuntimeError("temporary queue scan failure")
+            return original_queue_candidates(active_projects)
+
+        monkeypatch.setattr(store, "queue_candidates", raise_once)
+        project = _create_project(client, tmp_path / "transient-queue-project", "Transient queue")
+        scenario = _create_ready_scenario(client, project, "Recover queue")
+        queued = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+        assert queued.status_code == 201
+
+        assert executor.started.wait(5.0)
+        assert raised_once is True
+        executor.release.set()
+        _wait_for(
+            lambda: client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]["status"]
+            == "completed"
+        )
 
 
 def test_failed_run_persists_structured_semantic_error(tmp_path: Path) -> None:
@@ -182,7 +243,7 @@ def test_schema_v6_migrates_structured_error_columns(tmp_path: Path) -> None:
         ).fetchone()["value"]
 
     assert {"error_code", "error_details_json"} <= columns
-    assert version == "9"
+    assert version == str(SCHEMA_VERSION)
 
 
 def test_schema_v8_migrates_compute_policy_snapshot_columns(tmp_path: Path) -> None:
@@ -216,4 +277,4 @@ def test_schema_v8_migrates_compute_policy_snapshot_columns(tmp_path: Path) -> N
 
     assert "compute_policy_resolution_json" in simulation_columns
     assert {"effective_config_json", "compute_policy_resolution_json"} <= queue_columns
-    assert version == "9"
+    assert version == str(SCHEMA_VERSION)

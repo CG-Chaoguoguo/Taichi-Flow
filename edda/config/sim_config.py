@@ -339,6 +339,19 @@ class ComputeParams(BaseModel):
     )
     chunk_size: Optional[int] = Field(None, description="Chunk size for large grids")
     num_threads: Optional[int] = Field(None, description="Number of CPU threads")
+    async_output: bool = Field(
+        True,
+        description="Write GeoTIFF/ASCII result families on a background thread during solver.run()",
+    )
+    write_geotiff_frames: bool = Field(
+        True,
+        description="Write convenience GeoTIFF frames (depth/velocity/concentration) in addition to EDDA ASCII families",
+    )
+    numerical_observe_stride: int = Field(
+        20,
+        ge=1,
+        description="Sample volume-conservation diagnostics every N candidate steps (output frames are always sampled)",
+    )
 
 
 class RainfallConfig(BaseModel):

@@ -4,6 +4,7 @@ from api.services.parameter_catalog import (
     build_static_parameter_catalog,
 )
 from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY
+from api.services.parameter_templates import builtin_bj_hxl_template
 
 
 def test_static_parameter_catalog_exposes_canonical_edda_controls_with_frontend_gate():
@@ -149,3 +150,22 @@ def test_case_config_interface_exposes_edda_in_override_paths_without_promoting_
     ]
     assert parameters["zmax"]["editable"] is False
     assert parameters["zmax"]["config_path"] is None
+
+
+def test_static_catalog_exposes_runtime_io_optimization_parameters():
+    catalog = build_static_parameter_catalog()
+    by_key = {entry["key"]: entry for entry in catalog["parameters"]}
+
+    assert by_key["compute.use_double_precision"]["editable"] is True
+    assert by_key["compute.use_double_precision"]["group"] == "runtime"
+    assert by_key["compute.use_double_precision"]["value_type"] == "boolean"
+    assert by_key["compute.use_double_precision"]["allowed_values"] == [False, True]
+    assert by_key["compute.async_output"]["editable"] is True
+    assert by_key["compute.async_output"]["group"] == "runtime"
+    assert by_key["compute.async_output"]["value_type"] == "boolean"
+    assert by_key["compute.write_geotiff_frames"]["editable"] is True
+    assert by_key["compute.numerical_observe_stride"]["group"] == "runtime"
+
+
+def test_ordinary_template_explicitly_preserves_fp32_default():
+    assert builtin_bj_hxl_template()["values"]["compute.use_double_precision"] is False

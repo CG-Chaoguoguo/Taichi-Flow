@@ -20,6 +20,7 @@ METADATA_FILENAMES = {
     "job_metadata.json",
     "output_manifest.json",
     "parameter_audit.json",
+    "numerical_diagnostics.json",
     "request_payload.json",
     "runmode_capabilities.json",
     "runtime_input_manifest.json",

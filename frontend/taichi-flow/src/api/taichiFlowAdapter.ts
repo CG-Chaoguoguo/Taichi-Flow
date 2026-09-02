@@ -14,6 +14,7 @@ import type {
   RuntimeLock,
   QueueItem,
   ResultFamily,
+  ResultMetadata,
   Scenario,
   ScenarioConfiguration,
   SimulationRun,
@@ -364,7 +365,7 @@ export const resultApi = {
       files: Array.isArray(family.files) ? (family.files as ResultFamily["files"]) : [],
     }));
   },
-  metadata: (projectId: string, simulationId: string) => request<Record<string, unknown>>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
+  metadata: (projectId: string, simulationId: string) => request<ResultMetadata>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
   downloadUrl: (projectId: string, simulationId: string, filename: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/files/${filename.split("/").map(encodeURIComponent).join("/")}`,
   zipUrl: (projectId: string, simulationId: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/download.zip`,
 };

@@ -52,10 +52,11 @@ def test_get_full_state_exports_cell_area_cal_when_requested():
 class _RecordingFields:
     def __init__(self):
         self.exclude_fields = None
+        self.include_fields = None
 
     def get_full_state(self, *, include_fields=None, exclude_fields=None):
+        self.include_fields = tuple(include_fields) if include_fields is not None else None
         self.exclude_fields = tuple(exclude_fields or ())
-        assert include_fields is None
         assert "pt" in self.exclude_fields
         return {
             "h": np.array([[1.0, 0.0]], dtype=np.float64),
@@ -103,7 +104,14 @@ class _Config:
     save_intermediate = False
 
 
-def _strict_output_solver(tmp_path, *, extension_controls=None, **enabled_outputs):
+def _strict_output_solver(
+    tmp_path,
+    *,
+    extension_controls=None,
+    hydrology=None,
+    run_controls=None,
+    **enabled_outputs,
+):
     output_controls = {
         "save_fs_min_grid": False,
         "save_flow_depth": False,
@@ -120,28 +128,31 @@ def _strict_output_solver(tmp_path, *, extension_controls=None, **enabled_output
         "save_drainage_conduit_flow": False,
     }
     output_controls.update(enabled_outputs)
-    config = SimulationConfig.from_dict(
-        {
-            "dem_file": "dummy.asc",
-            "output_dir": str(tmp_path),
-            "edda": {
-                "run_controls": {
-                    "simulate_debris_flow": True,
-                    "simulate_rainfall": True,
-                    "simulate_infiltration": True,
-                    "simulate_inflow_hydrograph": False,
-                    "simulate_outflow_cell": True,
-                    "simulate_shallow_landslide": True,
-                    "simulate_erosion": True,
-                    "simulate_water_and_solid_separately": True,
-                    "simulate_drainage_flow": False,
-                    "simulate_barrier": False,
-                },
-                "output_controls": output_controls,
-                "extension_controls": dict(extension_controls or {}),
-            },
-        }
-    )
+    run = {
+        "simulate_debris_flow": True,
+        "simulate_rainfall": True,
+        "simulate_infiltration": True,
+        "simulate_inflow_hydrograph": False,
+        "simulate_outflow_cell": True,
+        "simulate_shallow_landslide": True,
+        "simulate_erosion": True,
+        "simulate_water_and_solid_separately": True,
+        "simulate_drainage_flow": False,
+        "simulate_barrier": False,
+    }
+    run.update(run_controls or {})
+    payload = {
+        "dem_file": "dummy.asc",
+        "output_dir": str(tmp_path),
+        "edda": {
+            "run_controls": run,
+            "output_controls": output_controls,
+            "extension_controls": dict(extension_controls or {}),
+        },
+    }
+    if hydrology:
+        payload["hydrology"] = hydrology
+    config = SimulationConfig.from_dict(payload)
     solver = EDDASolver(config)
     solver.output_dir = tmp_path
     solver.export_metadata = {"nodata_value": -9999.0}
@@ -191,6 +202,77 @@ def test_strict_edda_text_writer_emits_only_enabled_family(tmp_path):
     written = _record_strict_text_families(solver, _strict_output_state())
 
     assert list(written) == ["Flow_depth_EDDA"]
+
+
+def test_fs_min_writer_follows_fsminsave_even_when_fssimul_is_off(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        save_fs_min_grid=True,
+        run_controls={"simulate_shallow_landslide": False},
+    )
+    state = _strict_output_state()
+    state["fdepth"] = np.array([[0.0], [0.0]], dtype=np.float64)
+
+    written = _record_strict_text_families(solver, state)
+
+    assert "LS_ScarEDDA" in written
+    assert "faildphEDDA" in written
+    np.testing.assert_allclose(written["LS_ScarEDDA"], [[0.0, 0.0]])
+    np.testing.assert_allclose(written["faildphEDDA"], [[0.0, 0.0]])
+
+
+def test_chamoli_regime_depths_write_under_flowdepthsave(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        save_flow_depth=True,
+        save_max_flow_depth=True,
+        hydrology={"dfs_manningbar_variant": "debrisflowmanning_cvtol"},
+    )
+    state = _strict_output_state()
+    state["sfh"] = np.array([[1.5], [0.0]], dtype=np.float64)
+    state["dfh"] = np.array([[0.0], [0.8]], dtype=np.float64)
+    state["ffh"] = np.array([[0.2], [0.0]], dtype=np.float64)
+    state["maxsfh"] = np.array([[2.0], [0.0]], dtype=np.float64)
+    state["maxdfh"] = np.array([[0.0], [1.1]], dtype=np.float64)
+    state["maxffh"] = np.array([[0.4], [0.0]], dtype=np.float64)
+
+    written = _record_strict_text_families(solver, state)
+
+    assert "SFdepthEDDA" in written
+    assert "DFdepthEDDA" in written
+    assert "FFdepthEDDA" in written
+    assert "MaxSFdepthEDDA" in written
+    np.testing.assert_allclose(written["SFdepthEDDA"], [[1.5, 0.0]])
+    np.testing.assert_allclose(written["DFdepthEDDA"], [[0.0, 0.8]])
+    np.testing.assert_allclose(written["MaxDFdepthEDDA"], [[0.0, 1.1]])
+
+
+def test_chamoli_sf_df_ff_classify_uses_previous_cv_semantics():
+    """Document Chamoli dfs.F90:1115-1133: class depths use PREVIOUS cv vs NEW h.
+
+    Cell with incoming shallow clear water (prev_cv < 0.2) must land in FF even
+    when the accepted step later raises Cv via mixing/erosion.
+    """
+    import inspect
+
+    from edda.solver import dfs_dynamic_wave as dfs_mod
+
+    cls = next(
+        obj
+        for name, obj in vars(dfs_mod).items()
+        if isinstance(obj, type) and hasattr(obj, "_commit_step")
+    )
+    source = inspect.getsource(cls._commit_step)
+    assert "prev_cv = self.fields.Cv[i, j]" in source
+    assert "prev_cv >= 0.5" in source
+    assert "prev_cv >= 0.2" in source
+    assert "self.fields.ffh[i, j] = local_h" in source
+    # Classification must capture previous cv before the accepted rho overwrite.
+    prev_idx = source.index("prev_cv = self.fields.Cv[i, j]")
+    cv_update_idx = source.index("self.fields.Cv[i, j] = (self.fields.rho[i, j] - rho_water)")
+    assert prev_idx < cv_update_idx
+    # Sticky maxima use the same previous-cv branch.
+    assert "self.fields.maxffh[i, j] = ti.max(self.fields.maxffh[i, j], local_h)" in source
 
 
 def test_strict_edda_text_writer_uses_bed_delta_and_accepted_maxima(tmp_path):
@@ -363,6 +445,9 @@ def test_output_results_excludes_pt_from_standard_output_state():
     EDDASolver._output_results(solver)
 
     assert solver.fields.exclude_fields == ("pt",)
+    assert solver.fields.include_fields is not None
+    assert "h" in solver.fields.include_fields
+    assert "pt" not in solver.fields.include_fields
     assert "pt" not in solver.results[0]["state"]
     assert "erosion_depth_fortran_output" in solver.results[0]["state"]
 

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type Scenario, type ScenarioConfiguration, type SimulationRun, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
+import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type ResultMetadata, type Scenario, type ScenarioConfiguration, type SimulationRun, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
 import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, settingsApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
@@ -85,6 +85,7 @@ interface TaichiFlowStore {
   canvasPreviewMode: CanvasPreviewMode;
   rasterPreviews: Record<string, RasterPreviewMeta>;
   resultFamilies: Record<string, ResultFamily[]>;
+  resultMetadata: Record<string, ResultMetadata>;
   exports: ExportJob[];
   runningSimulations: Record<string, SimulationRun>;
   loading: LoadingState;
@@ -137,6 +138,7 @@ interface TaichiFlowStore {
   stopRunningItem: (itemId: string) => Promise<void>;
   retryQueueItem: (itemId: string) => Promise<void>;
   fetchResultFamilies: (simulationId: string) => Promise<void>;
+  fetchResultMetadata: (simulationId: string) => Promise<void>;
   createExport: (scenarioId: string, simulationId: string, options: Partial<ExportJob>) => Promise<ExportJob>;
   fetchExports: () => Promise<void>;
   refreshMetrics: () => Promise<void>;
@@ -191,6 +193,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       canvasPreviewMode: "downsample",
       rasterPreviews: {},
       resultFamilies: {},
+      resultMetadata: {},
       exports: [],
       runningSimulations: {},
       loading: {},
@@ -656,11 +659,28 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       fetchResultFamilies: async (simulationId) => {
         const project = get().activeProject;
         if (!project) return;
+        set((state) => ({ loading: { ...state.loading, [`results:${simulationId}`]: true }, errors: { ...state.errors, results: null } }));
         try {
           const families = await resultApi.listResultFamilies(project.project_id, simulationId);
           set((state) => ({ resultFamilies: { ...state.resultFamilies, [simulationId]: families } }));
         } catch (error) {
           set((state) => ({ errors: { ...state.errors, results: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, [`results:${simulationId}`]: false } }));
+        }
+      },
+      fetchResultMetadata: async (simulationId) => {
+        const project = get().activeProject;
+        if (!project) return;
+        const loadingKey = `resultMetadata:${simulationId}`;
+        set((state) => ({ loading: { ...state.loading, [loadingKey]: true }, errors: { ...state.errors, resultMetadata: null } }));
+        try {
+          const metadata = await resultApi.metadata(project.project_id, simulationId);
+          set((state) => ({ resultMetadata: { ...state.resultMetadata, [simulationId]: metadata } }));
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, resultMetadata: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, [loadingKey]: false } }));
         }
       },
       createExport: async (scenarioId, simulationId, options) => {

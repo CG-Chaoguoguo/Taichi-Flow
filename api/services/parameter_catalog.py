@@ -70,6 +70,10 @@ EDITABLE_PARAMETERS = {
     "boundary_conditions.default_type",
     "boundary_conditions.include_nodata",
     "spatial_zones.zones",
+    "compute.use_double_precision",
+    "compute.async_output",
+    "compute.write_geotiff_frames",
+    "compute.numerical_observe_stride",
 }
 
 # edda_in field -> display metadata (Chinese name + English abbrev + group).
@@ -202,6 +206,30 @@ PARAMETER_META: Dict[str, Dict[str, str]] = {
     "boundary_conditions.mode": {"label_zh": "边界模式", "abbrev": "boundary_mode", "group": "boundary"},
     "boundary_conditions.default_type": {"label_zh": "默认边界类型", "abbrev": "boundary_default_type", "group": "boundary"},
     "boundary_conditions.include_nodata": {"label_zh": "含NODATA边界", "abbrev": "boundary_include_nodata", "group": "boundary"},
+    "compute.use_double_precision": {
+        "label_zh": "FP64 双精度计算",
+        "abbrev": "use_double_precision",
+        "group": "runtime",
+        "description_zh": "以 float64 初始化 Taichi 与主机数值缓冲。可提高参考案例复现实验精度，但会增加显存占用与运行时间。",
+    },
+    "compute.async_output": {
+        "label_zh": "异步写盘",
+        "abbrev": "async_output",
+        "group": "runtime",
+        "description_zh": "主线程只做 GPU→CPU 快照，GeoTIFF/ASCII 在后台线程编码落盘，避免计算被磁盘阻塞。",
+    },
+    "compute.write_geotiff_frames": {
+        "label_zh": "写出中间 GeoTIFF",
+        "abbrev": "write_geotiff_frames",
+        "group": "runtime",
+        "description_zh": "关闭后仍按 EDDA 开关写 ASCII 族；可减少每帧磁盘写入。Fortran 对照请保持 ASCII 全帧。",
+    },
+    "compute.numerical_observe_stride": {
+        "label_zh": "守恒诊断采样间隔",
+        "abbrev": "numerical_observe_stride",
+        "group": "runtime",
+        "description_zh": "每隔 N 个候选步采样一次体积守恒；每个输出帧仍强制采样。不影响求解。",
+    },
 }
 
 READONLY_DISPLAY_PARAMETERS = {
@@ -341,6 +369,30 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
         "value_labels_zh": {
             "false": "否",
             "true": "是",
+        },
+    },
+    "compute.use_double_precision": {
+        "value_type": "boolean",
+        "allowed_values": [False, True],
+        "value_labels_zh": {
+            "false": "FP32（默认）",
+            "true": "FP64",
+        },
+    },
+    "compute.async_output": {
+        "value_type": "boolean",
+        "allowed_values": [False, True],
+        "value_labels_zh": {
+            "false": "关闭",
+            "true": "开启",
+        },
+    },
+    "compute.write_geotiff_frames": {
+        "value_type": "boolean",
+        "allowed_values": [False, True],
+        "value_labels_zh": {
+            "false": "仅 ASCII",
+            "true": "ASCII + GeoTIFF",
         },
     },
 }

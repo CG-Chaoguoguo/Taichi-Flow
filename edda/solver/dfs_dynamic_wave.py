@@ -9,6 +9,7 @@ decrease / increase logic without mutating the accepted state on rejected steps.
 
 import hashlib
 import os
+from typing import Any
 
 import numpy as np
 import taichi as ti
@@ -461,6 +462,20 @@ class DFSDynamicWaveSolver:
         self.reject_flag = ti.field(dtype=ti.i32, shape=())
         self.suggested_dt = ti.field(dtype=self.fp, shape=())
         self.max_wave_speed = ti.field(dtype=self.fp, shape=())
+        self.step_result_pack = ti.field(dtype=self.fp, shape=4)
+        self.volume_snapshot_pack = ti.field(dtype=self.fp, shape=12)
+        self._rholimit_seeded = False
+        self._momentum_probe_enabled_host = False
+        self._momentum_probe_lightweight_host = False
+        self._rainfall_zeroed = False
+        self.capture_depo_velocity_snapshots = _env_flag("EDDA_CAPTURE_DEPO_VELOCITY")
+        self.sync_legacy_directional_velocity = _env_flag("EDDA_SYNC_LEGACY_DIRECTIONAL_VELOCITY")
+        # Observational volume-balance scalars.  These mirror the values used
+        # by the existing retry gate; they are persisted for post-run audit
+        # but never feed back into the candidate-step decision.
+        self.volume_error = ti.field(dtype=self.fp, shape=())
+        self.volume_relative_error = ti.field(dtype=self.fp, shape=())
+        self.volume_denominator = ti.field(dtype=self.fp, shape=())
         self.experimental_first_reject_short_circuit = _env_flag("EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT")
         # Source-backed original EDDA semantics. The env flag is retained only
         # for explicit ablation (`0`), not as a candidate gate.
@@ -1959,6 +1974,67 @@ class DFSDynamicWaveSolver:
             "early_return_count": int(self.experimental_first_reject_early_return_count[None]),
         }
 
+    def get_volume_balance_snapshot(self) -> dict[str, float | bool]:
+        """Return accepted cumulative volumes and the last candidate balance.
+
+        The scalar fields are the same values already used by
+        ``_finalize_volume_balance``.  Reading them on the host is deliberately
+        kept outside the Taichi kernels so this method remains observational.
+        ``acc_flowvolume`` and ``acc_depositvolume`` are the current accepted
+        storage values because the accumulators are reset at the start of each
+        candidate step and committed only after a successful retry check.
+        """
+
+        self._pack_volume_balance_snapshot()
+        pack = np.asarray(self.volume_snapshot_pack.to_numpy(), dtype=np.float64)
+        rainfall = float(pack[0])
+        inflow = float(pack[1])
+        erosion = float(pack[2])
+        failure_source = float(pack[3])
+        infiltration = float(pack[4])
+        outflow = float(pack[5])
+        deposition_flux = float(pack[6])
+        flow_storage = float(pack[7])
+        deposit_storage = float(pack[8])
+        denominator = float(pack[9])
+        residual = float(pack[10])
+        relative_error = float(pack[11])
+
+        return {
+            "rainfall_m3": rainfall,
+            "inflow_m3": inflow,
+            "erosion_m3": erosion,
+            "failure_source_m3": failure_source,
+            "infiltration_m3": infiltration,
+            "outflow_m3": outflow,
+            "deposition_flux_m3": deposition_flux,
+            "flow_storage_m3": flow_storage,
+            "deposit_storage_m3": deposit_storage,
+            "source_total_m3": rainfall + inflow + erosion + failure_source,
+            "sink_and_storage_total_m3": (
+                infiltration + outflow + flow_storage + deposit_storage
+            ),
+            "denominator_m3": denominator,
+            "residual_m3": residual,
+            "relative_error": relative_error,
+            "within_retry_tolerance": abs(relative_error) <= DFS_VOLUME_REL_TOL,
+        }
+
+    @ti.kernel
+    def _pack_volume_balance_snapshot(self):
+        self.volume_snapshot_pack[0] = self.totalrivolume[None]
+        self.volume_snapshot_pack[1] = self.totalinflowvolume[None]
+        self.volume_snapshot_pack[2] = self.totalerosionvolume[None]
+        self.volume_snapshot_pack[3] = self.totalfsvolume[None]
+        self.volume_snapshot_pack[4] = self.totalinfilvolume[None]
+        self.volume_snapshot_pack[5] = self.totaloutflowvolume[None]
+        self.volume_snapshot_pack[6] = self.totaldepovolume[None]
+        self.volume_snapshot_pack[7] = self.acc_flowvolume[None]
+        self.volume_snapshot_pack[8] = self.acc_depositvolume[None]
+        self.volume_snapshot_pack[9] = self.volume_denominator[None]
+        self.volume_snapshot_pack[10] = self.volume_error[None]
+        self.volume_snapshot_pack[11] = self.volume_relative_error[None]
+
     def enable_momentum_faceflux_tracked_probe(
         self,
         *,
@@ -1971,6 +2047,8 @@ class DFSDynamicWaveSolver:
         """Enable tracked scalar momentum/face-flux diagnostics for one face."""
         self.momentum_faceflux_probe_enabled[None] = 1 if enabled else 0
         self.momentum_faceflux_probe_lightweight[None] = 1 if lightweight else 0
+        self._momentum_probe_enabled_host = bool(enabled)
+        self._momentum_probe_lightweight_host = bool(lightweight)
         self.momentum_faceflux_probe_target_cell_id[None] = int(target_cell_id)
         self.momentum_faceflux_probe_target_direction[None] = int(target_direction)
         if clear:
@@ -6114,10 +6192,12 @@ class DFSDynamicWaveSolver:
             # Enforce the frozen control even if a checkpoint or external
             # caller supplied a stale sidecar mask after initialization.
             self.fields.dfs_outflow_mask.fill(0)
-        if self.rholimit_initialized[None] == 0:
-            self._zero_tanslodir_carry()
-            self._seed_initial_rholimit_from_input_slope(self.rhow, self.rhos, self.cvstar)
-            self.rholimit_initialized[None] = 1
+        if not self._rholimit_seeded:
+            if self.rholimit_initialized[None] == 0:
+                self._zero_tanslodir_carry()
+                self._seed_initial_rholimit_from_input_slope(self.rhow, self.rhos, self.cvstar)
+                self.rholimit_initialized[None] = 1
+            self._rholimit_seeded = True
         self.workspace.reset_step_workspace()
         if self.use_tanslodir_carry_quirk:
             self.workspace.compute_bed_slope_limiter_with_carry(
@@ -6132,12 +6212,13 @@ class DFSDynamicWaveSolver:
         if dt_reject < self.dt_min:
             dt_reject = self.dt_min
 
-        self.reject_flag[None] = 0
-        self.suggested_dt[None] = dt_reject
-        self.max_wave_speed[None] = 0.0
-        self._reset_first_reject_diagnostics(self.current_time, dt_used)
+        self._reset_candidate_step_scalars(dt_reject, self.current_time, dt_used)
         if not self.simulate_rainfall:
-            self._zero_rainfall_forcing()
+            if not self._rainfall_zeroed:
+                self._zero_rainfall_forcing()
+                self._rainfall_zeroed = True
+        else:
+            self._rainfall_zeroed = False
         self._stage_inflow_forcing(dt_used)
         rnoff_period_precompute_manifest = self.apply_rnoff_period_precompute(dt_used)
 
@@ -6155,9 +6236,10 @@ class DFSDynamicWaveSolver:
             else:
                 self.apply_rnoff_topoindex_runtime_hook(dt_used)
         self._record_stage_trace("STEP_START", dt_used, event="STEP_START")
-        self._capture_depo_velocity_source_entry()
-        momentum_probe_enabled = int(self.momentum_faceflux_probe_enabled[None]) != 0
-        momentum_probe_lightweight = int(self.momentum_faceflux_probe_lightweight[None]) != 0
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_source_entry()
+        momentum_probe_enabled = bool(self._momentum_probe_enabled_host)
+        momentum_probe_lightweight = bool(self._momentum_probe_lightweight_host)
         if momentum_probe_enabled:
             self.momentum_faceflux_probe_t_start[None] = self.current_time
             self.momentum_faceflux_probe_dt[None] = dt_used
@@ -6165,7 +6247,8 @@ class DFSDynamicWaveSolver:
                 self._capture_momentum_faceflux_source_entry_state_probe_lightweight()
             else:
                 self._capture_momentum_faceflux_source_entry_state_probe()
-        self._capture_depo_velocity_pre_source_branch()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_pre_source_branch()
         self._compute_source_rates(
             dt_used,
             self.rhow,
@@ -6188,7 +6271,8 @@ class DFSDynamicWaveSolver:
         self._run_erosion_deposition_kernel_diagnostic_if_enabled(dt_used)
         self._run_erosion_deposition_mutation_if_enabled()
         self._record_stage_trace("POST_SOURCE_MERGE", dt_used, event="POST_SOURCE_MERGE")
-        self._capture_depo_velocity_before_face_flux()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_before_face_flux()
         if momentum_probe_enabled:
             self.momentum_faceflux_probe_t_start[None] = self.current_time
             self.momentum_faceflux_probe_dt[None] = dt_used
@@ -6210,28 +6294,31 @@ class DFSDynamicWaveSolver:
         self._run_face_flux_kernel_diagnostic_if_enabled()
         if self.cvbar_erosion_parity_enabled:
             self._update_legacy_previous_face_cvbar_scalar()
-        if self.experimental_first_reject_short_circuit and int(self.reject_flag[None]) != 0:
-            self.experimental_first_reject_early_return_count[None] = (
-                int(self.experimental_first_reject_early_return_count[None]) + 1
-            )
-            if momentum_probe_enabled:
-                self._mark_momentum_faceflux_probe_rejected_status(1)
-            if self.simulate_shallow_landslide and self.double_layer_model is not None:
-                self.double_layer_model.restore_richards_committed_state()
-            self._ci_candidate = None
-            self._discard_precomputed_failure_candidate()
-            return {
-                "accepted": False,
-                "used_dt": dt_used,
-                "suggested_dt": float(self.suggested_dt[None]),
-                "next_dt": float(self.suggested_dt[None]),
-                "max_wave_speed": float(self.max_wave_speed[None]),
-                "experimental_first_reject_short_circuit": True,
-                "first_reject": self.get_first_reject_diagnostics(),
-            }
+        if self.experimental_first_reject_short_circuit:
+            accepted_early, suggested_dt, max_wave_speed = self._read_step_result_pack()
+            if not accepted_early:
+                self.experimental_first_reject_early_return_count[None] = (
+                    int(self.experimental_first_reject_early_return_count[None]) + 1
+                )
+                if momentum_probe_enabled:
+                    self._mark_momentum_faceflux_probe_rejected_status(1)
+                if self.simulate_shallow_landslide and self.double_layer_model is not None:
+                    self.double_layer_model.restore_richards_committed_state()
+                self._ci_candidate = None
+                self._discard_precomputed_failure_candidate()
+                return {
+                    "accepted": False,
+                    "used_dt": dt_used,
+                    "suggested_dt": suggested_dt,
+                    "next_dt": suggested_dt,
+                    "max_wave_speed": max_wave_speed,
+                    "experimental_first_reject_short_circuit": True,
+                    "first_reject": self.get_first_reject_diagnostics(),
+                }
         if momentum_probe_enabled and momentum_probe_lightweight:
             self._capture_momentum_faceflux_post_edge_lightweight(dt_used, self.limitfr)
-        self._capture_depo_velocity_after_face_flux()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_after_face_flux()
         self._accumulate_and_check(dt_used, self.rhow, self.toldh, self.toldhp)
         self._run_qnet_qmassnet_kernel_diagnostic_if_enabled()
         self._run_qnet_qmassnet_mutation_if_enabled()
@@ -6241,13 +6328,12 @@ class DFSDynamicWaveSolver:
         if momentum_probe_enabled:
             self._capture_momentum_faceflux_post_accumulate_probe()
         self.apply_stormdrain_runtime_hook(dt_used)
-        self._reset_volume_balance_accumulators()
         self._accumulate_volume_balance(dt_used)
         self._finalize_volume_balance(dt_used)
         self._capture_outflow_candidate_before_clear(self.rhow)
         self._apply_post_balance_outflow(self.rhow)
 
-        accepted = int(self.reject_flag[None]) == 0
+        accepted, suggested_dt, max_wave_speed = self._read_step_result_pack()
         self._record_stage_trace(
             "RETRY_CHECK",
             dt_used,
@@ -6267,9 +6353,9 @@ class DFSDynamicWaveSolver:
             return {
                 "accepted": False,
                 "used_dt": dt_used,
-                "suggested_dt": float(self.suggested_dt[None]),
-                "next_dt": float(self.suggested_dt[None]),
-                "max_wave_speed": float(self.max_wave_speed[None]),
+                "suggested_dt": suggested_dt,
+                "next_dt": suggested_dt,
+                "max_wave_speed": max_wave_speed,
                 "experimental_first_reject_short_circuit": False,
                 "first_reject": self.get_first_reject_diagnostics(),
             }
@@ -6284,7 +6370,6 @@ class DFSDynamicWaveSolver:
 
         self._prepare_h_cv_rho_diagnostic_if_enabled()
         self._prepare_h_cv_rho_mutation_if_enabled()
-        self._commit_volume_counters()
         self._commit_accepted_outflow_candidate()
         self.last_accepted_outflow_dt = dt_used
         self._commit_step(dt_used, dt_next, self.rhow, self.rhos, self.cvstar)
@@ -6322,17 +6407,48 @@ class DFSDynamicWaveSolver:
             self.slide1 = 0
         self._commit_cumulative_infiltration()
         self._sync_uv_from_fortran_velocity()
-        self._sync_legacy_directional_velocity()
+        if self.sync_legacy_directional_velocity:
+            self._sync_legacy_directional_velocity()
 
         return {
             "accepted": True,
             "used_dt": dt_used,
             "suggested_dt": float(dt_next),
             "next_dt": float(dt_next),
-            "max_wave_speed": float(self.max_wave_speed[None]),
+            "max_wave_speed": max_wave_speed,
             "experimental_first_reject_short_circuit": False,
-            "first_reject": self.get_first_reject_diagnostics(),
+            "first_reject": {},
         }
+
+    def _read_step_result_pack(self) -> tuple[bool, float, float]:
+        self._pack_step_result_scalars()
+        pack = np.asarray(self.step_result_pack.to_numpy(), dtype=np.float64)
+        return int(pack[0]) == 0, float(pack[1]), float(pack[2])
+
+    @ti.kernel
+    def _reset_candidate_step_scalars(self, dt_reject: ti.f64, t_start: ti.f64, dt_used: ti.f64):
+        self.reject_flag[None] = 0
+        self.suggested_dt[None] = dt_reject
+        self.max_wave_speed[None] = 0.0
+        self.first_reject_count[None] = 0
+        self.first_reject_reason[None] = FIRST_REJECT_NONE
+        self.first_reject_source_i[None] = -1
+        self.first_reject_source_j[None] = -1
+        self.first_reject_neighbor_i[None] = -1
+        self.first_reject_neighbor_j[None] = -1
+        self.first_reject_cell_id[None] = -1
+        self.first_reject_neighbor_cell_id[None] = -1
+        self.first_reject_direction[None] = -1
+        self.first_reject_t_start[None] = t_start
+        self.first_reject_dt[None] = dt_used
+        self.first_reject_value[None] = 0.0
+        self.first_reject_threshold[None] = 0.0
+
+    @ti.kernel
+    def _pack_step_result_scalars(self):
+        self.step_result_pack[0] = ti.cast(self.reject_flag[None], ti.f64)
+        self.step_result_pack[1] = self.suggested_dt[None]
+        self.step_result_pack[2] = self.max_wave_speed[None]
 
     @ti.kernel
     def _zero_rainfall_forcing(self):
@@ -8402,6 +8518,15 @@ class DFSDynamicWaveSolver:
 
     @ti.kernel
     def _accumulate_volume_balance(self, dt: ti.f64):
+        self.acc_outflowvolume[None] = 0.0
+        self.acc_infilvolume[None] = 0.0
+        self.acc_inflowvolume[None] = 0.0
+        self.acc_rivolume[None] = 0.0
+        self.acc_erosionvolume[None] = 0.0
+        self.acc_fsvolume[None] = 0.0
+        self.acc_depovolume[None] = 0.0
+        self.acc_flowvolume[None] = 0.0
+        self.acc_depositvolume[None] = 0.0
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 continue
@@ -8448,6 +8573,8 @@ class DFSDynamicWaveSolver:
         self.cand_totaldepovolume[None] = tempdepovolume
 
         denominator = temprivolume + tempinflowvolume + temperosionvolume + tempfsvolume
+        volumeerror = 0.0
+        volumerelaerror = 0.0
         if denominator > EPS:
             volumeerror = (
                 temprivolume + tempinflowvolume + temperosionvolume + tempfsvolume
@@ -8470,6 +8597,13 @@ class DFSDynamicWaveSolver:
                 if dt_reject < self.dt_min:
                     dt_reject = self.dt_min
                 self.suggested_dt[None] = dt_reject
+
+        # Keep these values observationally available to the Python lifecycle
+        # and the persisted run diagnostics.  They are not read by any kernel
+        # that changes the accept/reject decision.
+        self.volume_denominator[None] = denominator
+        self.volume_error[None] = volumeerror
+        self.volume_relative_error[None] = volumerelaerror
 
     @ti.kernel
     def _capture_outflow_candidate_before_clear(self, rho_water: ti.f64):
@@ -8515,6 +8649,13 @@ class DFSDynamicWaveSolver:
         rho_sediment: ti.f64,
         cvstar: ti.f64,
     ):
+        self.totaloutflowvolume[None] = self.cand_totaloutflowvolume[None]
+        self.totalinfilvolume[None] = self.cand_totalinfilvolume[None]
+        self.totalinflowvolume[None] = self.cand_totalinflowvolume[None]
+        self.totalrivolume[None] = self.cand_totalrivolume[None]
+        self.totalerosionvolume[None] = self.cand_totalerosionvolume[None]
+        self.totalfsvolume[None] = self.cand_totalfsvolume[None]
+        self.totaldepovolume[None] = self.cand_totaldepovolume[None]
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 continue

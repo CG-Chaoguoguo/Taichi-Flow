@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from api.services.runtime_session import prepare_runtime_from_payload
+from tests.test_native_input_chain import _make_reference_case
 
 
 def _create_project(client: TestClient, root: Path, name: str = "Slope study") -> dict:
@@ -265,3 +267,181 @@ def test_claim_copies_queue_policy_into_simulation_and_runtime_payload(tmp_path:
             store.simulation_row(project["project_id"], context["simulation_id"]),
         )
         assert simulation["compute_policy_resolution"] == expected
+
+
+def test_reference_case_claim_preserves_edda_config_mapping(tmp_path: Path) -> None:
+    """A reference-owned import must not collapse into direct/default runtime config."""
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_reference_case(tmp_path)
+        # This test exercises runtime source selection rather than the separate
+        # UNSFIN topology gate, so keep its compact fixture on the inactive
+        # shallow-landslide branch.
+        source_text = edda_in.read_text(encoding="utf-8")
+        original = "Simulate shallow landslide? Enter T (.true.) or F (.false.)\nT\nSimulate debris flow?"
+        assert source_text.count(original) == 1
+        edda_in.write_text(source_text.replace(original, original.replace("\nT\n", "\nF\n")), encoding="utf-8")
+        source_root = edda_in.parent
+        preview = store.preview_case_import(str(source_root))
+        imported = store.commit_case_import(
+            str(source_root),
+            str(tmp_path / "reference-project"),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )
+        project = imported["project"]
+        scenario = imported["scenario"]
+        assert scenario["configuration_ownership"] == "reference_case"
+
+        queued = store.enqueue_scenario(project["project_id"], scenario["scenario_id"])
+        context = store.claim_queue_item(project["project_id"], queued["queue_item_id"])
+
+        # This is the critical seam: the runtime must receive the immutable
+        # imported edda_in blob, not fall through to the direct API payload.
+        assert context["case_config_file"] is not None
+        assert Path(context["case_config_file"]).is_file()
+        assert context["case_base_dir"] == project["root_path"]
+        frozen_input_paths = {
+            "case_config_file": context["case_config_file"],
+            "dem_file": context["dem_file"],
+            "soil_zones_file": context["soil_zones_file"],
+            "boundary_file": context["boundary_file"],
+            **context["case_input_files"],
+        }
+        assert {"case_config_file", "dem_file"} <= {
+            key for key, path in frozen_input_paths.items() if path is not None
+        }
+        assert context["case_input_files"]
+        missing_frozen_inputs = [
+            f"{key}={path}"
+            for key, path in frozen_input_paths.items()
+            if path is not None and not Path(path).is_file()
+        ]
+        assert not missing_frozen_inputs, missing_frozen_inputs
+
+        prepared = prepare_runtime_from_payload(
+            app_output_dir=tmp_path / "app-output",
+            dem_file=context.get("dem_file"),
+            rainfall_file=context.get("rainfall_file"),
+            soil_zones_file=context.get("soil_zones_file"),
+            boundary_file=context.get("boundary_file"),
+            output_dir=context["output_dir"],
+            overrides=context["overrides"],
+            case_config_file=context["case_config_file"],
+            case_base_dir=context["case_base_dir"],
+            case_input_files=context["case_input_files"],
+            runtime_profile_name=context["runtime_profile"],
+            session_id=context["simulation_id"],
+            frozen_effective_config=context["effective_config"],
+            frozen_compute_policy_resolution=context["compute_policy_resolution"],
+        )
+
+        assert prepared.provenance["source_mode"] == "reference_config"
+        assert prepared.effective_config["source_mode"] == "reference_config"
+
+
+def test_reference_case_inactive_failure_policy_keeps_frozen_forensics_when_source_files_are_not_imported(tmp_path: Path) -> None:
+    """An inactive DFS policy must not require source-only Fortran evidence at runtime."""
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_reference_case(tmp_path)
+        source_text = edda_in.read_text(encoding="utf-8")
+        original = "Simulate shallow landslide? Enter T (.true.) or F (.false.)\nT\nSimulate debris flow?"
+        assert source_text.count(original) == 1
+        edda_in.write_text(source_text.replace(original, original.replace("\nT\n", "\nF\n")), encoding="utf-8")
+        (edda_in.parent / "edda main program.F90").write_text(
+            "if (fssimul) call unsfin(imx1,u(19),u(2),profil)\n",
+            encoding="utf-8",
+        )
+        (edda_in.parent / "dfs.F90").write_text(
+            "\n".join(
+                [
+                    "if (tnow<=tfail(i) .and. tnext>tfail(i)) then",
+                    "  tempfsh(i)=fsdepth(i)",
+                    "  tempfsrho(i)=(rhos-rhow)*cvstar+rhow",
+                    "end if",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        preview = store.preview_case_import(str(edda_in.parent))
+        imported = store.commit_case_import(
+            str(edda_in.parent),
+            str(tmp_path / "reference-project"),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )
+        project = imported["project"]
+        scenario = imported["scenario"]
+        queued = store.enqueue_scenario(project["project_id"], scenario["scenario_id"])
+        assert queued["compute_policy_resolution"]["detected"]["topology_status"] == "recognized"
+        assert queued["compute_policy_resolution"]["effective"]["mode"] == "disabled"
+
+        context = store.claim_queue_item(project["project_id"], queued["queue_item_id"])
+        assert not (Path(context["case_base_dir"]) / "dfs.F90").exists()
+        prepared = prepare_runtime_from_payload(
+            app_output_dir=tmp_path / "app-output",
+            dem_file=context.get("dem_file"),
+            rainfall_file=context.get("rainfall_file"),
+            soil_zones_file=context.get("soil_zones_file"),
+            boundary_file=context.get("boundary_file"),
+            output_dir=context["output_dir"],
+            overrides=context["overrides"],
+            case_config_file=context["case_config_file"],
+            case_base_dir=context["case_base_dir"],
+            case_input_files=context["case_input_files"],
+            runtime_profile_name=context["runtime_profile"],
+            session_id=context["simulation_id"],
+            frozen_effective_config=context["effective_config"],
+            frozen_compute_policy_resolution=context["compute_policy_resolution"],
+        )
+
+        assert prepared.runtime_input_manifest["compute_policy_resolution"] == queued["compute_policy_resolution"]
+
+
+def test_reference_case_parameter_save_and_duplicate_keep_immutable_input_revision(tmp_path: Path) -> None:
+    """A runtime-only parameter edit must not detach a ready reference input snapshot."""
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_reference_case(tmp_path)
+        source_text = edda_in.read_text(encoding="utf-8")
+        original = "Simulate shallow landslide? Enter T (.true.) or F (.false.)\nT\nSimulate debris flow?"
+        assert source_text.count(original) == 1
+        edda_in.write_text(source_text.replace(original, original.replace("\nT\n", "\nF\n")), encoding="utf-8")
+
+        preview = store.preview_case_import(str(edda_in.parent))
+        imported = store.commit_case_import(
+            str(edda_in.parent),
+            str(tmp_path / "reference-project"),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )
+        project = imported["project"]
+        source = imported["scenario"]
+        revision_id = imported["input_revision_id"]
+        assert source["input_revision_id"] == revision_id
+        assert source["status"] == "ready"
+
+        # This matches the editor save contract: it submits the current binding
+        # projection together with a parameter-only change.
+        saved = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{source['scenario_id']}",
+            json={
+                "parameter_patch": {"time.t_end": 900},
+                "input_bindings": source["input_bindings"],
+                "expected_version": source["version"],
+            },
+        )
+        assert saved.status_code == 200
+        saved_scenario = saved.json()
+        assert saved_scenario["input_revision_id"] == revision_id
+        assert saved_scenario["status"] == "ready"
+        assert saved_scenario["effective_parameters"]["time.t_end"] == 900
+
+        duplicated = client.post(
+            f"/api/projects/{project['project_id']}/scenarios/{saved_scenario['scenario_id']}/duplicate"
+        )
+        assert duplicated.status_code == 201
+        copied = duplicated.json()
+        assert copied["input_revision_id"] == revision_id
+        assert copied["status"] == "ready"
+        assert copied["configuration_ownership"] == "reference_case"

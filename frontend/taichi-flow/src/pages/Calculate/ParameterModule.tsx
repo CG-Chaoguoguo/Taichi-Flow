@@ -38,6 +38,7 @@ const UNIT_BY_KEY: Record<string, string> = {
   "time.t_start": "s",
   "time.t_end": "s",
   "time.dt_output": "s",
+  "compute.numerical_observe_stride": "步",
   "hydrology.rho_w": "kg/m³",
   "hydrology.viscosity": "Pa·s",
   "rheology.rho_s": "kg/m³",

@@ -168,6 +168,7 @@ export function InspectorPanel({
   const selectedFamily = editorSelection?.kind === "input" ? editorSelection.family : DEFAULT_INPUT_FAMILY;
   const isLegacy = Boolean(scenario && !scenario.parameter_template_id);
   const canEdit = Boolean(scenario && !isLegacy && ["draft", "ready"].includes(scenario.status));
+  const canControlRun = Boolean(scenario && !isLegacy && ["draft", "ready", "failed", "stopped"].includes(scenario.status));
   const configuration = scenario ? configurations[scenario.scenario_id] : null;
 
   const title = kind === "input"
@@ -290,7 +291,7 @@ export function InspectorPanel({
               {tab === "run" ? (
                 <div className="tf-inspector-section tf-stack">
                   {isLegacy ? <div className="tf-validation-summary is-neutral">历史方案保持只读兼容；请复制或迁移后再发起新运行。</div> : <ValidationSummary validation={configuration?.validation} />}
-                  <RunModule scenario={displayScenario} readOnly={!canEdit} />
+                  <RunModule scenario={displayScenario} readOnly={!canControlRun} />
                   <button type="button" className="tf-link-button" onClick={() => setDockTab("queue")}>打开队列</button>
                 </div>
               ) : null}

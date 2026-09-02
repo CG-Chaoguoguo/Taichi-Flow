@@ -304,6 +304,76 @@ export type ResultFamily = {
   metadata?: Record<string, unknown>;
 };
 
+export type NumericalDiagnostics = {
+  schema_version?: number;
+  status?: string;
+  simulation?: {
+    current_time_s?: number;
+    end_time_s?: number;
+    output_count?: number;
+  };
+  backend?: {
+    requested_backend?: string;
+    manager_backend?: string;
+    live_arch?: string;
+    default_fp?: string;
+    cuda_probe_kernel?: string;
+    fallback_active?: boolean;
+    [key: string]: unknown;
+  };
+  time_integration?: {
+    accepted_steps?: number;
+    candidate_steps?: number;
+    rejected_steps?: number;
+    rejection_reasons?: Record<string, number>;
+    dt_min_configured_s?: number;
+    dt_max_configured_s?: number;
+    dt_min_hits?: number;
+    dt?: {
+      accepted_min_s?: number | null;
+      accepted_max_s?: number | null;
+      accepted_mean_s?: number | null;
+      accepted_std_s?: number | null;
+    };
+  };
+  local_conservation?: {
+    tolerance?: number;
+    max_abs_relative_error?: number;
+    accepted_step_violation_count?: number;
+    last_step?: Record<string, unknown>;
+  };
+  global_volume_ledger?: {
+    rainfall_m3?: number;
+    inflow_m3?: number;
+    erosion_m3?: number;
+    failure_source_m3?: number;
+    infiltration_m3?: number;
+    outflow_m3?: number;
+    flow_storage_m3?: number;
+    deposit_storage_m3?: number;
+    source_total_m3?: number;
+    sink_and_storage_total_m3?: number;
+    residual_m3?: number;
+    relative_error?: number;
+    tolerance?: number;
+    passed?: boolean;
+    trigger_inventory_available_m3?: number;
+    drainage_m3?: number;
+    [key: string]: unknown;
+  };
+  nonfinite_counts?: Record<string, number>;
+  classification?: {
+    functional_e2e?: boolean | null;
+    conservation_closure?: boolean | null;
+    strict_code_parity?: boolean | null;
+    discretization_convergence?: string;
+  };
+};
+
+export type ResultMetadata = Record<string, unknown> & {
+  numerical_diagnostics?: NumericalDiagnostics | null;
+};
+
 export type ExportStatus = "queued" | "running" | "completed" | "failed" | "estimating" | "generating" | "ready" | "expired";
 export type ExportJob = {
   export_id: string;

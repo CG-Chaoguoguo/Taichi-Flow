@@ -292,7 +292,15 @@ class SimulationCoordinator:
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
-            await self._dispatch_available()
+            try:
+                await self._dispatch_available()
+            except Exception:
+                # A transient store/executor failure must not silently terminate the
+                # scheduler task and strand already-queued simulations indefinitely.
+                # Queue state remains durable, so the next poll can safely retry.
+                logger.exception(
+                    "Scheduler dispatch cycle failed; queued work will be retried on the next poll."
+                )
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_interval)
             except asyncio.TimeoutError:

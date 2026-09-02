@@ -121,6 +121,10 @@ def _bj_hxl_values() -> Dict[str, Any]:
         "time.toldhp": 0.1,
         "time.dt_output": 3600.0,
         "time.wavemax": 0.25,
+        "compute.use_double_precision": False,
+        "compute.async_output": True,
+        "compute.write_geotiff_frames": True,
+        "compute.numerical_observe_stride": 20,
         "rainfall.mode": "raster",
         "rainfall.periods": _bj_hxl_rainfall_periods(),
         "manning.source": "global",
@@ -281,6 +285,11 @@ def normalize_rainfall_patch(patch: Dict[str, Any]) -> Dict[str, Any]:
 def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
     """Convert a parsed legacy config to the path-free scenario parameter contract."""
     values = builtin_bj_hxl_template()["values"]
+    # Reference-case mapping has always initialized the production solver in
+    # FP64. Keep that source-owned runtime default visible and frozen in each
+    # imported reference template instead of inheriting the ordinary template's
+    # FP32 default implicitly.
+    values["compute.use_double_precision"] = True
     scalar_map = {
         "hydrology.use_background_flux_offset": "background_flux_offset",
         "hydrology.rizero_initial": "rizero",

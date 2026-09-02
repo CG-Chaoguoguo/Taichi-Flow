@@ -38,6 +38,9 @@ def _build_config(
     *,
     face_flux_variant: str = "asymmetric_head_guard",
     failure_source_variant: str = "live_doublelayer_in_dfs",
+    dry_face_velocity_variant: str = "keep_velocity_bj",
+    artivis_variant: str = "depth_ratio_bj",
+    absubar_variant: str = "max_component_bj",
 ) -> SimulationConfig:
     return SimulationConfig.from_dict(
         {
@@ -62,6 +65,9 @@ def _build_config(
                 "rizero_initial": 1.0e-9,
                 "dfs_face_flux_variant": face_flux_variant,
                 "dfs_failure_source_variant": failure_source_variant,
+                "dfs_dry_face_velocity_variant": dry_face_velocity_variant,
+                "dfs_artivis_variant": artivis_variant,
+                "dfs_absubar_variant": absubar_variant,
             },
             "rheology": {
                 "rho_water": 1000.0,
@@ -438,6 +444,174 @@ def test_both_thin_weighted_face_flux_consumes_cellareacal_weights():
     assert np.isclose(fv_weighted_area[0, 0, 2], -fv_weighted_area[1, 0, 6])
     assert np.isclose(qq_weighted_area[0, 0, 2], -qq_weighted_area[1, 0, 6])
     assert not np.isclose(qq_equal_area[0, 0, 2], qq_weighted_area[0, 0, 2])
+
+
+def test_arithmetic_mean_chamoli_face_flux_diverges_from_both_thin_weighted_on_unequal_depth():
+    """Wet/dry-front Cv/rho averages differ between Chamoli arithmetic and BJ depth-weighted."""
+    h_values = np.array([[0.20], [0.02]], dtype=np.float64)
+    rho_values = np.array([[1800.0], [1000.0]], dtype=np.float64)
+
+    fields_weighted = _build_fields()
+    fields_weighted.h.from_numpy(h_values.copy())
+    fields_weighted.rho.from_numpy(rho_values.copy())
+    solver_weighted = DFSDynamicWaveSolver(
+        fields_weighted,
+        _build_config(face_flux_variant="both_thin_weighted"),
+        FortranDynamicWaveWorkspace(fields_weighted),
+    )
+
+    fields_chamoli = _build_fields()
+    fields_chamoli.h.from_numpy(h_values.copy())
+    fields_chamoli.rho.from_numpy(rho_values.copy())
+    solver_chamoli = DFSDynamicWaveSolver(
+        fields_chamoli,
+        _build_config(face_flux_variant="arithmetic_mean_chamoli"),
+        FortranDynamicWaveWorkspace(fields_chamoli),
+    )
+
+    assert solver_chamoli.dfs_face_flux_variant == "arithmetic_mean_chamoli"
+    result_weighted = solver_weighted.step(1.0e-3)
+    result_chamoli = solver_chamoli.step(1.0e-3)
+
+    qq_weighted = fields_weighted.qq_fortran.to_numpy()
+    qq_chamoli = fields_chamoli.qq_fortran.to_numpy()
+    fv_weighted = fields_weighted.fv_fortran.to_numpy()
+    fv_chamoli = fields_chamoli.fv_fortran.to_numpy()
+
+    assert result_weighted["accepted"] is True
+    assert result_chamoli["accepted"] is True
+    assert np.isclose(fv_chamoli[0, 0, 2], -fv_chamoli[1, 0, 6])
+    assert np.isclose(qq_chamoli[0, 0, 2], -qq_chamoli[1, 0, 6])
+    assert not np.isclose(qq_weighted[0, 0, 2], qq_chamoli[0, 0, 2])
+    assert not np.isclose(fv_weighted[0, 0, 2], fv_chamoli[0, 0, 2])
+
+
+def test_zero_dry_face_chamoli_clears_predicted_velocity_from_dry_upstream():
+    """Chamoli zeros fvpredi when the owning (upstream) cell is thinner than tol."""
+    h_values = np.array([[0.005], [0.20]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+
+    fields_keep = _build_fields()
+    fields_keep.h.from_numpy(h_values.copy())
+    fields_keep.rho.from_numpy(rho_values.copy())
+    solver_keep = DFSDynamicWaveSolver(
+        fields_keep,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            dry_face_velocity_variant="keep_velocity_bj",
+        ),
+        FortranDynamicWaveWorkspace(fields_keep),
+    )
+
+    fields_zero = _build_fields()
+    fields_zero.h.from_numpy(h_values.copy())
+    fields_zero.rho.from_numpy(rho_values.copy())
+    solver_zero = DFSDynamicWaveSolver(
+        fields_zero,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            dry_face_velocity_variant="zero_dry_face_chamoli",
+        ),
+        FortranDynamicWaveWorkspace(fields_zero),
+    )
+
+    assert solver_zero.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
+    result_keep = solver_keep.step(1.0e-3)
+    result_zero = solver_zero.step(1.0e-3)
+    assert result_keep["accepted"] is True
+    assert result_zero["accepted"] is True
+
+    fv_keep = fields_keep.fv_fortran.to_numpy()
+    fv_zero = fields_zero.fv_fortran.to_numpy()
+    # Owner cell (0,0) is dry (h=0.005 < tol); Chamoli must not emit into (1,0).
+    assert np.isclose(fv_zero[0, 0, 2], 0.0)
+    assert np.isclose(fv_zero[1, 0, 6], 0.0)
+    assert not np.isclose(fv_keep[0, 0, 2], 0.0)
+
+
+def test_velocity_ratio_chamoli_artivis_diverges_from_depth_ratio_bj():
+    """Unequal depths + seeded face velocity make the two artivis weights differ."""
+    h_values = np.array([[0.20], [0.02]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+    fv_seed = np.zeros((2, 1, 8), dtype=np.float64)
+    fv_seed[0, 0, 2] = 1.0
+    fv_seed[1, 0, 6] = -1.0
+
+    fields_bj = _build_fields()
+    fields_bj.h.from_numpy(h_values.copy())
+    fields_bj.rho.from_numpy(rho_values.copy())
+    fields_bj.fv_fortran.from_numpy(fv_seed.copy())
+    solver_bj = DFSDynamicWaveSolver(
+        fields_bj,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            artivis_variant="depth_ratio_bj",
+        ),
+        FortranDynamicWaveWorkspace(fields_bj),
+    )
+
+    fields_ch = _build_fields()
+    fields_ch.h.from_numpy(h_values.copy())
+    fields_ch.rho.from_numpy(rho_values.copy())
+    fields_ch.fv_fortran.from_numpy(fv_seed.copy())
+    solver_ch = DFSDynamicWaveSolver(
+        fields_ch,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            artivis_variant="velocity_ratio_chamoli",
+        ),
+        FortranDynamicWaveWorkspace(fields_ch),
+    )
+
+    assert solver_ch.dfs_artivis_variant == "velocity_ratio_chamoli"
+    result_bj = solver_bj.step(1.0e-3)
+    result_ch = solver_ch.step(1.0e-3)
+    assert result_bj["accepted"] is True
+    assert result_ch["accepted"] is True
+
+    fv_bj = fields_bj.fv_fortran.to_numpy()
+    fv_ch = fields_ch.fv_fortran.to_numpy()
+    assert not np.isclose(fv_bj[0, 0, 2], fv_ch[0, 0, 2])
+
+
+def test_signed_mean_chamoli_absubar_uses_raw_fv_not_half_max_component():
+    """Chamoli dfs.F90:209-212 signed mean on raw fv vs BJ max(vorth,vcomp) on 0.5*fv."""
+    h_values = np.array([[0.20], [0.20]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+    fv_seed = np.zeros((2, 1, 8), dtype=np.float64)
+    fv_seed[0, 0, 2] = 2.0
+
+    fields_bj = _build_fields()
+    fields_bj.h.from_numpy(h_values.copy())
+    fields_bj.rho.from_numpy(rho_values.copy())
+    fields_bj.fv_fortran.from_numpy(fv_seed.copy())
+    solver_bj = DFSDynamicWaveSolver(
+        fields_bj,
+        _build_config(absubar_variant="max_component_bj"),
+        FortranDynamicWaveWorkspace(fields_bj),
+    )
+
+    fields_ch = _build_fields()
+    fields_ch.h.from_numpy(h_values.copy())
+    fields_ch.rho.from_numpy(rho_values.copy())
+    fields_ch.fv_fortran.from_numpy(fv_seed.copy())
+    solver_ch = DFSDynamicWaveSolver(
+        fields_ch,
+        _build_config(absubar_variant="signed_mean_chamoli"),
+        FortranDynamicWaveWorkspace(fields_ch),
+    )
+
+    assert solver_bj.dfs_absubar_variant == "max_component_bj"
+    assert solver_ch.dfs_absubar_variant == "signed_mean_chamoli"
+    assert solver_bj.step(1.0e-3)["accepted"] is True
+    assert solver_ch.step(1.0e-3)["accepted"] is True
+
+    ab_bj = fields_bj.absubar_temp.to_numpy()[0, 0]
+    ab_ch = fields_ch.absubar_temp.to_numpy()[0, 0]
+    # BJ: 0.5 scale then 0.5*(|fv2|+|fv6|) => 0.5
+    # Chamoli: vy=(fv2-fv6)*0.5 => 1.0
+    assert np.isclose(ab_bj, 0.5)
+    assert np.isclose(ab_ch, 1.0)
 
 
 def test_paired_face_flux_tol_epsilon_is_default_off_and_opt_in(monkeypatch):
@@ -2230,7 +2404,11 @@ def test_rholimit_persists_when_all_fortran_tanslodir_entries_are_negative():
     tanslo = fields.tanslo_fortran.to_numpy()
     cvlimit = fields.cvlimit_temp.to_numpy()
     rholimit = fields.rholimit_temp.to_numpy()
-    assert np.isclose(tanslo[1, 1], 0.0)
+    # All eight neighbors exist and sit uphill, so maxval(tanslodir) is the
+    # least-negative diagonal gradient.  dfs.F90 still stores that negative
+    # `tanslo` before `cvlimit=0; cycle`, and must not rewrite rholimit.
+    assert tanslo[1, 1] < 0.0
+    assert np.isclose(tanslo[1, 1], -1.0 / (10.0 * np.sqrt(2.0)))
     assert np.isclose(cvlimit[1, 1], 0.0)
     assert np.isclose(rholimit[1, 1], 1234.0)
 

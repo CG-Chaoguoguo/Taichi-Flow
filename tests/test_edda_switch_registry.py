@@ -188,8 +188,8 @@ def test_current_bj_hxl_template_freezes_exact_controls_without_rewriting_v2():
     template = builtin_bj_hxl_template()
     template_ids = [item["template_id"] for item in builtin_parameter_templates()]
 
-    assert BJ_HXL_TEMPLATE_ID == "pt-bj-hxl-v3"
-    assert template["version"] == "3"
+    assert BJ_HXL_TEMPLATE_ID == "pt-bj-hxl-v4"
+    assert template["version"] == "4"
     assert "pt-bj-hxl-v2" in template_ids
     assert template_ids[-1] == BJ_HXL_TEMPLATE_ID
     assert template["values"]["edda.registry_version"] == parsed.switch_snapshot.registry_version

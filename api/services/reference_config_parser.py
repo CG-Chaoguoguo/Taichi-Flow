@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 import os
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from api.services.edda_switch_registry import (
     EDDA_SWITCH_REGISTRY,
@@ -642,6 +642,76 @@ def _parse_file_inputs(lines: List[str], base_dir: Path) -> Tuple[Dict[str, Nati
         )
 
     return file_inputs, sorted(set(recognized_families)), sorted(set(unrecognized_families))
+
+
+def _apply_native_file_overrides(
+    file_inputs: Dict[str, NativeInputFileRef],
+    native_file_overrides: Optional[Mapping[str, str]],
+) -> List[str]:
+    """Bind frozen uploaded files before deriving reference-case runtime state.
+
+    A workbench reference import retains the original ``edda_in.txt`` text as
+    the semantic source, while the corresponding rasters and fixed sidecars
+    live in content-addressed blob storage. Resolving the original relative
+    paths against the project root would otherwise make an imported case look
+    as though its native files were absent. Keep the raw reference paths for
+    audit, but use the frozen blob paths for existence checks and runtime
+    metadata.
+    """
+    if not native_file_overrides:
+        return []
+
+    overrides: Dict[str, str] = {}
+    for raw_family, raw_path in native_file_overrides.items():
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        family = FILE_FAMILY_ALIASES.get(str(raw_family).strip().lower(), str(raw_family).strip().lower())
+        overrides[family] = str(Path(raw_path).expanduser().resolve())
+
+    if not overrides:
+        return []
+
+    discovered: List[str] = []
+    for family, resolved_path in overrides.items():
+        file_ref = file_inputs.get(family)
+        if file_ref is None:
+            priority, status = (
+                CASE_DISCOVERY_FAMILIES.get(family)
+                or SUPPORTED_FILE_FAMILIES.get(family)
+                or RECOGNIZED_ONLY_FILE_FAMILIES.get(family)
+                or ("recognized", "recognized")
+            )
+            file_ref = NativeInputFileRef(
+                family=family,
+                raw_paths=[family],
+                priority=priority,
+                production_status=status,
+                notes="Frozen uploaded native input supplied by the workbench reference-case revision.",
+            )
+            file_inputs[family] = file_ref
+            discovered.append(family)
+
+        path = Path(resolved_path)
+        file_ref.resolved_paths = [str(path)]
+        file_ref.exists = [path.is_file()]
+
+    dem_ref = file_inputs.get("demfil")
+    dem_path = (
+        Path(dem_ref.resolved_paths[0])
+        if dem_ref and dem_ref.resolved_paths and dem_ref.exists and dem_ref.exists[0]
+        else None
+    )
+    for family in CASE_DISCOVERY_FAMILIES:
+        file_ref = file_inputs.get(family)
+        if file_ref is None or not file_ref.resolved_paths or not file_ref.exists or not file_ref.exists[0]:
+            continue
+        file_ref.structure_summary = parse_case_sidecar(
+            Path(file_ref.resolved_paths[0]),
+            family=family,
+            dem_file=dem_path,
+        )
+
+    return discovered
 
 
 def _build_rainfall_period_sources(
@@ -1635,7 +1705,12 @@ def _annotate_reference_case_activation(
     )
 
 
-def parse_reference_config_file(reference_config_file: str, reference_base_dir: Optional[str] = None) -> ReferenceConfigParseResult:
+def parse_reference_config_file(
+    reference_config_file: str,
+    reference_base_dir: Optional[str] = None,
+    *,
+    native_file_overrides: Optional[Mapping[str, str]] = None,
+) -> ReferenceConfigParseResult:
     reference_path = Path(reference_config_file)
     if not reference_path.exists():
         raise FileNotFoundError(f"Reference config file not found: {reference_config_file}")
@@ -1714,6 +1789,7 @@ def parse_reference_config_file(reference_config_file: str, reference_base_dir: 
         raise ValueError("No zone definitions parsed from edda_in.txt")
 
     file_inputs, recognized_file_families, unrecognized_file_families = _parse_file_inputs(lines, base_dir)
+    recognized_file_families.extend(_apply_native_file_overrides(file_inputs, native_file_overrides))
     if "rifil" in file_inputs and len(file_inputs["rifil"].raw_paths) > len(cri_mps):
         rifil_ref = file_inputs["rifil"]
         rifil_ref.raw_paths = rifil_ref.raw_paths[: len(cri_mps)]

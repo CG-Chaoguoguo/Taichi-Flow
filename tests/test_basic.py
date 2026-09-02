@@ -70,6 +70,9 @@ class TestBackendManager:
 
     def test_auto_backend_uses_project_priority_order(self, monkeypatch):
         """Auto backend should use project priority cuda > vulkan > cpu."""
+        from edda.backend.backend_manager import reset_taichi_runtime
+
+        reset_taichi_runtime()
         manager = BackendManager()
         init_calls = []
 
@@ -94,6 +97,37 @@ class TestBackendManager:
         assert manager.is_initialized
         assert manager.get_backend() == 'cuda'
         assert init_calls[0] is not None
+
+    def test_explicit_cuda_does_not_fallback_to_cpu(self, monkeypatch):
+        """Requested CUDA must fail closed instead of silently becoming CPU."""
+        from edda.backend.backend_manager import reset_taichi_runtime
+
+        reset_taichi_runtime()
+        manager = BackendManager()
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("cuda unavailable")
+
+        monkeypatch.setattr("edda.backend.backend_manager.ti.init", boom)
+
+        with pytest.raises(RuntimeError, match="CPU fallback disabled"):
+            manager.initialize(backend="cuda")
+
+        assert manager.get_backend() != "cpu"
+        assert manager.is_initialized is False
+
+    def test_gpu_only_auto_refuses_cpu_when_cuda_missing(self, monkeypatch):
+        from edda.backend import backend_manager as backend_mod
+
+        monkeypatch.setenv("EDDA_EXPERIMENT_GPU_ONLY_PRODUCTION_SMOKE", "1")
+        monkeypatch.setattr(
+            BackendManager,
+            "get_available_backends",
+            staticmethod(lambda: ["cpu"]),
+        )
+        manager = BackendManager()
+        with pytest.raises(RuntimeError, match="Refusing Vulkan/CPU fallback"):
+            manager._initialize_auto_backend(init_args={}, num_threads=None)
 
 
 if __name__ == "__main__":

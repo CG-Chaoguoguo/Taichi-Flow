@@ -80,6 +80,7 @@ def test_chamoli_normalized_parameters_include_debrisflow_fields():
 
     parsed = parse_reference_config_file(str(CHAMOLI / "edda_in.txt"), str(CHAMOLI))
     values = normalized_parameter_values(parsed)
+    assert values["compute.use_double_precision"] is True
     assert values["rheology.debrisflowmanning"] == pytest.approx(0.070)
     assert values["rheology.cvlandslide"] == pytest.approx(0.55)
     assert values["rheology.cvglacier"] == pytest.approx(0.3)

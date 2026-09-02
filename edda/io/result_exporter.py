@@ -304,17 +304,20 @@ class ResultExporter:
             yllcorner = 0.0
             cellsize = 1.0
 
-        # Write ASCII grid
-        with open(output_path, 'w') as f:
-            f.write(f"ncols         {width}\n")
-            f.write(f"nrows         {height}\n")
-            f.write(f"xllcorner     {xllcorner}\n")
-            f.write(f"yllcorner     {yllcorner}\n")
-            f.write(f"cellsize      {cellsize}\n")
-            f.write(f"NODATA_value  {self.nodata_value}\n")
-
-            # Write data
-            np.savetxt(f, data_to_export, fmt='%.6f')
+        # Write ASCII grid.  Binary buffered I/O plus a single savetxt pass is
+        # substantially faster than line-at-a-time text writes on Chamoli-size
+        # grids (~748x715) without changing the `%.6f` Fortran-compatible body.
+        header = (
+            f"ncols         {width}\n"
+            f"nrows         {height}\n"
+            f"xllcorner     {xllcorner}\n"
+            f"yllcorner     {yllcorner}\n"
+            f"cellsize      {cellsize}\n"
+            f"NODATA_value  {self.nodata_value}\n"
+        )
+        with open(output_path, "wb", buffering=8 * 1024 * 1024) as f:
+            f.write(header.encode("ascii"))
+            np.savetxt(f, data_to_export, fmt="%.6f")
 
         logger.info(f"ASCII Grid export complete: {output_file}")
 

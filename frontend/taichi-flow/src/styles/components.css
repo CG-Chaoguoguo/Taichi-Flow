@@ -948,6 +948,15 @@
   color: var(--color-foreground-secondary);
 }
 
+.tf-spin {
+  animation: tf-spin 0.9s linear infinite;
+  align-self: center;
+}
+
+@keyframes tf-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Metric cards ── */
 .tf-metric-grid {
   display: grid;
@@ -1045,6 +1054,78 @@
 .tf-card.active {
   border-color: var(--color-brand);
   box-shadow: var(--shadow-8);
+}
+
+.tf-diagnostics-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.tf-diagnostics-heading {
+  align-items: flex-start;
+}
+
+.tf-diagnostic-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--layer-on-acrylic);
+  color: var(--color-warning);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tf-diagnostic-state.is-ok {
+  color: var(--color-success);
+}
+
+.tf-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.tf-diagnostic-item {
+  min-width: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--layer-on-acrylic);
+  border: 1px solid var(--layer-stroke);
+}
+
+.tf-diagnostic-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-foreground-secondary);
+  font-size: 12px;
+}
+
+.tf-diagnostic-value {
+  margin-top: 4px;
+  color: var(--color-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tf-diagnostic-value.is-ok {
+  color: var(--color-success);
+}
+
+.tf-diagnostic-value.is-warning {
+  color: var(--color-warning);
+}
+
+.tf-diagnostics-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .tf-project-card {
@@ -1513,7 +1594,8 @@
 @media (max-width: 760px) {
   .tf-form-grid--two,
   .tf-case-import-columns,
-  .tf-metric-grid--compact {
+  .tf-metric-grid--compact,
+  .tf-diagnostics-grid {
     grid-template-columns: 1fr;
   }
 }
