@@ -8,6 +8,7 @@ from time import monotonic, sleep
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from api.services.scheduler import _RunProgressPersister
 from api.services.workbench_store import ProjectDatabase, SCHEMA_VERSION
 from tests.test_workbench_domain_api import _create_project, _create_ready_scenario
 
@@ -278,3 +279,174 @@ def test_schema_v8_migrates_compute_policy_snapshot_columns(tmp_path: Path) -> N
     assert "compute_policy_resolution_json" in simulation_columns
     assert {"effective_config_json", "compute_policy_resolution_json"} <= queue_columns
     assert version == str(SCHEMA_VERSION)
+
+
+class _RecordingStore:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    def persist(self, payload: dict) -> None:
+        self.payloads.append(dict(payload))
+
+
+def _emit_step_updates(persister: _RunProgressPersister, *, steps: int, output_every: int) -> None:
+    persister.observe({"status": "running", "start_time": "2026-09-03T00:00:00+00:00"})
+    for step in range(1, steps + 1):
+        persister.observe({"progress": step * (100.0 / steps)})
+        persister.observe({"current_time": float(step)})
+        persister.observe({"step_count": step})
+        persister.observe({"output_count": step // output_every})
+    persister.observe(
+        {
+            "status": "completed",
+            "end_time_actual": "2026-09-03T00:01:00+00:00",
+            "progress": 100.0,
+            "current_time": float(steps),
+            "step_count": steps,
+            "output_count": steps // output_every,
+        }
+    )
+    persister.flush()
+
+
+def test_progress_persister_coalesces_to_lifecycle_and_output_boundaries() -> None:
+    store = _RecordingStore()
+    persister = _RunProgressPersister(store.persist)
+    steps = 20
+    output_every = 10
+    _emit_step_updates(persister, steps=steps, output_every=output_every)
+
+    output_boundaries = steps // output_every
+    # running + each output_count advance + completed; terminal flush is a no-op.
+    assert len(store.payloads) == 1 + output_boundaries + 1
+    assert store.payloads[0]["status"] == "running"
+    assert [payload.get("output_count") for payload in store.payloads[1 : 1 + output_boundaries]] == [
+        1,
+        2,
+    ]
+    assert store.payloads[-1]["status"] == "completed"
+    assert store.payloads[-1]["current_time"] == float(steps)
+    assert store.payloads[-1]["step_count"] == steps
+    assert store.payloads[-1]["output_count"] == output_boundaries
+    uncoalesced = 1 + (steps * 4) + 1
+    assert len(store.payloads) < uncoalesced
+
+
+def test_progress_persister_flushes_structured_error_immediately() -> None:
+    store = _RecordingStore()
+    persister = _RunProgressPersister(store.persist)
+    persister.observe({"progress": 12.5, "current_time": 3.0, "step_count": 8})
+    assert store.payloads == []
+
+    persister.observe(
+        {
+            "status": "failed",
+            "error": "validated UNSFIN schedule required",
+            "error_code": "edda_unsfin_schedule_required",
+            "error_details": {"control": "simulate_shallow_landslide"},
+        }
+    )
+    assert len(store.payloads) == 1
+    payload = store.payloads[0]
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "edda_unsfin_schedule_required"
+    assert payload["error_details"] == {"control": "simulate_shallow_landslide"}
+    assert payload["progress"] == 12.5
+    assert payload["step_count"] == 8
+
+
+def test_progress_persister_flush_writes_trailing_progress() -> None:
+    store = _RecordingStore()
+    persister = _RunProgressPersister(store.persist)
+    persister.observe({"status": "running"})
+    persister.observe({"progress": 41.0, "current_time": 9.0, "step_count": 17, "output_count": 0})
+    assert len(store.payloads) == 1
+    persister.flush()
+    assert len(store.payloads) == 2
+    assert store.payloads[-1]["current_time"] == 9.0
+    assert store.payloads[-1]["step_count"] == 17
+
+
+class BurstProgressExecutor:
+    """Emit one assignment per progress field per step, matching RuntimeSession."""
+
+    STEPS = 20
+    OUTPUT_EVERY = 10
+
+    def signature(self, context: dict) -> str:
+        return "test-compatible-runtime"
+
+    def request_stop(self, simulation_id: str) -> None:
+        return None
+
+    def execute(self, context: dict, on_update, stop_event: Event) -> dict:
+        on_update({"status": "running", "start_time": "2026-09-03T00:00:00+00:00"})
+        for step in range(1, self.STEPS + 1):
+            on_update({"progress": step * (100.0 / self.STEPS)})
+            on_update({"current_time": float(step)})
+            on_update({"step_count": step})
+            on_update({"output_count": step // self.OUTPUT_EVERY})
+        on_update(
+            {
+                "status": "completed",
+                "end_time_actual": "2026-09-03T00:01:00+00:00",
+                "progress": 100.0,
+                "current_time": float(self.STEPS),
+                "step_count": self.STEPS,
+                "output_count": self.STEPS // self.OUTPUT_EVERY,
+            }
+        )
+        return {
+            "status": "completed",
+            "progress": 100.0,
+            "current_time": float(self.STEPS),
+            "step_count": self.STEPS,
+            "output_count": self.STEPS // self.OUTPUT_EVERY,
+            "resource_summary": {"children": 0},
+        }
+
+
+def test_scheduler_throttles_progress_writes_to_output_boundaries(tmp_path: Path) -> None:
+    executor = BurstProgressExecutor()
+    app = create_app(
+        state_dir=tmp_path / "state",
+        scheduler_enabled=True,
+        run_executor=executor,
+        scheduler_poll_interval=0.01,
+    )
+    with TestClient(app) as client:
+        store = client.app.state.workbench
+        update_calls: list[dict] = []
+        original_update_run = store.update_run
+
+        def counting_update_run(project_id: str, simulation_id: str, values: dict) -> None:
+            update_calls.append(dict(values))
+            original_update_run(project_id, simulation_id, values)
+
+        store.update_run = counting_update_run  # type: ignore[method-assign]
+        project = _create_project(client, tmp_path / "coalesce-project", "Coalesce progress")
+        scenario = _create_ready_scenario(client, project, "Burst steps")
+        queued = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+        assert queued.status_code == 201
+        _wait_for(
+            lambda: client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]["status"]
+            == "completed"
+        )
+        completed_item = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]
+        simulation = store.public_simulation(
+            project["project_id"],
+            store.simulation_row(project["project_id"], completed_item["simulation_id"]),
+        )
+        uncoalesced = 1 + 1 + (BurstProgressExecutor.STEPS * 4) + 1
+        assert len(update_calls) < uncoalesced
+        assert len(update_calls) <= 6
+        assert any(payload.get("status") == "starting" for payload in update_calls)
+        assert any(payload.get("status") == "running" for payload in update_calls)
+        assert simulation["status"] == "completed"
+        assert simulation["progress"] == 100.0
+        assert simulation["step_count"] == BurstProgressExecutor.STEPS
+        assert simulation["current_time"] == float(BurstProgressExecutor.STEPS)
+        assert simulation["output_count"] == BurstProgressExecutor.STEPS // BurstProgressExecutor.OUTPUT_EVERY

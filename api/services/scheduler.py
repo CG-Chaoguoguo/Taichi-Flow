@@ -27,6 +27,25 @@ from api.services.workbench_store import WorkbenchError, WorkbenchStore
 logger = logging.getLogger(__name__)
 
 
+_ALLOWED_UPDATE_KEYS = (
+    "status",
+    "progress",
+    "current_time",
+    "end_time",
+    "step_count",
+    "output_count",
+    "start_time",
+    "end_time_actual",
+    "error",
+    "error_code",
+    "error_details",
+)
+
+_LIFECYCLE_UPDATE_KEYS = frozenset(
+    ("status", "start_time", "end_time_actual", "error", "error_code", "error_details")
+)
+
+
 def _structured_error_payload(exc: Exception) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"error": str(exc)}
     code = getattr(exc, "code", None)
@@ -36,6 +55,58 @@ def _structured_error_payload(exc: Exception) -> Dict[str, Any]:
     if details is not None:
         payload["error_details"] = _ObservableState._safe(details)
     return payload
+
+
+class _RunProgressPersister:
+    """Coalesce per-step progress writes until a lifecycle or output boundary.
+
+    ``RuntimeSession.progress_callback`` assigns ``progress``, ``current_time``,
+    ``step_count``, and ``output_count`` separately. Persisting each assignment
+    would open a SQLite connection up to four times per accepted step. Progress
+    fields are therefore buffered and flushed only when a lifecycle key arrives,
+    when ``output_count`` advances, or when the coordinator finalizes the run.
+    """
+
+    def __init__(self, persist: Callable[[Dict[str, Any]], None]) -> None:
+        self._persist = persist
+        self._lock = Lock()
+        self._pending: Dict[str, Any] = {}
+        self._last_persisted_output_count = 0
+
+    def observe(self, update: Dict[str, Any]) -> None:
+        safe = {key: update[key] for key in _ALLOWED_UPDATE_KEYS if key in update}
+        if not safe:
+            return
+        payload: Optional[Dict[str, Any]] = None
+        with self._lock:
+            self._pending.update(safe)
+            lifecycle = any(key in safe for key in _LIFECYCLE_UPDATE_KEYS)
+            output_boundary = (
+                "output_count" in safe
+                and int(safe.get("output_count") or 0) > self._last_persisted_output_count
+            )
+            if lifecycle or output_boundary:
+                payload = self._take_pending_locked()
+        if payload is not None:
+            self._persist(payload)
+
+    def flush(self) -> None:
+        with self._lock:
+            payload = self._take_pending_locked()
+        if payload is not None:
+            self._persist(payload)
+
+    def _take_pending_locked(self) -> Optional[Dict[str, Any]]:
+        if not self._pending:
+            return None
+        payload = dict(self._pending)
+        self._pending.clear()
+        if "output_count" in payload:
+            self._last_persisted_output_count = max(
+                self._last_persisted_output_count,
+                int(payload.get("output_count") or 0),
+            )
+        return payload
 
 
 class RunExecutor(Protocol):
@@ -342,26 +413,12 @@ class SimulationCoordinator:
     async def _execute_claimed(self, context: Dict[str, Any], signature: str, stop_event: Event) -> None:
         project_id = str(context["project_id"])
         simulation_id = str(context["simulation_id"])
+        persister = _RunProgressPersister(
+            lambda payload: self.store.update_run(project_id, simulation_id, payload)
+        )
 
         def on_update(update: Dict[str, Any]) -> None:
-            safe: Dict[str, Any] = {}
-            for key in (
-                "status",
-                "progress",
-                "current_time",
-                "end_time",
-                "step_count",
-                "output_count",
-                "start_time",
-                "end_time_actual",
-                "error",
-                "error_code",
-                "error_details",
-            ):
-                if key in update:
-                    safe[key] = update[key]
-            if safe:
-                self.store.update_run(project_id, simulation_id, safe)
+            persister.observe(update)
 
         try:
             self.store.update_run(
@@ -380,6 +437,9 @@ class SimulationCoordinator:
             result = {"status": "failed", **_structured_error_payload(exc)}
         finally:
             try:
+                # Flush coalesced progress so current_time/step_count/output_count
+                # survive an early stop; finish_run does not write those columns.
+                persister.flush()
                 self.store.finish_run(project_id, simulation_id, locals().get("result", {"status": "failed"}))
             except Exception:
                 logger.exception("Could not finalize queued simulation %s", simulation_id)
