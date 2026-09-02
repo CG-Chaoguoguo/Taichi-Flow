@@ -1,4 +1,8 @@
-import { RotateCcw } from "lucide-react";
+import { ArrowLeft, RotateCcw } from "lucide-react";
+import type { ReactNode } from "react";
+import { Button } from "./Button";
+import { HelpTip } from "./HelpTip";
+import { IconButton } from "./IconButton";
 
 export type ZoneSoilRow = Record<string, unknown> & { zone_id?: number };
 
@@ -43,6 +47,10 @@ export const ZONE_TAKEN_OVER_KEYS = [
   "erosion.k_erosion",
 ] as const;
 
+const ZONE_HELP_MULTI = "每个分区有独立的顶层/底层水力与强度参数；厚度 ltstar/lbstar 来自栅格或全局标量，不在此表。";
+const ZONE_HELP_SINGLE = "当前方案仅 1 个分区，矩阵只读。";
+const BOTTOM_HELP = "底层黏聚力 / 摩擦角 / 重度原求解器读取但不参与双层土 FS 计算，仅作分区档案。";
+
 export function parseZoneSoilRows(value: unknown): ZoneSoilRow[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const rows: ZoneSoilRow[] = [];
@@ -80,16 +88,30 @@ function cloneZones(rows: ZoneSoilRow[]): Record<string, ZoneSoilRow> {
   return next;
 }
 
+function resolveZoneState(
+  draftPatch: Record<string, unknown>,
+  baseline: Record<string, unknown>,
+) {
+  const baselineZones = baseline["spatial_zones.zones"];
+  const overrideZones = draftPatch["spatial_zones.zones"];
+  const effective = overrideZones === undefined ? baselineZones : overrideZones;
+  return {
+    rows: parseZoneSoilRows(effective),
+    effective,
+    changed: overrideZones !== undefined,
+  };
+}
+
 function ZoneMatrixTable({
   title,
-  caption,
+  help,
   fields,
   rows,
   editable,
   onChangeCell,
 }: {
   title: string;
-  caption?: string;
+  help?: string;
   fields: ZoneFieldSpec[];
   rows: ZoneSoilRow[];
   editable: boolean;
@@ -97,8 +119,10 @@ function ZoneMatrixTable({
 }) {
   return (
     <div className="tf-zone-soil-block">
-      <div className="tf-body tf-font-medium">{title}</div>
-      {caption ? <div className="tf-caption tf-text-tertiary">{caption}</div> : null}
+      <div className="tf-row tf-gap-1">
+        <div className="tf-body tf-font-medium">{title}</div>
+        {help ? <HelpTip content={help} /> : null}
+      </div>
       <div className="tf-table-wrap tf-zone-soil-table-wrap">
         <table className="tf-table tf-table-compact tf-zone-soil-table">
           <thead>
@@ -138,28 +162,63 @@ function ZoneMatrixTable({
   );
 }
 
-export function ZoneSoilEditor({
-  draftPatch,
-  baseline = {},
-  onDraftChange,
-  canEdit = true,
-  readOnly = false,
-}: {
+type ZoneSoilEditorProps = {
   draftPatch: Record<string, unknown>;
   baseline?: Record<string, unknown>;
   onDraftChange: (patch: Record<string, unknown>) => void;
   canEdit?: boolean;
   readOnly?: boolean;
+};
+
+export function ZoneSoilSummaryCard({
+  draftPatch,
+  baseline = {},
+  onOpen,
+  extraHelp,
+}: ZoneSoilEditorProps & {
+  onOpen?: () => void;
+  extraHelp?: ReactNode;
 }) {
-  const baselineZones = baseline["spatial_zones.zones"];
-  const overrideZones = draftPatch["spatial_zones.zones"];
-  const effective = overrideZones === undefined ? baselineZones : overrideZones;
-  const rows = parseZoneSoilRows(effective);
+  const { rows, changed } = resolveZoneState(draftPatch, baseline);
+  if (!rows.length) return null;
+  const multiZone = rows.length > 1;
+  const help = (
+    <>
+      {multiZone ? ZONE_HELP_MULTI : ZONE_HELP_SINGLE}
+      {extraHelp ? ` ${extraHelp}` : null}
+    </>
+  );
+
+  return (
+    <div className="tf-zone-soil-summary" data-testid="zone-soil-summary">
+      <button type="button" className="tf-binding-summary-link" disabled={!onOpen} onClick={onOpen}>
+        <span>分区双层土参数</span>
+        <strong>{rows.length} 区</strong>
+        <span>打开编辑器 →</span>
+      </button>
+      <div className="tf-zone-soil-summary-aside">
+        <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? "方案覆盖" : "模板默认"}</span>
+        <HelpTip content={help} />
+      </div>
+    </div>
+  );
+}
+
+export function ZoneSoilWorkspace({
+  draftPatch,
+  baseline = {},
+  onDraftChange,
+  canEdit = true,
+  readOnly = false,
+  onClose,
+}: ZoneSoilEditorProps & {
+  onClose?: () => void;
+}) {
+  const { rows, effective, changed } = resolveZoneState(draftPatch, baseline);
   if (!rows.length) return null;
 
   const multiZone = rows.length > 1;
   const editable = canEdit && !readOnly && multiZone;
-  const changed = overrideZones !== undefined;
 
   const commitRows = (nextRows: ZoneSoilRow[]) => {
     onDraftChange({
@@ -186,17 +245,31 @@ export function ZoneSoilEditor({
   };
 
   return (
-    <section className="tf-card tf-card-flush tf-config-section" data-testid="zone-soil-editor">
-      <div className="tf-row tf-justify-between tf-gap-2">
-        <div className="tf-body tf-font-semibold">按分区编辑双层土参数</div>
-        <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? "方案覆盖" : "案例默认"}</span>
-      </div>
-      <div className="tf-card-body-sm tf-stack tf-gap-2">
-        <div className="tf-caption tf-text-tertiary">
-          {multiZone
-            ? "每个分区有独立的顶层/底层水力与强度参数；厚度 ltstar/lbstar 来自栅格或全局标量，不在此表。"
-            : "当前案例仅 1 个分区，矩阵只读。"}
+    <section className="tf-zone-soil-workspace" data-testid="zone-soil-workspace">
+      <header className="tf-zone-soil-toolbar">
+        <div className="tf-row tf-gap-2 tf-flex-1">
+          {onClose ? <Button variant="ghost" size="small" icon={<ArrowLeft size={15} />} onClick={onClose}>返回画布</Button> : null}
+          <div>
+            <div className="tf-row tf-gap-1">
+              <div className="tf-title-sm">编辑分区双层土参数</div>
+              <HelpTip content={multiZone ? ZONE_HELP_MULTI : ZONE_HELP_SINGLE} />
+            </div>
+            <div className="tf-caption tf-text-tertiary">{rows.length} 个分区 · 保存时随方案参数原子提交</div>
+          </div>
         </div>
+        <div className="tf-row tf-gap-2">
+          <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? "方案覆盖" : "模板默认"}</span>
+          <IconButton
+            icon={<RotateCcw size={14} />}
+            label="重置为模板默认值"
+            size="small"
+            disabled={!canEdit || !changed}
+            onClick={reset}
+          />
+        </div>
+      </header>
+      <div className="tf-zone-soil-body">
+        {!multiZone ? <div className="tf-caption tf-text-tertiary" role="status">{ZONE_HELP_SINGLE}</div> : null}
         <ZoneMatrixTable
           title="顶层"
           fields={TOP_FIELDS}
@@ -206,24 +279,12 @@ export function ZoneSoilEditor({
         />
         <ZoneMatrixTable
           title="底层"
-          caption="底层黏聚力 / 摩擦角 / 重度原 EDDA 读取但不参与双层土 FS 计算，仅作分区档案。"
+          help={BOTTOM_HELP}
           fields={BOTTOM_FIELDS}
           rows={rows}
           editable={editable}
           onChangeCell={changeCell}
         />
-        <div className="tf-row tf-justify-end">
-          <button
-            type="button"
-            className="tf-icon-button tf-icon-button-sm"
-            aria-label="重置分区双层土参数"
-            title="重置为案例默认值"
-            disabled={!canEdit || !changed}
-            onClick={reset}
-          >
-            <RotateCcw size={14} />
-          </button>
-        </div>
       </div>
     </section>
   );

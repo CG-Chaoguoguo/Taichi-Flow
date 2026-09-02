@@ -22,22 +22,22 @@ def test_static_catalog_exposes_editable_dfs_variant_enums():
     assert face["editable"] is True
     assert face["value_type"] == "enum"
     assert face["allowed_values"] == PARAMETER_ENUM_SPECS["hydrology.dfs_face_flux_variant"]["allowed_values"]
-    assert face["allowed_value_labels_zh"]["both_thin_weighted"] == "双薄层加权平均（BJ 默认）"
+    assert face["allowed_value_labels_zh"]["both_thin_weighted"] == "双薄层加权平均"
     assert manning["editable"] is True
     assert manning["value_type"] == "enum"
     assert manning["allowed_values"] == PARAMETER_ENUM_SPECS["hydrology.dfs_manningbar_variant"]["allowed_values"]
     assert dry_face["editable"] is True
     assert dry_face["value_type"] == "enum"
     assert dry_face["allowed_values"] == ["keep_velocity_bj", "zero_dry_face_chamoli"]
-    assert dry_face["allowed_value_labels_zh"]["zero_dry_face_chamoli"] == "干面上游清零（Chamoli）"
+    assert dry_face["allowed_value_labels_zh"]["zero_dry_face_chamoli"] == "干面上游清零"
     assert artivis["editable"] is True
     assert artivis["value_type"] == "enum"
     assert artivis["allowed_values"] == ["depth_ratio_bj", "velocity_ratio_chamoli"]
-    assert artivis["allowed_value_labels_zh"]["velocity_ratio_chamoli"] == "速度比权重（Chamoli）"
+    assert artivis["allowed_value_labels_zh"]["velocity_ratio_chamoli"] == "速度比权重"
     assert absubar["editable"] is True
     assert absubar["value_type"] == "enum"
     assert absubar["allowed_values"] == ["max_component_bj", "signed_mean_chamoli"]
-    assert absubar["allowed_value_labels_zh"]["signed_mean_chamoli"] == "有符号合成速度（Chamoli）"
+    assert absubar["allowed_value_labels_zh"]["signed_mean_chamoli"] == "有符号合成速度"
     assert boundary["editable"] is True
     assert boundary["value_type"] == "enum"
     assert boundary["allowed_values"] == ["auto", "file", "manual"]

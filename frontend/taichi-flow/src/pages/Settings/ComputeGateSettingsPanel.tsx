@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
+import { HelpTip } from "../../components/HelpTip";
 import {
   BOUNDARY_GATE_KEYS,
   EXPERIMENTAL_LIVE_KEY,
@@ -104,11 +105,9 @@ export function ComputeGateSettingsPanel() {
           <span className="tf-row tf-gap-2">
           <SlidersHorizontal size={16} aria-hidden="true" />
           计算与数值
+          <HelpTip content="计算模式门禁与边界类型对所有方案生效。数值变种和失稳源策略默认按方案与源码解析，只有明确选择才会全局覆盖。CPU / CUDA 后端请在每次加入队列前选择。" />
         </span>
       </h2>
-      <p className="tf-body tf-text-secondary tf-mb-4">
-         计算模式门禁与边界类型对所有方案生效。数值变种和失稳源策略默认按方案与源码解析，只有明确选择才会全局覆盖。CPU / CUDA 后端请在每次加入队列前选择。
-      </p>
       {loading && !defaults ? <div className="tf-caption tf-text-tertiary">正在加载计算门禁…</div> : null}
       {error ? <div className="tf-caption tf-text-danger" role="alert">{error}</div> : null}
 
@@ -128,8 +127,10 @@ export function ComputeGateSettingsPanel() {
       ) : null}
 
       <section className="tf-card tf-card-flush tf-mt-4" aria-labelledby="variant-gates-title" data-testid="variant-gate-settings">
-        <div className="tf-body tf-font-semibold" id="variant-gates-title">数值变种</div>
-        <div className="tf-caption tf-text-tertiary tf-mb-2">面通量与曼宁面平均公式默认按方案识别；明确选择后才全局覆盖。</div>
+        <div className="tf-row tf-gap-1" id="variant-gates-title">
+          <div className="tf-body tf-font-semibold">数值变种</div>
+          <HelpTip content="面通量与曼宁面平均公式默认按方案识别；明确选择后才全局覆盖。" />
+        </div>
         {variantEntries.map((entry) => (
           <EffectiveParameterField
             key={entry.key}
@@ -153,9 +154,9 @@ export function ComputeGateSettingsPanel() {
       </section>
 
       <section className="tf-card tf-card-flush tf-mt-4" aria-labelledby="failure-source-policy-title" data-testid="failure-source-policy-settings">
-        <div className="tf-body tf-font-semibold" id="failure-source-policy-title">失稳源策略</div>
-        <div className="tf-caption tf-text-tertiary tf-mb-2">
-          控制浅层失稳台账是否启用及其实现方式。一次性 `triggerslide` 注入不受此策略影响。
+        <div className="tf-row tf-gap-1" id="failure-source-policy-title">
+          <div className="tf-body tf-font-semibold">失稳源策略</div>
+          <HelpTip content="控制浅层失稳台账是否启用及其实现方式。一次性 triggerslide 注入不受此策略影响。" />
         </div>
         {policyEntry ? (
           <EffectiveParameterField
@@ -212,8 +213,10 @@ export function ComputeGateSettingsPanel() {
       </section>
 
       <section className="tf-card tf-card-flush tf-mt-4" aria-labelledby="boundary-gates-title" data-testid="boundary-gate-settings">
-        <div className="tf-body tf-font-semibold" id="boundary-gates-title">边界类型定义</div>
-        <div className="tf-caption tf-text-tertiary tf-mb-2">默认边界检测方式与边界类型，对后续运行立即生效。</div>
+        <div className="tf-row tf-gap-1" id="boundary-gates-title">
+          <div className="tf-body tf-font-semibold">边界类型定义</div>
+          <HelpTip content="默认边界检测方式与边界类型，对后续运行立即生效。" />
+        </div>
         {boundaryEntries.map((entry) => (
           <EffectiveParameterField
             key={entry.key}

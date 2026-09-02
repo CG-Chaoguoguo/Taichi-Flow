@@ -14,6 +14,7 @@ import {
 import { isVisualizableInput } from "../../constants/visualizableInputs";
 import { VisualizationCanvas } from "../Calculate/VisualizationCanvas";
 import { RainfallProcessEditor } from "../../components/RainfallProcessEditor";
+import { ZoneSoilWorkspace } from "../../components/ZoneSoilEditor";
 import type { InputBinding, InputFile, RainfallPeriod, RainfallTimeline } from "../../types";
 import type { WorkspaceModule } from "../Calculate/CalculateWorkspace";
 import { ScenarioOutliner } from "./ScenarioOutliner";
@@ -51,7 +52,7 @@ export function ProjectEditor() {
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
   const uploadInputs = useTaichiFlowStore((state) => state.uploadInputs);
   const [canvasState, setCanvasState] = useState({ zoom: 1, offsetX: 0, offsetY: 0, selectedLayer: "" });
-  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "rainfall">("canvas");
+  const [workspaceMode, setWorkspaceMode] = useState<"canvas" | "rainfall" | "zone-soil">("canvas");
   const [draftPatch, setDraftPatch] = useState<Record<string, unknown>>({});
   const [draftBindings, setDraftBindings] = useState<InputBinding[]>([]);
   const [draftControls, setDraftControls] = useState<Record<string, unknown>>({});
@@ -247,7 +248,7 @@ export function ProjectEditor() {
     );
   }
 
-  const focusPanels = workspaceMode === "rainfall" && compactWindow;
+  const focusPanels = workspaceMode !== "canvas" && compactWindow;
   const outlinerCollapsed = editorLayout.collapsed.outliner || focusPanels;
   const inspectorCollapsed = editorLayout.collapsed.inspector || focusPanels;
   const dockCollapsed = editorLayout.collapsed.dock || focusPanels;
@@ -257,7 +258,7 @@ export function ProjectEditor() {
       <ResizablePaneGroup
         id="editor-shell"
         orientation="vertical"
-        className={`tf-editor-layout${workspaceMode === "rainfall" ? " is-rainfall-mode" : ""}`}
+        className={`tf-editor-layout${workspaceMode !== "canvas" ? " is-focus-mode" : ""}${workspaceMode === "rainfall" ? " is-rainfall-mode" : ""}`}
         onLayoutChanged={handleShellLayoutChanged}
       >
         <ResizablePane id="editor-main" minSize={320} className="tf-editor-main-panel">
@@ -302,6 +303,14 @@ export function ProjectEditor() {
                   simulationEndS={draftSimulationEnd}
                   onChange={handleRainfallChange}
                   onUpload={(files) => uploadInputs("rainfall", files)}
+                  onClose={() => setWorkspaceMode("canvas")}
+                />
+              ) : workspaceMode === "zone-soil" && selectedScenario ? (
+                <ZoneSoilWorkspace
+                  draftPatch={draftPatch}
+                  baseline={selectedScenario.parameter_baseline || {}}
+                  onDraftChange={setDraftPatch}
+                  canEdit={["draft", "ready"].includes(selectedScenario.status)}
                   onClose={() => setWorkspaceMode("canvas")}
                 />
               ) : (
@@ -349,6 +358,7 @@ export function ProjectEditor() {
                   onControlsChange={setDraftControls}
                   onSave={saveScenario}
                   onOpenRainfall={() => setWorkspaceMode("rainfall")}
+                  onOpenZoneSoil={() => setWorkspaceMode("zone-soil")}
                   onToggleCollapse={() => togglePane("inspector")}
                   inspectorDetailsCollapsed={editorLayout.collapsed.inspectorDetails}
                   inspectorAssetRatio={editorLayout.inspectorAssetRatio}

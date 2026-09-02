@@ -74,7 +74,7 @@ Chamoli 工作流是案例专属的兼容路径，并不承诺每个历史 EDDA 
 
 - Windows 10 或 Windows 11
 - 推荐 Python 3.11；Taichi 1.7.4 支持 Python 3.9 至 3.13
-- Node.js 20.19 或更高版本
+- Node.js 22.12 或更高版本（Electron 43.2.0 桌面端要求）
 - 推荐使用 NVIDIA CUDA 硬件加速；浏览器工作台本身不依赖 GPU
 
 ### 安装与启动
@@ -97,7 +97,10 @@ Pop-Location
 
 受管脚本会启动 FastAPI：
 [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)，
-并启动工作台：[http://127.0.0.1:3000/projects](http://127.0.0.1:3000/projects)。
+然后在独立 Electron 窗口中打开带 Vite HMR 的工作台，默认不会打开外部浏览器。
+需要浏览器模式时显式使用 `-Browser`；只启动服务时使用
+`-ServicesOnly`，旧参数 `-NoBrowser` 仍作为兼容别名。服务地址通常为
+[http://127.0.0.1:3000/projects](http://127.0.0.1:3000/projects)。
 
 ~~~powershell
 .\scripts\stop-dev.ps1

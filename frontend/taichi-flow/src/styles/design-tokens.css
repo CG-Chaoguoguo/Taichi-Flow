@@ -121,6 +121,7 @@ html[data-theme="light"],
   --shadow-modal: var(--shadow-16);
   --shadow-floating: var(--shadow-16);
   --shadow-dialog: var(--shadow-16);
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.16), 0 0 2px rgba(0, 0, 0, 0.12);
 
   color-scheme: light;
 }
@@ -189,6 +190,7 @@ html[data-theme="dark"] {
   --shadow-modal: var(--shadow-16);
   --shadow-floating: var(--shadow-16);
   --shadow-dialog: var(--shadow-16);
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 2px rgba(0, 0, 0, 0.32);
 
   color-scheme: dark;
 }
@@ -260,6 +262,7 @@ html[data-theme="high-contrast"] {
   --shadow-modal: none;
   --shadow-floating: none;
   --shadow-dialog: none;
+  --shadow-flyout: none;
 
   --radius-control: 0px;
   --radius-card: 0px;

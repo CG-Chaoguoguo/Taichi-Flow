@@ -1,5 +1,6 @@
 import type { CaseConfigInterface, InputBinding, InputFile } from "../types";
 import { AssetBindingField } from "./AssetBindingField";
+import { HelpTip } from "./HelpTip";
 
 export type ManningSourceMode = "global" | "raster";
 
@@ -61,7 +62,10 @@ export function ManningModeEditor({
 
   return (
     <section className="tf-card tf-card-flush tf-config-section" data-testid="manning-mode-editor">
-      <div className="tf-body tf-group-header tf-font-semibold">曼宁来源</div>
+      <div className="tf-row tf-gap-1">
+        <div className="tf-body tf-group-header tf-font-semibold">曼宁来源</div>
+        <HelpTip content={source === "global" ? "直接编辑全局系数；空间资产绑定会保留但保持未激活。" : "空间模式必须显式选择一个与 DEM 网格一致的项目资产。"} />
+      </div>
       <div className="tf-card-body-sm tf-stack tf-gap-2">
         <div className="tf-mode-switch" role="group" aria-label="曼宁来源切换">
           <button type="button" className={`tf-mode-switch-btn${source === "global" ? " is-active" : ""}`} disabled={!editable} onClick={() => setSource("global")}>均匀曼宁</button>
@@ -70,7 +74,6 @@ export function ManningModeEditor({
 
         {source === "global" ? (
           <>
-            <div className="tf-caption tf-text-tertiary">直接编辑全局系数；空间资产绑定会保留但保持未激活。</div>
             <label className="tf-body tf-font-medium" htmlFor="manning-global-input">全局曼宁系数（n）</label>
             <input
               id="manning-global-input"
@@ -85,7 +88,6 @@ export function ManningModeEditor({
           </>
         ) : (
           <>
-            <div className="tf-caption tf-text-tertiary">空间模式必须显式选择一个与 DEM 网格一致的项目资产。</div>
             <AssetBindingField
               label="空间曼宁栅格"
               pickerLabel="选择空间曼宁栅格资产"

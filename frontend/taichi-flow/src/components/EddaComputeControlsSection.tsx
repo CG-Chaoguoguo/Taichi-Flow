@@ -1,5 +1,6 @@
 import { Calculator, LockKeyhole, RotateCcw } from "lucide-react";
 import type { EddaControlRegistrySummary, ParameterCatalogEntry } from "../types";
+import { HelpTip } from "./HelpTip";
 
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -59,11 +60,11 @@ export function EddaComputeControlsSection({
     return (
       <div className={`tf-edda-control${changed ? " is-changed" : ""}`} key={entry.key} data-parameter-key={entry.key}>
         <div className="tf-edda-control-copy">
-          <div className="tf-row tf-gap-1 tf-items-center">
+          <div className="tf-row tf-gap-1">
             <span className="tf-body tf-font-medium">{title}</span>
+            {entry.description_zh ? <HelpTip content={entry.description_zh} /> : null}
             <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{changed ? overrideChipLabel : baselineChipLabel}</span>
           </div>
-          {entry.description_zh ? <div className="tf-caption tf-text-tertiary">{entry.description_zh}</div> : null}
           {missingDependencies.length ? (
             <div className="tf-caption tf-text-warning">
               需同时启用：{missingDependencies.map((path) => controlTitle(byPath.get(path) || { key: path, label: path, runtime_status: "", editable: false })).join("、")}
@@ -108,8 +109,10 @@ export function EddaComputeControlsSection({
       <header className="tf-edda-compute-header">
         <Calculator size={17} aria-hidden="true" />
         <div className="tf-flex-1">
-          <h2 className="tf-body tf-font-semibold">{title}</h2>
-          <div className="tf-caption tf-text-tertiary">{subtitle}</div>
+          <div className="tf-row tf-gap-1">
+            <h2 className="tf-body tf-font-semibold">{title}</h2>
+            {subtitle ? <HelpTip content={subtitle} /> : null}
+          </div>
         </div>
         <span className="tf-edda-control-count">{controlRegistry.editable_count} 项可编辑</span>
       </header>
@@ -138,11 +141,13 @@ export function EddaComputeControlsSection({
             {restricted.map((entry) => (
               <div className="tf-edda-restricted-row" key={entry.key}>
                 <div>
-                  <strong>{controlTitle(entry)}</strong>
+                  <strong className="tf-row tf-gap-1">
+                    {controlTitle(entry)}
+                    {entry.description_zh ? <HelpTip content={entry.description_zh} /> : null}
+                  </strong>
                   <span className="tf-mono">{entry.original_variable || entry.control_key}</span>
                 </div>
                 <span>{entry.status_label_zh || entry.runtime_status}</span>
-                {entry.description_zh ? <p>{entry.description_zh}</p> : null}
               </div>
             ))}
           </div>

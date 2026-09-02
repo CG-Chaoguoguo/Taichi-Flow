@@ -275,8 +275,8 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
             "asymmetric_head_guard",
         ],
         "value_labels_zh": {
-            "both_thin_weighted": "双薄层加权平均（BJ 默认）",
-            "arithmetic_mean_chamoli": "算术平均（Chamoli）",
+            "both_thin_weighted": "双薄层加权平均",
+            "arithmetic_mean_chamoli": "算术平均",
             "asymmetric_head_guard": "非对称水头保护",
         },
     },
@@ -287,8 +287,8 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
             "debrisflowmanning_cvtol",
         ],
         "value_labels_zh": {
-            "exponential_cv": "指数浓度加权（BJ 默认）",
-            "debrisflowmanning_cvtol": "泥石流曼宁阈值（Chamoli）",
+            "exponential_cv": "指数浓度加权",
+            "debrisflowmanning_cvtol": "泥石流曼宁阈值",
         },
     },
     "hydrology.dfs_dry_face_velocity_variant": {
@@ -298,8 +298,8 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
             "zero_dry_face_chamoli",
         ],
         "value_labels_zh": {
-            "keep_velocity_bj": "保持预测速度（BJ 默认）",
-            "zero_dry_face_chamoli": "干面上游清零（Chamoli）",
+            "keep_velocity_bj": "保持预测速度",
+            "zero_dry_face_chamoli": "干面上游清零",
         },
     },
     "hydrology.dfs_artivis_variant": {
@@ -309,8 +309,8 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
             "velocity_ratio_chamoli",
         ],
         "value_labels_zh": {
-            "depth_ratio_bj": "水深比权重（BJ 默认）",
-            "velocity_ratio_chamoli": "速度比权重（Chamoli）",
+            "depth_ratio_bj": "水深比权重",
+            "velocity_ratio_chamoli": "速度比权重",
         },
     },
     "hydrology.dfs_absubar_variant": {
@@ -320,8 +320,8 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
             "signed_mean_chamoli",
         ],
         "value_labels_zh": {
-            "max_component_bj": "分量最大模（BJ 默认）",
-            "signed_mean_chamoli": "有符号合成速度（Chamoli）",
+            "max_component_bj": "分量最大模",
+            "signed_mean_chamoli": "有符号合成速度",
         },
     },
     "hydrology.dfs_failure_source_policy": {
@@ -333,7 +333,7 @@ PARAMETER_ENUM_SPECS: Dict[str, Dict[str, Any]] = {
         ],
         "value_labels_zh": {
             "disabled": "关闭浅层失稳台账（triggerslide 不受影响）",
-            "precomputed": "串行预计算 UNSFIN 台账（原 EDDA/BJ）",
+            "precomputed": "串行预计算 UNSFIN 台账（原 EDDA）",
             "live": "实时双层（Taichi 实验）",
         },
     },

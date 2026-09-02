@@ -1,5 +1,6 @@
 import { RotateCcw } from "lucide-react";
 import type { ParameterCatalogEntry } from "../types";
+import { HelpTip } from "./HelpTip";
 
 function displayValue(value: unknown): string {
   if (value == null) return "—";
@@ -127,11 +128,15 @@ export function EffectiveParameterField({
     (effectiveValue == null || ["string", "number"].includes(typeof effectiveValue));
   const isZonesPreview = entry.key === "spatial_zones.zones";
   const checked = effectiveValue === true;
+  const helpContent = [entry.description_zh, supportingText].filter((part) => Boolean(part && String(part).trim())).join("\n\n");
   return (
     <div className={`tf-param-entry tf-effective-field${changed ? " is-changed" : ""}`} data-parameter-key={entry.key}>
       <div className="tf-row tf-justify-between tf-gap-2">
         <label className="tf-body tf-font-medium" htmlFor={`parameter-${entry.key}`}>
-          {title}{unit ? <span className="tf-text-tertiary"> · {unit}</span> : null}
+          <span className="tf-row tf-gap-1">
+            <span>{title}{unit ? <span className="tf-text-tertiary"> · {unit}</span> : null}</span>
+            {helpContent ? <HelpTip content={helpContent} /> : null}
+          </span>
         </label>
         <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{chipLabel}</span>
       </div>
@@ -226,7 +231,6 @@ export function EffectiveParameterField({
         <span>有效：{provenanceMode === "deferred" ? "随方案解析" : isZonesPreview ? `${zoneRows(effectiveValue).length || "—"} 区` : displayValue(effectiveValue)}</span>
         <span>{entry.editable ? "可编辑" : "只读"} · {entry.runtime_status}</span>
       </div>
-      {supportingText ? <div className="tf-caption tf-text-tertiary tf-mt-1">{supportingText}</div> : null}
       {saveState === "saving" ? <div className="tf-caption tf-text-info tf-mt-1">正在保存…</div> : null}
       {saveState === "error" ? <div className="tf-caption tf-text-danger tf-mt-1">保存失败，已恢复上次确认值。</div> : null}
     </div>

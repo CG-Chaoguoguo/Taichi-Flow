@@ -44,6 +44,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.enableSandbox();
+// The workbench's numerical CUDA path is independent of Chromium rendering.
+// Prefer deterministic software composition so the desktop shell also starts
+// on Windows hosts without a compatible Electron GPU DLL/driver.
+app.disableHardwareAcceleration();
 
 function recordRuntimeError(kind, details) {
   const entry = { kind, details, at: new Date().toISOString() };
@@ -303,6 +307,16 @@ function createWindow() {
     if (isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
     event.preventDefault();
     if (isAllowedExternalUrl(url)) void shell.openExternal(url);
+  });
+  window.webContents.on("will-redirect", (event, url) => {
+    if (isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
+    event.preventDefault();
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url);
+  });
+  window.webContents.on("will-frame-navigate", (event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame && isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
+    event.preventDefault();
+    if (isMainFrame && isAllowedExternalUrl(url)) void shell.openExternal(url);
   });
   window.webContents.on("did-fail-load", (_event, code, description, validatedUrl, isMainFrame) => {
     if (isMainFrame) recordRuntimeError("did-fail-load", `${code} ${description} ${validatedUrl}`);

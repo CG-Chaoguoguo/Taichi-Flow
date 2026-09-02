@@ -37,6 +37,10 @@ SERVICE_ID = "taichi-flow-api"
 API_CONTRACT_VERSION = 1
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKOUT_ID = sha256(os.path.normcase(str(PROJECT_ROOT)).encode("utf-8")).hexdigest()[:16]
+# The desktop launcher supplies this value for newly created API processes so a
+# reused Vite proxy can be compared with the exact API instance it targets.
+# Empty is intentionally tolerated for services started by older entry points.
+API_INSTANCE_ID = os.environ.get("TAICHI_FLOW_API_INSTANCE_ID", "")
 
 
 def _allowed_origins() -> list[str]:
@@ -267,6 +271,7 @@ def create_app(
             "service_id": SERVICE_ID,
             "api_contract_version": API_CONTRACT_VERSION,
             "checkout_id": CHECKOUT_ID,
+            "api_instance_id": API_INSTANCE_ID,
             "active_simulations": coordinator.active_count if scheduler_enabled else 0,
             "state_dir": str(store.state_dir),
             "scheduler_enabled": scheduler_enabled,

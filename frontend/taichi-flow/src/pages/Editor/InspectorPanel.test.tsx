@@ -123,6 +123,7 @@ describe("InspectorPanel failed-run controls", () => {
           onControlsChange={vi.fn()}
           onSave={vi.fn(async () => undefined)}
           onOpenRainfall={vi.fn()}
+          onOpenZoneSoil={vi.fn()}
         />
       </MemoryRouter>,
     );

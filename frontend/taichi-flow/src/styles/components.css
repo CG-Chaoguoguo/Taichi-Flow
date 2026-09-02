@@ -97,6 +97,56 @@
   outline-offset: 2px;
 }
 
+/* ── Help tip ── */
+.tf-help-tip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.tf-help-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25em;
+  height: 1.25em;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-foreground-tertiary);
+  cursor: help;
+}
+
+.tf-help-tip-trigger:hover,
+.tf-help-tip.is-open .tf-help-tip-trigger {
+  color: var(--color-brand);
+}
+
+.tf-help-tip-bubble {
+  position: fixed;
+  z-index: 80;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--layer-stroke);
+  border-radius: var(--radius-flyout);
+  background: var(--layer-fill-default);
+  color: var(--color-foreground-secondary);
+  box-shadow: var(--shadow-flyout);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.33;
+  pointer-events: none;
+  animation: tf-help-tip-in var(--motion-fast) var(--ease-decelerate);
+}
+
+@keyframes tf-help-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 /* ── App Shell — NavigationView ── */
 .tf-app-root {
   display: flex;
@@ -3338,6 +3388,20 @@
   font-size: 11px;
 }
 
+.tf-zone-soil-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.tf-zone-soil-summary-aside {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 10px;
+}
+
 .tf-legacy-wizard,
 .tf-import-preview,
 .tf-time-reconcile {
@@ -3452,6 +3516,48 @@
   overflow: hidden;
   background: var(--mica-base);
   color: var(--color-foreground);
+}
+
+.tf-zone-soil-workspace {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+  background: var(--mica-base);
+  color: var(--color-foreground);
+}
+
+.tf-zone-soil-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tf-zone-soil-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table-wrap {
+  max-height: none;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table {
+  min-width: 100%;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table .tf-input-compact {
+  width: 100%;
+  min-width: 72px;
 }
 
 .tf-rainfall-toolbar,
@@ -3828,7 +3934,8 @@ html[data-theme="high-contrast"] .tf-inspector-tabs button.is-active {
     max-width: 112px;
   }
 
-  .tf-rainfall-workspace {
+  .tf-rainfall-workspace,
+  .tf-zone-soil-workspace {
     gap: 8px;
     padding: 8px;
   }

@@ -7,7 +7,7 @@
 - **Not Supported**: Python 3.14+ (Taichi 1.7.4 limitation)
 
 ### Default Web UI
-- **Required for the default Presentation Layer**: Node.js 20.19+ and npm
+- **Required for the default Presentation Layer**: Node.js 22.12+ and npm (Electron 43.2.0)
 - The default UI is the React/Vite app under `frontend/taichi-flow/`.
 - The Streamlit UI remains available only as a legacy fallback / diagnostic path.
 
@@ -93,7 +93,7 @@ cd frontend/taichi-flow
 npm ci
 ```
 
-Run the full default application with two terminals:
+Run the full default application from the repository root:
 
 ```bash
 # One-command development stack, from repository root
@@ -101,7 +101,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-dev.ps1
 ```
 
 The script starts FastAPI and React/Vite, waits for both health checks, then
-opens the React UI. Manual startup remains available:
+opens the React UI in Electron with Vite HMR. It does not open a browser.
+Use `-Browser` for the explicit browser presentation, or `-ServicesOnly` (the
+legacy `-NoBrowser` alias remains supported) to start only the services.
+Manual startup remains available:
 
 ```bash
 # Terminal 1: FastAPI Service Layer
@@ -112,7 +115,8 @@ cd frontend/taichi-flow
 npm run dev -- --host 127.0.0.1 --port 3000
 ```
 
-Open the Vite URL, normally `http://127.0.0.1:3000`.
+Open the Vite URL, normally `http://127.0.0.1:3000`, only when using the
+explicit browser or services-only mode.
 
 Stop the managed development stack with:
 
@@ -120,11 +124,11 @@ Stop the managed development stack with:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop-dev.ps1
 ```
 
-For the pre-release Electron development shell, double-click
-`scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat` (Vite HMR) or run it
+The desktop development shell is also available by double-clicking
+`scripts\desktop-dev\Start-Taichi-Flow-Desktop-Dev.bat` (Vite HMR) or running it
 with `preview` (compiled `dist` through `app://taichi-flow`). The launcher owns
-the service lifecycle and never bundles Python, Taichi, GDAL, or the solver in
-ASAR.
+only services it created; reused services remain running, and Python, Taichi,
+GDAL, and the solver are never bundled in ASAR.
 
 Legacy fallback only:
 

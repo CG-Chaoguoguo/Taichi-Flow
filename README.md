@@ -82,7 +82,7 @@ path is not preserved as a runtime parameter.
 
 - Windows 10 or 11
 - Python 3.11 recommended; Taichi 1.7.4 supports Python 3.9 through 3.13
-- Node.js 20.19 or newer
+- Node.js 22.12 or newer (Electron 43.2.0 desktop requirement)
 - NVIDIA CUDA hardware is recommended for accelerated execution; it is not
   required for the browser workbench itself
 
@@ -105,8 +105,12 @@ Pop-Location
 ~~~
 
 The managed script starts FastAPI at
-[http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health) and the
-workbench at [http://127.0.0.1:3000/projects](http://127.0.0.1:3000/projects).
+[http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health) and opens
+the workbench in an independent Electron development window backed by Vite HMR.
+It does not open an external browser by default. Use `-Browser` for the
+explicit browser presentation, or `-ServicesOnly`/`-NoBrowser` for a headless
+service stack whose URL is normally
+[http://127.0.0.1:3000/projects](http://127.0.0.1:3000/projects).
 
 ~~~powershell
 .\scripts\stop-dev.ps1

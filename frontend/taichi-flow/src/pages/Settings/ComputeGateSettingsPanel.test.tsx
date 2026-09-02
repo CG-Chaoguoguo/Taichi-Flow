@@ -37,8 +37,8 @@ const catalog: ParameterCatalog = {
       value_type: "enum",
       allowed_values: ["both_thin_weighted", "arithmetic_mean_chamoli"],
       allowed_value_labels_zh: {
-        both_thin_weighted: "双薄层加权平均（BJ 默认）",
-        arithmetic_mean_chamoli: "算术平均（Chamoli）",
+        both_thin_weighted: "双薄层加权平均",
+        arithmetic_mean_chamoli: "算术平均",
       },
     },
     {
@@ -50,7 +50,7 @@ const catalog: ParameterCatalog = {
       editable: true,
       value_type: "enum",
       allowed_values: ["exponential_cv"],
-      allowed_value_labels_zh: { exponential_cv: "指数浓度加权（BJ 默认）" },
+      allowed_value_labels_zh: { exponential_cv: "指数浓度加权" },
     },
     {
       key: "hydrology.dfs_dry_face_velocity_variant",
@@ -62,8 +62,8 @@ const catalog: ParameterCatalog = {
       value_type: "enum",
       allowed_values: ["keep_velocity_bj", "zero_dry_face_chamoli"],
       allowed_value_labels_zh: {
-        keep_velocity_bj: "保持预测速度（BJ 默认）",
-        zero_dry_face_chamoli: "干面上游清零（Chamoli）",
+        keep_velocity_bj: "保持预测速度",
+        zero_dry_face_chamoli: "干面上游清零",
       },
     },
     {
@@ -76,8 +76,8 @@ const catalog: ParameterCatalog = {
       value_type: "enum",
       allowed_values: ["depth_ratio_bj", "velocity_ratio_chamoli"],
       allowed_value_labels_zh: {
-        depth_ratio_bj: "水深比权重（BJ 默认）",
-        velocity_ratio_chamoli: "速度比权重（Chamoli）",
+        depth_ratio_bj: "水深比权重",
+        velocity_ratio_chamoli: "速度比权重",
       },
     },
     {
@@ -90,8 +90,8 @@ const catalog: ParameterCatalog = {
       value_type: "enum",
       allowed_values: ["max_component_bj", "signed_mean_chamoli"],
       allowed_value_labels_zh: {
-        max_component_bj: "分量最大模（BJ 默认）",
-        signed_mean_chamoli: "有符号合成速度（Chamoli）",
+        max_component_bj: "分量最大模",
+        signed_mean_chamoli: "有符号合成速度",
       },
     },
     {
@@ -105,7 +105,7 @@ const catalog: ParameterCatalog = {
       allowed_values: ["disabled", "precomputed", "live"],
       allowed_value_labels_zh: {
         disabled: "关闭浅层失稳台账（triggerslide 不受影响）",
-        precomputed: "串行预计算 UNSFIN 台账（原 EDDA/BJ）",
+        precomputed: "串行预计算 UNSFIN 台账（原 EDDA）",
         live: "实时双层（Taichi 实验）",
       },
     },
@@ -188,10 +188,10 @@ describe("ComputeGateSettingsPanel", () => {
     expect(screen.getByTestId("edda-compute-controls")).toBeInTheDocument();
     expect(screen.getByTestId("variant-gate-settings")).toBeInTheDocument();
     expect(screen.getByTestId("boundary-gate-settings")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "双薄层加权平均（BJ 默认）" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "干面上游清零（Chamoli）" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "速度比权重（Chamoli）" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "有符号合成速度（Chamoli）" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "双薄层加权平均" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "干面上游清零" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "速度比权重" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "有符号合成速度" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "自动检测" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "出流" })).toBeInTheDocument();
     expect(screen.getByTestId("failure-source-policy-settings")).toBeInTheDocument();

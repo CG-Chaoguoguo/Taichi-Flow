@@ -1,6 +1,7 @@
 # Taichi-Flow user guide
 
-1. Open `http://127.0.0.1:3000/projects`.
+1. Start `scripts\start-dev.ps1` and use the Electron workbench. If you chose
+   `-Browser` or `-ServicesOnly`, open `http://127.0.0.1:3000/projects` instead.
 2. Create or import a project. Enter the required root path directly or choose
    **选择目录**. Electron opens the native system directory window; the browser
    opens an in-app browser for mounted local disks. The chosen value is filled

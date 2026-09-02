@@ -6,13 +6,16 @@
   "description": "Taichi-Flow local hydrodynamic modelling workbench",
   "main": "desktop/main.cjs",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "test:desktop": "node --test desktop/directoryPicker.test.cjs desktop/runtimePolicy.test.cjs",
     "preview": "vite preview",
-    "desktop": "npm run desktop:preview",
+    "desktop": "npm run desktop:dev",
     "desktop:dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/desktop-dev/Start-DesktopDev.ps1 -Mode dev",
     "desktop:preview": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/desktop-dev/Start-DesktopDev.ps1 -Mode preview",
     "desktop:smoke": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../../scripts/desktop-dev/Start-DesktopDev.ps1 -Mode dev -Smoke"

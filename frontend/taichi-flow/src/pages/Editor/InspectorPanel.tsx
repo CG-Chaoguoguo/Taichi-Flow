@@ -1,4 +1,5 @@
 import { ArchiveRestore, Database, Play, Save, SlidersHorizontal } from "lucide-react";
+import { HelpTip } from "../../components/HelpTip";
 import { useState } from "react";
 import { AssetBindingField } from "../../components/AssetBindingField";
 import { Button } from "../../components/Button";
@@ -73,6 +74,7 @@ type InspectorPanelProps = {
   onControlsChange: (controls: Record<string, unknown>) => void;
   onSave: () => Promise<void>;
   onOpenRainfall: () => void;
+  onOpenZoneSoil: () => void;
   onToggleCollapse?: () => void;
   inspectorDetailsCollapsed?: boolean;
   inspectorAssetRatio?: number;
@@ -141,6 +143,7 @@ export function InspectorPanel({
   onControlsChange,
   onSave,
   onOpenRainfall,
+  onOpenZoneSoil,
   onToggleCollapse,
   inspectorDetailsCollapsed = false,
   inspectorAssetRatio = 0.45,
@@ -255,7 +258,7 @@ export function InspectorPanel({
                     onDraftChange={onDraftChange}
                     onBindingsChange={onBindingsChange}
                     onControlsChange={onControlsChange}
-                    onOpenRainfall={onOpenRainfall}
+                    onOpenZoneSoil={onOpenZoneSoil}
                     validation={configuration?.validation}
                   />
                 )
@@ -263,7 +266,10 @@ export function InspectorPanel({
 
               {tab === "bindings" ? (
                 <div className="tf-module-body tf-stack tf-module-scroll">
-                  <div className="tf-info-banner">方案只引用资产 ID；文件路径不会进入参数。</div>
+                  <div className="tf-row tf-gap-1">
+                    <div className="tf-body tf-font-semibold">输入绑定</div>
+                    <HelpTip content="方案只引用资产 ID；文件路径不会进入参数。" />
+                  </div>
                   <LegacyMigrationWizard scenario={scenario} />
                   {BINDING_FIELDS.map((field) => {
                     const binding = draftBindings.find((item) => item.binding_key === field.key);

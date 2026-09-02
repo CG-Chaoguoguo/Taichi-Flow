@@ -1154,7 +1154,7 @@ class WorkbenchStore:
         try:
             parsed = parse_reference_config_file(str(config_path), str(source))
         except Exception as exc:
-            raise WorkbenchError("case_config_parse_failed", f"解析 Chamoli edda_in 失败：{exc}", status_code=422) from exc
+            raise WorkbenchError("case_config_parse_failed", f"解析参考案例 edda_in 失败：{exc}", status_code=422) from exc
         config_hash = self._sha256_file(config_path)
         plan = build_legacy_migration_plan(parsed, source_hash=config_hash)
         fingerprint = self._case_fingerprint(config_path, plan)
@@ -1314,7 +1314,7 @@ class WorkbenchStore:
         if not bool(preview.get("commit_allowed")):
             raise WorkbenchError(
                 "case_import_not_ready",
-                "活动输入或 DEM 绑定未通过校验，不能提交 Chamoli 兼容项目。",
+                "活动输入或 DEM 绑定未通过校验，不能提交参考案例兼容项目。",
                 status_code=422,
                 details={
                     "issues": list(preview.get("issues") or []),

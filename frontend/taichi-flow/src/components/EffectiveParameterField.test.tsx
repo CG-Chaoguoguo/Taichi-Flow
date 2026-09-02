@@ -12,8 +12,8 @@ const entry: ParameterCatalogEntry = {
   value_type: "enum",
   allowed_values: ["both_thin_weighted", "arithmetic_mean_chamoli"],
   allowed_value_labels_zh: {
-    both_thin_weighted: "双薄层加权平均（BJ 默认）",
-    arithmetic_mean_chamoli: "算术平均（Chamoli）",
+    both_thin_weighted: "双薄层加权平均",
+    arithmetic_mean_chamoli: "算术平均",
   },
 };
 
@@ -33,7 +33,7 @@ describe("EffectiveParameterField", () => {
     );
     const select = screen.getByTestId("enum-select-hydrology.dfs_face_flux_variant") as HTMLSelectElement;
     expect(select).toHaveValue("both_thin_weighted");
-    expect(screen.getByRole("option", { name: "双薄层加权平均（BJ 默认）" })).toHaveValue("both_thin_weighted");
+    expect(screen.getByRole("option", { name: "双薄层加权平均" })).toHaveValue("both_thin_weighted");
     fireEvent.change(select, { target: { value: "arithmetic_mean_chamoli" } });
     expect(onChange).toHaveBeenCalledWith("arithmetic_mean_chamoli");
   });

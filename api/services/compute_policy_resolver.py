@@ -260,7 +260,7 @@ def resolve_compute_policy(
     if requested == "disabled" and detected_fssimul is True:
         warnings.append("Counterfactual override: case fssimul=true but policy disabled the failure-source ledger.")
     if requested == "live":
-        warnings.append("Experimental live double-layer path; not an original Chamoli or BJ compile path.")
+        warnings.append("Experimental live double-layer path; not an original reference-case compile path.")
 
     if effective_mode == "precomputed":
         active_variant = TOPOLOGY_PRECOMPUTED

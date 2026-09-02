@@ -3,7 +3,8 @@
 ## Local setup
 
 Use a Python environment that contains Taichi and run commands from the
-repository root. `TAICHI_FLOW_PYTHON` may point to an explicit interpreter:
+repository root. Node.js 22.12+ is required by Electron 43.2.0.
+`TAICHI_FLOW_PYTHON` may point to an explicit interpreter:
 
 ```powershell
 $env:TAICHI_FLOW_PYTHON = "C:\\path\\to\\python.exe"
@@ -12,6 +13,16 @@ cd frontend\\taichi-flow
 npm ci
 npm run dev -- --host 127.0.0.1 --port 3000
 ```
+
+The managed entry point is the independent desktop workbench:
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+Use `.\scripts\start-dev.ps1 -Browser` for an explicit browser window, or
+`.\scripts\start-dev.ps1 -ServicesOnly` (with `-NoBrowser` as a compatibility
+alias) when only FastAPI and Vite should remain running.
 
 `TAICHI_FLOW_STATE_DIR` selects an isolated catalog for tests. Set
 `TAICHI_FLOW_MAX_CONCURRENT_PROJECTS=2` (the default) when exercising scheduler
@@ -52,7 +63,8 @@ python -m pytest tests\\test_workbench_domain_api.py tests\\test_workbench_sched
 cd frontend\\taichi-flow
 npm test
 npm run build
-node --test desktop\\directoryPicker.test.cjs
+npm run test:desktop
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\desktop-dev\\Test-DesktopDevLauncher.ps1
 ```
 
 Append each result to `agentlog.md` with command, artifact path, compared case,

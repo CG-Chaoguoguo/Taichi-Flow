@@ -132,8 +132,9 @@ describe("ParameterModule compute controls integration", () => {
         onDraftChange={onDraftChange}
       />,
     );
-    expect(screen.getByTestId("zone-soil-editor")).toBeInTheDocument();
-    expect(screen.getByText("按分区编辑双层土参数")).toBeInTheDocument();
+    expect(screen.getByTestId("zone-soil-summary")).toBeInTheDocument();
+    expect(screen.getByText("分区双层土参数")).toBeInTheDocument();
+    expect(screen.queryByTestId("zone-soil-workspace")).toBeNull();
     const cohesion = container.querySelector('[data-parameter-key="soil.c"]');
     expect(cohesion?.textContent).toMatch(/只读/);
   });

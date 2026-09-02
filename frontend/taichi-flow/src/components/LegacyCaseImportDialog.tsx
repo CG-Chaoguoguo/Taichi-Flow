@@ -106,20 +106,20 @@ export function LegacyCaseImportDialog({
             <label className="tf-form-field">
               <span className="tf-caption tf-text-secondary">原始算例目录</span>
               <div className="tf-input-row">
-                <input className="tf-input tf-mono tf-flex-1" value={sourceRoot} onChange={(event) => setSourceRoot(event.target.value)} placeholder="C:\\…\\Chamoli-EDDA file" />
+                <input className="tf-input tf-mono tf-flex-1" value={sourceRoot} onChange={(event) => setSourceRoot(event.target.value)} placeholder="C:\\…\\原始案例目录" />
                 <Button type="button" size="small" variant="secondary" icon={<FolderOpen size={14} />} onClick={() => void chooseNativeDirectory("source")} disabled={busy}>选择</Button>
               </div>
             </label>
             <label className="tf-form-field">
               <span className="tf-caption tf-text-secondary">独立目标目录</span>
               <div className="tf-input-row">
-                <input className="tf-input tf-mono tf-flex-1" value={destinationRoot} onChange={(event) => setDestinationRoot(event.target.value)} placeholder="C:\\…\\Chamoli-taichi-flow" />
+                <input className="tf-input tf-mono tf-flex-1" value={destinationRoot} onChange={(event) => setDestinationRoot(event.target.value)} placeholder="C:\\…\\目标项目目录" />
                 <Button type="button" size="small" variant="secondary" icon={<FolderOpen size={14} />} onClick={() => void chooseNativeDirectory("destination")} disabled={busy}>选择</Button>
               </div>
             </label>
           </div>
           <div className="tf-form-grid tf-form-grid--two">
-            <label className="tf-form-field"><span className="tf-caption tf-text-secondary">项目名称</span><input className="tf-input" value={caseName} onChange={(event) => setCaseName(event.target.value)} placeholder={preview?.case_name || "Chamoli reference"} /></label>
+            <label className="tf-form-field"><span className="tf-caption tf-text-secondary">项目名称</span><input className="tf-input" value={caseName} onChange={(event) => setCaseName(event.target.value)} placeholder={preview?.case_name || "参考案例"} /></label>
             <label className="tf-form-field"><span className="tf-caption tf-text-secondary">说明（可选）</span><input className="tf-input" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="保留原始 EDDA 语义的隔离验收项目" /></label>
           </div>
 
@@ -145,7 +145,7 @@ export function LegacyCaseImportDialog({
                 <section className="tf-card tf-card-flush"><div className="tf-card-header tf-body tf-font-semibold">活动输入（{preview.bindings.length}）</div><div className="tf-card-body-sm tf-stack-sm">{preview.bindings.map((binding) => <div className="tf-row tf-gap-2" key={binding.binding_key}><CheckCircle2 size={13} className="tf-text-success" /><span className="tf-mono">{binding.binding_key}</span><span className="tf-caption tf-text-tertiary tf-ellipsis">{binding.path}</span></div>)}</div></section>
                 <section className="tf-card tf-card-flush"><div className="tf-card-header tf-body tf-font-semibold">旁路文件</div><div className="tf-card-body-sm tf-stack-sm">{sidecars.map((sidecar) => <div key={sidecar.family} className="tf-row tf-justify-between"><span>{sidecar.family}</span><span className="tf-caption tf-text-tertiary">{sidecar.exists ? `${sidecar.line_count} 行 · ${sidecar.preview[0] || ""}` : "未找到"}</span></div>)}</div></section>
               </div>
-              {preview.issues.length ? <div className="tf-inline-alert tf-inline-alert-warning" role="status">{preview.issues.filter((issue) => issue.severity === "warning").length} 项只读审计提示；不改变 Chamoli 计算链路。{preview.issues.some((issue) => issue.severity === "error") ? ` ${preview.issues.filter((issue) => issue.severity === "error").length} 项活动输入错误。` : ""}</div> : null}
+              {preview.issues.length ? <div className="tf-inline-alert tf-inline-alert-warning" role="status">{preview.issues.filter((issue) => issue.severity === "warning").length} 项只读审计提示；不改变原始计算链路。{preview.issues.some((issue) => issue.severity === "error") ? ` ${preview.issues.filter((issue) => issue.severity === "error").length} 项活动输入错误。` : ""}</div> : null}
             </div>
           )}
         </div>

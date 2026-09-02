@@ -5,7 +5,7 @@ import { Button } from "../../components/Button";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
 import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { ManningModeEditor } from "../../components/ManningModeEditor";
-import { ZoneSoilEditor, ZONE_TAKEN_OVER_KEYS, countSpatialZones } from "../../components/ZoneSoilEditor";
+import { ZoneSoilSummaryCard, ZONE_TAKEN_OVER_KEYS, countSpatialZones } from "../../components/ZoneSoilEditor";
 import { ParameterGroupSection } from "../../components/ParameterGroupSection";
 import { isGateParameterKey } from "../../constants/computeGates";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
@@ -59,6 +59,7 @@ export function ParameterModule({
   onBindingsChange = () => undefined,
   onControlsChange = () => undefined,
   validation,
+  onOpenZoneSoil,
 }: {
   scenario: Scenario;
   readOnly?: boolean;
@@ -68,7 +69,7 @@ export function ParameterModule({
   onDraftChange: (patch: Record<string, unknown>) => void;
   onBindingsChange?: (bindings: InputBinding[]) => void;
   onControlsChange?: (controls: Record<string, unknown>) => void;
-  onOpenRainfall?: () => void;
+  onOpenZoneSoil?: () => void;
   validation?: ValidationState | null;
   onSave?: () => Promise<void>;
 }) {
@@ -216,12 +217,16 @@ export function ParameterModule({
         readOnly={readOnly}
       />
       {manningIssues[0] ? <div className="tf-caption tf-text-danger" role="status">{manningIssues[0].message}</div> : null}
-      <ZoneSoilEditor
+      <ZoneSoilSummaryCard
         draftPatch={draftPatch}
         baseline={scenario.parameter_baseline || {}}
         onDraftChange={onDraftChange}
         canEdit={canEdit}
         readOnly={readOnly}
+        onOpen={onOpenZoneSoil}
+        extraHelp={scenario.configuration_ownership === "reference_case"
+          ? "zfil → glacier.asc 已作为 thickness.primary 绑定；ltstar=-1 按原始案例语义由栅格厚度链路处理，未把它误当成可编辑标量。"
+          : undefined}
       />
       {scenario.configuration_ownership === "reference_case" && catalog?.control_registry && eddaEntries.length ? (
         <EddaComputeControlsSection
@@ -231,16 +236,11 @@ export function ParameterModule({
           draftPatch={draftControls}
           canEdit={canEdit}
           onDraftChange={onControlsChange}
-          title="Chamoli 计算控制"
-          subtitle="原始 edda_in 快照归当前方案所有；BJ 全局设置不会覆盖这些值"
+          title="计算控制"
+          subtitle="原始 edda_in 快照归当前方案所有；全局设置不会覆盖这些值"
           overrideChipLabel="方案覆盖"
-          baselineChipLabel="Chamoli 默认"
+          baselineChipLabel="模板默认"
         />
-      ) : null}
-      {scenario.configuration_ownership === "reference_case" ? (
-        <div className="tf-info-banner tf-caption">
-          zfil → glacier.asc 已作为 thickness.primary 绑定；ltstar=-1 按原始 Chamoli 语义由栅格厚度链路处理，未把它误当成可编辑标量。
-        </div>
       ) : null}
       {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0] ? (
         <div className="tf-caption tf-text-danger" role="status">
