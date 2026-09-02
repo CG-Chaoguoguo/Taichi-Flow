@@ -95,7 +95,7 @@ def test_post_run_source_chain_diagnostics_are_persisted_to_manifest(tmp_path):
 
     diagnostics = collect_runtime_source_chain_diagnostics(solver, runtime_input_manifest)
 
-    assert diagnostics["schedule_provider"] == "original_tfail_artifacts"
+    assert diagnostics["schedule_provider"] == "uploaded_schedule"
     assert diagnostics["schedule_loaded"] is True
     assert diagnostics["runtime_active"] is True
     assert diagnostics["runtime_equivalent_implemented"] is True

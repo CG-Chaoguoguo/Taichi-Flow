@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AssetBatchDeleteResult, AssetDeletePreview, CaseConfigInterface, ExportJob, InputBinding, InputFile, InputRevision, ParameterCatalog, ParameterTemplate, ProjectInfo, QueueBatchDeleteResult, QueueDeletePreview, QueueItem, QueueStartResult, ResultFamily, Scenario, ScenarioConfiguration, SimulationRun, SystemMetrics, Toast } from "../types";
-import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, systemApi } from "../api/taichiFlowAdapter";
+import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type ResultMetadata, type Scenario, type ScenarioConfiguration, type SimulationRun, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
+import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, settingsApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
 import { applyTheme, TAICHI_FLOW_PREFERENCES_STORAGE_KEY, type ThemeMode } from "../themePreference";
@@ -35,6 +35,7 @@ export type ScenarioUpdateDraft = {
   input_revision_id?: string | null;
   input_bindings?: InputBinding[];
   parameter_template_id?: string | null;
+  control_overrides?: Record<string, unknown>;
   expected_version?: number;
 };
 
@@ -70,6 +71,7 @@ interface TaichiFlowStore {
   serviceOnline: boolean;
   metrics: SystemMetrics;
   parameterCatalog: ParameterCatalog | null;
+  computeGateDefaults: ComputeGateDefaults | null;
   parameterTemplates: ParameterTemplate[];
   scenarioConfigurations: Record<string, ScenarioConfiguration>;
   caseConfigInterface: CaseConfigInterface | null;
@@ -83,6 +85,7 @@ interface TaichiFlowStore {
   canvasPreviewMode: CanvasPreviewMode;
   rasterPreviews: Record<string, RasterPreviewMeta>;
   resultFamilies: Record<string, ResultFamily[]>;
+  resultMetadata: Record<string, ResultMetadata>;
   exports: ExportJob[];
   runningSimulations: Record<string, SimulationRun>;
   loading: LoadingState;
@@ -129,20 +132,20 @@ interface TaichiFlowStore {
   toggleLayerVisibility: (fileId: string) => void;
   createInputRevision: (uploadIds: string[], versionTag?: string) => Promise<InputRevision>;
   fetchQueue: () => Promise<void>;
-  enqueueScenario: (scenarioId: string) => Promise<void>;
-  startQueueBatch: () => Promise<QueueStartResult | null>;
+  enqueueScenario: (scenarioId: string, runtimeProfile?: string) => Promise<void>;
   reorderQueue: (itemId: string, newPosition: number) => Promise<void>;
-  previewQueueDeletion: (itemIds: string[]) => Promise<QueueDeletePreview | null>;
-  deleteQueueItems: (itemIds: string[]) => Promise<QueueBatchDeleteResult | null>;
   cancelQueueItem: (itemId: string) => Promise<void>;
   stopRunningItem: (itemId: string) => Promise<void>;
   retryQueueItem: (itemId: string) => Promise<void>;
   fetchResultFamilies: (simulationId: string) => Promise<void>;
+  fetchResultMetadata: (simulationId: string) => Promise<void>;
   createExport: (scenarioId: string, simulationId: string, options: Partial<ExportJob>) => Promise<ExportJob>;
   fetchExports: () => Promise<void>;
   refreshMetrics: () => Promise<void>;
   checkService: () => Promise<void>;
   fetchParameterCatalog: () => Promise<void>;
+  fetchComputeGateDefaults: () => Promise<void>;
+  saveComputeGateDefaults: (values: Record<string, unknown>) => Promise<void>;
   fetchParameterTemplates: () => Promise<void>;
   fetchScenarioConfiguration: (scenarioId: string) => Promise<ScenarioConfiguration | null>;
   fetchCaseConfigInterface: (revisionId?: string | null) => Promise<CaseConfigInterface | null>;
@@ -176,6 +179,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       serviceOnline: false,
       metrics: { cpu_percent: null, gpu_percent: null, gpu_name: null },
       parameterCatalog: null,
+      computeGateDefaults: null,
       parameterTemplates: [],
       scenarioConfigurations: {},
       caseConfigInterface: null,
@@ -189,6 +193,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
       canvasPreviewMode: "downsample",
       rasterPreviews: {},
       resultFamilies: {},
+      resultMetadata: {},
       exports: [],
       runningSimulations: {},
       loading: {},
@@ -440,7 +445,13 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
               parameter_template_id: scenario.parameter_template_id,
               baseline: scenario.parameter_baseline || {},
               overrides: scenario.parameter_patch || {},
+              control_overrides: scenario.control_overrides || {},
+              configuration_ownership: scenario.configuration_ownership,
+              case_fingerprint: scenario.case_fingerprint,
               effective: scenario.effective_parameters || {},
+              compute_policy_resolution: scenario.compute_policy_resolution
+                || state.scenarioConfigurations[scenarioId]?.compute_policy_resolution
+                || EMPTY_COMPUTE_POLICY_RESOLUTION,
               bindings: scenario.input_bindings || [],
               validation: state.scenarioConfigurations[scenarioId]?.validation || { valid: false, errors: [], warnings: [] },
               version: scenario.version || 1,
@@ -610,126 +621,66 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
           set((state) => ({ errors: { ...state.errors, queue: errorMessage(error) } }));
         }
       },
-      enqueueScenario: async (scenarioId) => {
+      enqueueScenario: async (scenarioId, runtimeProfile) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.enqueueScenario(project.project_id, scenarioId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-          set({ dockTab: "queue" });
-          get().addToast({ type: "success", message: "已加入待运行队列" });
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "error", message: errorMessage(error) });
-        }
-      },
-      startQueueBatch: async () => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          const result = await queueApi.startQueue(project.project_id);
-          set({ queue: result.items, dockTab: "queue" });
-          await get().fetchScenarios();
-          get().addToast({
-            type: "success",
-            message: result.count ? `已启动 ${result.count} 项当前批次` : "当前没有待运行项目",
-          });
-          return result;
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "error", message: errorMessage(error) });
-          return null;
-        }
+        await queueApi.enqueueScenario(project.project_id, scenarioId, runtimeProfile);
+        await get().fetchQueue();
+        await get().fetchScenarios();
+        set({ dockTab: "queue" });
       },
       reorderQueue: async (itemId, newPosition) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
-        } catch (error) {
-          await get().fetchQueue();
-          const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
-          get().addToast({
-            type: "warning",
-            message: code === "queue_order_locked" ? "运行批次已启动，队列排序已锁定" : errorMessage(error),
-          });
-        }
-      },
-      previewQueueDeletion: async (itemIds) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          return await queueApi.previewDelete(project.project_id, itemIds);
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "error", message: errorMessage(error) });
-          return null;
-        }
-      },
-      deleteQueueItems: async (itemIds) => {
-        const project = get().activeProject;
-        if (!project) return null;
-        try {
-          const result = await queueApi.batchDelete(project.project_id, itemIds);
-          set({ queue: result.items });
-          await get().fetchScenarios();
-          get().addToast({
-            type: "success",
-            message: result.preserved_result_count ? `已移除队列项，保留 ${result.preserved_result_count} 条运行结果` : "已移除所选队列项",
-          });
-          return result;
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "error", message: errorMessage(error) });
-          return null;
-        }
+        set({ queue: await queueApi.reorderQueue(project.project_id, itemId, newPosition) });
       },
       cancelQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.cancelQueueItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "warning", message: errorMessage(error) });
-        }
+        await queueApi.cancelQueueItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
       stopRunningItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.stopRunningItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "warning", message: errorMessage(error) });
-        }
+        await queueApi.stopRunningItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
       retryQueueItem: async (itemId) => {
         const project = get().activeProject;
         if (!project) return;
-        try {
-          await queueApi.retryQueueItem(project.project_id, itemId);
-          await get().fetchQueue();
-          await get().fetchScenarios();
-        } catch (error) {
-          await get().fetchQueue();
-          get().addToast({ type: "warning", message: errorMessage(error) });
-        }
+        await queueApi.retryQueueItem(project.project_id, itemId);
+        await get().fetchQueue();
+        await get().fetchScenarios();
       },
 
       fetchResultFamilies: async (simulationId) => {
         const project = get().activeProject;
         if (!project) return;
+        set((state) => ({ loading: { ...state.loading, [`results:${simulationId}`]: true }, errors: { ...state.errors, results: null } }));
         try {
           const families = await resultApi.listResultFamilies(project.project_id, simulationId);
           set((state) => ({ resultFamilies: { ...state.resultFamilies, [simulationId]: families } }));
         } catch (error) {
           set((state) => ({ errors: { ...state.errors, results: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, [`results:${simulationId}`]: false } }));
+        }
+      },
+      fetchResultMetadata: async (simulationId) => {
+        const project = get().activeProject;
+        if (!project) return;
+        const loadingKey = `resultMetadata:${simulationId}`;
+        set((state) => ({ loading: { ...state.loading, [loadingKey]: true }, errors: { ...state.errors, resultMetadata: null } }));
+        try {
+          const metadata = await resultApi.metadata(project.project_id, simulationId);
+          set((state) => ({ resultMetadata: { ...state.resultMetadata, [simulationId]: metadata } }));
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, resultMetadata: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, [loadingKey]: false } }));
         }
       },
       createExport: async (scenarioId, simulationId, options) => {
@@ -771,6 +722,27 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
           set((state) => ({ errors: { ...state.errors, parameters: errorMessage(error) } }));
         } finally {
           set((state) => ({ loading: { ...state.loading, parameters: false } }));
+        }
+      },
+      fetchComputeGateDefaults: async () => {
+        set((state) => ({ loading: { ...state.loading, computeGates: true }, errors: { ...state.errors, computeGates: null } }));
+        try {
+          set({ computeGateDefaults: await settingsApi.getComputeGates() });
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, computeGates: errorMessage(error) } }));
+        } finally {
+          set((state) => ({ loading: { ...state.loading, computeGates: false } }));
+        }
+      },
+      saveComputeGateDefaults: async (values) => {
+        set((state) => ({ loading: { ...state.loading, computeGates: true }, errors: { ...state.errors, computeGates: null } }));
+        try {
+          set({ computeGateDefaults: await settingsApi.putComputeGates(values) });
+        } catch (error) {
+          set((state) => ({ errors: { ...state.errors, computeGates: errorMessage(error) } }));
+          throw error;
+        } finally {
+          set((state) => ({ loading: { ...state.loading, computeGates: false } }));
         }
       },
       fetchParameterTemplates: async () => {

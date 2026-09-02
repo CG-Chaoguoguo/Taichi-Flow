@@ -33,9 +33,7 @@ export function ScenarioOutliner({ selectedScenarioId, onSelectScenario, onToggl
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  const runningCount = queue.filter((item) => item.status === "starting" || item.status === "running" || item.status === "stopping").length;
-  const queuedCount = queue.filter((item) => item.status === "queued").length;
-  const waitingCount = queue.filter((item) => item.status === "waiting").length;
+  const runningCount = queue.filter((item) => item.status === "running" || item.status === "waiting" || item.status === "queued").length;
   const suggestedName = `方案 ${scenarios.length + 1}`;
 
   const handleCreate = async (name: string) => {
@@ -133,7 +131,7 @@ export function ScenarioOutliner({ selectedScenarioId, onSelectScenario, onToggl
       <div className="tf-outliner-section">
         <div className="tf-outliner-section-title">
           <span>队列</span>
-          {runningCount > 0 ? <span className="tf-chip">{runningCount} 进行中</span> : queuedCount > 0 ? <span className="tf-chip">{queuedCount} 排队中</span> : waitingCount > 0 ? <span className="tf-chip">{waitingCount} 待运行</span> : <span className="tf-chip">空闲</span>}
+          {runningCount > 0 ? <span className="tf-chip">{runningCount} 进行中</span> : <span className="tf-chip">空闲</span>}
         </div>
         {queue.slice(0, 4).map((item) => (
           <button

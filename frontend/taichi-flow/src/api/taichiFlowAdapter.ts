@@ -9,13 +9,12 @@ import type {
   ParameterCatalog,
   ParameterImportPreview,
   ParameterTemplate,
+  ComputeGateDefaults,
   ProjectInfo,
   RuntimeLock,
   QueueItem,
-  QueueDeletePreview,
-  QueueBatchDeleteResult,
-  QueueStartResult,
   ResultFamily,
+  ResultMetadata,
   Scenario,
   ScenarioConfiguration,
   SimulationRun,
@@ -26,6 +25,8 @@ import type {
   MapStateResponse,
   RasterIdentifyResponse,
   RasterProfile,
+  CaseImportPreview,
+  CaseImportCommitResult,
 } from "../types";
 
 type ApiErrorPayload = { code?: string; message?: string; details?: unknown; request_id?: string };
@@ -263,6 +264,15 @@ export const mapStateApi = {
 export const casesApi = {
   parseConfig: (payload: { case_config_file: string; case_base_dir?: string }) =>
     request<CaseConfigInterface>("/cases/parse-config", json(payload)),
+  previewImport: (sourceRoot: string) =>
+    request<CaseImportPreview>("/cases/imports/preview", json({ source_root: sourceRoot })),
+  commitImport: (payload: {
+    source_root: string;
+    destination_root: string;
+    expected_fingerprint: string;
+    name?: string;
+    description?: string;
+  }) => request<CaseImportCommitResult>("/cases/imports/commit", json(payload)),
 };
 
 export const scenarioApi = {
@@ -278,6 +288,7 @@ export const scenarioApi = {
       input_revision_id?: string | null;
       input_bindings?: InputBinding[];
       parameter_template_id?: string | null;
+      control_overrides?: Record<string, unknown>;
       expected_version?: number;
     },
   ) => request<Scenario>(
@@ -328,11 +339,8 @@ export const migrationApi = {
 
 export const queueApi = {
   getQueue: async (projectId: string): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue`)).items,
-  enqueueScenario: (projectId: string, scenarioId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId })),
-  startQueue: (projectId: string) => request<QueueStartResult>(`/projects/${encodeURIComponent(projectId)}/queue/start`, json({})),
+  enqueueScenario: (projectId: string, scenarioId: string, runtimeProfile?: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId, runtime_profile: runtimeProfile })),
   reorderQueue: async (projectId: string, itemId: string, newPosition: number): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue/order`, putJson({ item_id: itemId, new_position: newPosition }))).items,
-  previewDelete: (projectId: string, queueItemIds: string[]) => request<QueueDeletePreview>(`/projects/${encodeURIComponent(projectId)}/queue/delete-preview`, json({ queue_item_ids: queueItemIds })),
-  batchDelete: (projectId: string, queueItemIds: string[]) => request<QueueBatchDeleteResult>(`/projects/${encodeURIComponent(projectId)}/queue/batch-delete`, json({ queue_item_ids: queueItemIds })),
   cancelQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stopRunningItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/stop`, json({})),
   retryQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/retry`, json({})),
@@ -357,7 +365,7 @@ export const resultApi = {
       files: Array.isArray(family.files) ? (family.files as ResultFamily["files"]) : [],
     }));
   },
-  metadata: (projectId: string, simulationId: string) => request<Record<string, unknown>>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
+  metadata: (projectId: string, simulationId: string) => request<ResultMetadata>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
   downloadUrl: (projectId: string, simulationId: string, filename: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/files/${filename.split("/").map(encodeURIComponent).join("/")}`,
   zipUrl: (projectId: string, simulationId: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/download.zip`,
 };
@@ -374,6 +382,11 @@ export const systemApi = {
   health: () => request<{ status: string }>("/health"),
   parameterCatalog: () => request<ParameterCatalog>("/parameters/catalog"),
   directories: (path?: string) => request<DirectoryListing>(`/system/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+};
+
+export const settingsApi = {
+  getComputeGates: () => request<ComputeGateDefaults>("/settings/compute-gates"),
+  putComputeGates: (values: Record<string, unknown>) => request<ComputeGateDefaults>("/settings/compute-gates", { method: "PUT", body: JSON.stringify({ values }) }),
 };
 
 export { request };

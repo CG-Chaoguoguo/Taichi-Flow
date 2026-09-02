@@ -1,6 +1,7 @@
 # Taichi-Flow user guide
 
-1. Open `http://127.0.0.1:3000/projects`.
+1. Start `scripts\start-dev.ps1` and use the Electron workbench. If you chose
+   `-Browser` or `-ServicesOnly`, open `http://127.0.0.1:3000/projects` instead.
 2. Create or import a project. Enter the required root path directly or choose
    **选择目录**. Electron opens the native system directory window; the browser
    opens an in-app browser for mounted local disks. The chosen value is filled
@@ -12,15 +13,11 @@
    an immutable input revision only after validation.
 4. Create a scenario from a published revision. Edit only evidence-gated
    parameters; completed or archived scenarios must be duplicated first.
-5. Add the scenario to the queue. It remains **waiting** until you reorder the
-   waiting list as needed and select **Run queue** in the bottom queue panel.
-   Starting a queue freezes that batch order; items added during execution wait
-   for the next batch. Different projects may run concurrently by default.
+5. Add the scenario to the queue. The queue is FIFO within a project and may
+   run two different projects concurrently by default.
 6. Follow terminal snapshots in the calculation page. If the WebSocket drops,
-   the client falls back to REST polling. Stop, retry, requeue, and soft-delete
-   actions live in the bottom queue panel and remain explicit after restart.
-   Soft deletion removes a row from the queue view without deleting its run
-   record or result files.
+   the client falls back to REST polling. Stop, cancel, or retry actions are
+   explicit and remain visible after a service restart.
 7. Browse result families and download a single file or a project-root-safe
    ZIP. Create an export to receive effective parameters plus a checksummed
    manifest.

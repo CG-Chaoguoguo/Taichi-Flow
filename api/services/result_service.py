@@ -151,6 +151,7 @@ def result_metadata(store: WorkbenchStore, project_id: str, simulation_id: str) 
         "parameter_audit.json",
         "parameter_catalog.json",
         "runmode_capabilities.json",
+        "numerical_diagnostics.json",
         "output_manifest.json",
     ):
         path = output_dir / name

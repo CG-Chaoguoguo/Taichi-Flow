@@ -46,6 +46,12 @@ body {
   line-height: 1.4;
 }
 
+.tf-title-sm {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.375;
+}
+
 .tf-subtitle {
   font-size: 16px;
   font-weight: 600;

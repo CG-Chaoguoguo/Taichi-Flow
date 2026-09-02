@@ -212,6 +212,7 @@ def test_reference_config_parser_reports_supported_and_recognized_only_fields(tm
 
     parsed = parse_reference_config_file(str(edda_in))
 
+    assert parsed.nzon == 1
     assert "zonfil" in parsed.supported_fields
     assert "slofil" in parsed.supported_fields
     assert "zfil" in parsed.supported_fields
@@ -232,6 +233,8 @@ def test_reference_config_parser_reports_supported_and_recognized_only_fields(tm
     assert parsed.file_inputs["hydrograph.txt"].original_branch_active is False
     assert parsed.file_inputs["inflow.txt"].original_branch_active is False
     assert parsed.file_inputs["zonfil"].exists == [True]
+    assert parsed.file_inputs["zonfil"].original_branch_active is False
+    assert parsed.file_inputs["zonfil"].current_backend_branch_active is False
     assert parsed.file_inputs["outflow.txt"].structure_summary["declared_cell_count"] == 1
     assert parsed.file_inputs["outflow.txt"].structure_summary["grid_coords_preview"][0] == {
         "cell_id": 1,
@@ -257,7 +260,7 @@ def test_reference_config_parser_reports_supported_and_recognized_only_fields(tm
     assert parsed.flags["simulate_rainfall"] is True
     assert parsed.flags["simulate_infiltration"] is True
     assert parsed.dfs_infiltration_variant == "tol_clipped_fhw"
-    assert parsed.dfs_face_flux_variant == "asymmetric_head_guard"
+    assert parsed.dfs_face_flux_variant == "both_thin_weighted"
 
 
 def test_reference_runtime_preserves_parsed_output_interval(tmp_path):
@@ -306,10 +309,10 @@ def test_reference_config_parser_detects_direct_rain_plus_storage_dfs_variant(tm
     assert parsed.ltstar_raw < 0
     assert parsed.zmax == 7.0
     unsupported_flags = {entry["flag"]: entry for entry in parsed.unsupported_flags}
-    assert unsupported_flags["use_analytic_fillable_porosity"]["current_status"] == "source-trace-blocked"
-    assert unsupported_flags["flow_direction_mode"]["current_status"] == "source-trace-blocked"
-    assert unsupported_flags["simulate_rainfall"]["current_status"] == "fixed-status-only"
-    assert unsupported_flags["save_runoff_grids"]["current_status"] == "production-unsupported"
+    assert unsupported_flags["use_analytic_fillable_porosity"]["current_status"] == "parsed_only"
+    assert unsupported_flags["flow_direction_mode"]["current_status"] == "parsed_only"
+    assert "simulate_rainfall" not in unsupported_flags
+    assert unsupported_flags["save_runoff_grids"]["current_status"] == "unsupported"
     assert "OUTNQ_*" in parsed.reference_output_expectations["expected_output_families"]
     assert "Flow_depth_*" in parsed.reference_output_expectations["expected_output_families"]
     assert parsed.reference_output_expectations["output_timing"]["Flow_depth_*"] == "periodic_output"
@@ -327,6 +330,7 @@ def test_reference_config_parser_detects_both_thin_weighted_face_flux_variant(tm
                 "        hbar=(fhpredi(i) * cellareacal(i) +fhpredi(nq) * cellareacal(nq)) / (cellareacal(i)+cellareacal(nq))",
                 "        cvbar=(parai* cellareacal(i)+paran* cellareacal(nq)) / (fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))",
                 "        frhobar=(frhopredi(i)*fhpredi(i)* cellareacal(i)+frhopredi(nq)*fhpredi(nq)* cellareacal(nq))/ (fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))",
+                "        dv=(-grad-sf)*grav*dt+0.02*abs(fhpredi(i)-fhpredi(nq))/(fhpredi(i)+fhpredi(nq))*artivis",
             ]
         )
         + "\n",
@@ -337,11 +341,60 @@ def test_reference_config_parser_detects_both_thin_weighted_face_flux_variant(tm
     _, effective_config, runtime_input_manifest, provenance = build_reference_runtime_metadata(parsed, tmp_path / "out_face_variant")
 
     assert parsed.dfs_face_flux_variant == "both_thin_weighted"
+    assert parsed.dfs_dry_face_velocity_variant == "keep_velocity_bj"
+    assert parsed.dfs_artivis_variant == "depth_ratio_bj"
+    assert parsed.dfs_absubar_variant == "max_component_bj"
     assert parsed.dfs_face_flux_variant_source.endswith("dfs.F90")
     assert "cellareacal`-weighted" in (parsed.dfs_face_flux_variant_basis or "")
     assert effective_config["config"]["hydrology"]["dfs_face_flux_variant"] == "both_thin_weighted"
     assert runtime_input_manifest["input_source_registry"]["dfs_face_flux_variant"]["selected_source"] == "both_thin_weighted"
     assert provenance["reference_config_audit"]["dfs_face_flux_variant"] == "both_thin_weighted"
+
+
+def test_reference_config_parser_detects_arithmetic_mean_chamoli_face_flux_variant(tmp_path):
+    edda_in = _make_reference_case(tmp_path)
+    (edda_in.parent / "dfs.F90").write_text(
+        "\n".join(
+            [
+                "        if (fhpredi(i)<=tol .and. fhpredi(nq)<=tol) then",
+                "!        if ((fhpredi(i)<=tol .and. hi>=hn) .or. (fhpredi(nq)<=tol .and. hn>=hi)) then",
+                "        fvpredi(i,ii)=0.",
+                "        end if",
+                "        hbar=(fhpredi(i) * cellareacal(i) +fhpredi(nq) * cellareacal(nq)) / (cellareacal(i)+cellareacal(nq))",
+                "        parai=(frhopredi(i)-rhow)/(rhos-rhow)",
+                "        paran=(frhopredi(nq)-rhow)/(rhos-rhow)",
+                "        cvbar=(parai* cellareacal(i)+paran* cellareacal(nq)) / (cellareacal(i)+cellareacal(nq))",
+                "        frhobar=0.5*(frhopredi(i)+frhopredi(nq))",
+                "        fvpredi(i,ii)=dv+fv(i,ii)",
+                "        if (fvpredi(i,ii)<0 .and. fhpredi(nq)<=tol) fvpredi(i,ii)=0",
+                "        if (fvpredi(i,ii)>0 .and. fhpredi(i)<=tol) fvpredi(i,ii)=0",
+                "        dv=(-grad-sf)*grav*dt+0.02*abs((fv(nq,ii)-fv(i,ii))/(abs(fv(nq,ii))+abs(fv(i,ii))+1))*artivis",
+                "        vx=(fv(i,5)-fv(i,1))*0.5+(fv(i,4)-fv(i,8))*0.5*0.707+(fv(i,6)-fv(i,2))*0.5*0.707",
+                "        vy=(fv(i,3)-fv(i,7))*0.5+(fv(i,4)-fv(i,8))*0.5*0.707-(fv(i,6)-fv(i,2))*0.5*0.707",
+                "        absubar(i)=(vx**2.+vy**2.)**0.5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_reference_config_file(str(edda_in))
+    _, effective_config, runtime_input_manifest, provenance = build_reference_runtime_metadata(
+        parsed, tmp_path / "out_chamoli_face_variant"
+    )
+
+    assert parsed.dfs_face_flux_variant == "arithmetic_mean_chamoli"
+    assert parsed.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
+    assert parsed.dfs_artivis_variant == "velocity_ratio_chamoli"
+    assert parsed.dfs_absubar_variant == "signed_mean_chamoli"
+    assert parsed.dfs_face_flux_variant_source.endswith("dfs.F90")
+    assert "area-mean `cvbar`" in (parsed.dfs_face_flux_variant_basis or "")
+    assert effective_config["config"]["hydrology"]["dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
+    assert (
+        runtime_input_manifest["input_source_registry"]["dfs_face_flux_variant"]["selected_source"]
+        == "arithmetic_mean_chamoli"
+    )
+    assert provenance["reference_config_audit"]["dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
 
 
 def test_reference_config_parser_detects_precomputed_unsfin_failure_source_variant(tmp_path):
@@ -425,6 +478,7 @@ class _FakeFields:
         self.slope_angle = _FakeBuffer()
         self.n_manning_field = _FakeBuffer()
         self.ltstar_field = _FakeBuffer()
+        self.erodible_thickness = _FakeBuffer()
 
 
 class _FakeRheology:
@@ -552,22 +606,30 @@ def test_reference_mapping_builds_manifest_and_applies_priority_native_loaders(t
     )
 
     solver = _FakeSolver()
+    solver.config.spatial_zones = config.spatial_zones
     runtime_input_manifest = apply_native_runtime_inputs(solver, runtime_input_manifest)
 
     assert config.dem_file.endswith("bcdem.asc")
     assert config.spatial_zones is not None
+    assert config.spatial_zones.enabled is False
+    assert config.spatial_zones.zone_file is None
     assert config.native_inputs is not None
     assert (tmp_path / "output" / "_generated_inputs" / "rainfall_from_edda_in.csv").exists()
     assert solver.fields.slope_angle.value.shape == (2, 2)
     assert solver.fields.n_manning_field.value.shape == (2, 2)
     assert solver.fields.ltstar_field.value.shape == (2, 2)
+    assert solver.fields.erodible_thickness.value is not None
+    np.testing.assert_allclose(
+        solver.fields.erodible_thickness.value,
+        solver.fields.ltstar_field.value,
+    )
     assert solver.double_layer.initialized_with is not None
     assert provenance["helper_fallback_used"] is False
     consumed = {entry["family"]: entry["consumed"] for entry in runtime_input_manifest["inputs"]}
     statuses = {entry["family"]: entry["production_status"] for entry in runtime_input_manifest["inputs"]}
     manifest = {entry["family"]: entry for entry in runtime_input_manifest["inputs"]}
     source_registry = runtime_input_manifest["input_source_registry"]
-    assert consumed["zonfil"] is True
+    assert consumed["zonfil"] is False
     assert consumed["slofil"] is True
     assert consumed["manningfil"] is True
     assert consumed["zfil"] is True
@@ -596,7 +658,7 @@ def test_reference_mapping_builds_manifest_and_applies_priority_native_loaders(t
     assert manifest["outflow.txt"]["effective_runtime_source"] == "outflow_txt"
     assert manifest["outflow.txt"]["effective_runtime_source_active"] is True
     assert statuses["rifil"] == "recognized-only"
-    assert statuses["zfil"] == "partial"
+    assert statuses["zfil"] == "production-reachable"
     assert statuses["dirfil"] == "recognized-only"
     assert statuses["nxtfil"] == "recognized-only"
     assert statuses["outflow.txt"] == "partial"
@@ -657,6 +719,26 @@ def test_reference_mapping_builds_manifest_and_applies_priority_native_loaders(t
     assert provenance["sidecar_output_parity"]["EDDALog.txt"]["parity_status"] == "metadata_only"
     assert provenance["input_source_registry"]["manning_source"]["selected_source"] == "raster_manningfil"
     assert provenance["input_source_registry"]["inflow_source"]["selected_source"] == "inflow_txt"
+
+
+def test_reference_live_policy_fails_closed_when_double_layer_capability_is_missing(tmp_path):
+    edda_in = _make_reference_case(tmp_path)
+    parsed = parse_reference_config_file(str(edda_in))
+
+    config, _, runtime_input_manifest, _ = build_reference_runtime_metadata(
+        parsed,
+        tmp_path / "live-output",
+        global_gates={
+            "hydrology.dfs_failure_source_policy": "live",
+            "experimental.enable_live_doublelayer_in_dfs": True,
+        },
+        strict_reference=True,
+    )
+
+    solver = _FakeSolver()
+    solver.config = config
+    with pytest.raises(ValueError, match="verified double-layer runtime capability"):
+        apply_native_runtime_inputs(solver, runtime_input_manifest)
 
 
 def test_reference_mapping_uses_global_manning_when_declared_grid_is_missing(tmp_path):
@@ -875,4 +957,3 @@ def test_reference_mapping_requires_rifil_when_cri_is_negative(tmp_path):
             parsed,
             tmp_path / "output_missing_rifil",
         )
-

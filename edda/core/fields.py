@@ -172,7 +172,15 @@ class EDDAFields:
         self.tanslo_fortran = ti.field(dtype=self.fp, shape=(nx, ny))
         self.max_flow_depth = ti.field(dtype=self.fp, shape=(nx, ny))
         self.max_flow_velocity = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.max_solid_depth = ti.field(dtype=self.fp, shape=(nx, ny))
         self.total_depth = ti.field(dtype=self.fp, shape=(nx, ny))
+        # Chamoli dfs.F90:1120-1133 sticky Cv-class depths (sfh/dfh/ffh).
+        self.sfh = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.dfh = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.ffh = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.maxsfh = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.maxdfh = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.maxffh = ti.field(dtype=self.fp, shape=(nx, ny))
         self.temp_erodible_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
         self.temp_depo_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
 
@@ -240,6 +248,8 @@ class EDDAFields:
         # Per-cell erosion coefficient
         self.kero_field = ti.field(dtype=self.fp, shape=(nx, ny))  # Erosion coefficient (m/s/Pa)
         self.ctao_field = ti.field(dtype=self.fp, shape=(nx, ny))  # Original EDDA ctao erosion threshold term (Pa)
+        # Zone bed concentration for erosion density. Negative sentinel => use global cvstar.
+        self.cvero_field = ti.field(dtype=self.fp, shape=(nx, ny))
 
         # Double-layer spatial parameter fields (per grid cell, for zone support)
         self.alpha_top_field = ti.field(dtype=self.fp, shape=(nx, ny))  # Van Genuchten alpha top (1/m)
@@ -393,7 +403,14 @@ class EDDAFields:
             self.tanslo_fortran[i, j] = 0.0
             self.max_flow_depth[i, j] = 0.0
             self.max_flow_velocity[i, j] = 0.0
+            self.max_solid_depth[i, j] = 0.0
             self.total_depth[i, j] = 0.0
+            self.sfh[i, j] = 0.0
+            self.dfh[i, j] = 0.0
+            self.ffh[i, j] = 0.0
+            self.maxsfh[i, j] = 0.0
+            self.maxdfh[i, j] = 0.0
+            self.maxffh[i, j] = 0.0
             self.temp_erodible_thickness[i, j] = 0.0
             self.temp_depo_thickness[i, j] = 0.0
 
@@ -482,6 +499,7 @@ class EDDAFields:
             # Initialize erosion parameter fields
             self.kero_field[i, j] = 1e-5
             self.ctao_field[i, j] = 10.0
+            self.cvero_field[i, j] = -1.0  # sentinel: use global cvstar
 
             # Initialize double-layer spatial parameter fields
             self.alpha_top_field[i, j] = 2.0
@@ -551,6 +569,8 @@ class EDDAFields:
                     self.lbstar_field[i, j] = zone_params[zone, 25]
                     if zone_params.shape[1] > 26:
                         self.ctao_field[i, j] = zone_params[zone, 26]
+                    if zone_params.shape[1] > 27:
+                        self.cvero_field[i, j] = zone_params[zone, 27]
 
     def initialize_all(self):
         """Initialize all variables to default values."""
@@ -653,9 +673,17 @@ class EDDAFields:
             ('slope_angle', 'slope_angle'),
             ('max_flow_depth', 'max_flow_depth'),
             ('max_flow_velocity', 'max_flow_velocity'),
+            ('max_solid_depth', 'max_solid_depth'),
             ('total_depth', 'total_depth'),
+            ('sfh', 'sfh'),
+            ('dfh', 'dfh'),
+            ('ffh', 'ffh'),
+            ('maxsfh', 'maxsfh'),
+            ('maxdfh', 'maxdfh'),
+            ('maxffh', 'maxffh'),
             ('fdepth', 'fdepth'),
             ('ctao_field', 'ctao_field'),
+            ('cvero_field', 'cvero_field'),
             ('fhpredi1', 'fhpredi1'),
             ('frhopredi1', 'frhopredi1'),
             ('fhpredi', 'fhpredi'),

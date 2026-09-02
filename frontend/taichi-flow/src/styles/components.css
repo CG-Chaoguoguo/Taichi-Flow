@@ -97,6 +97,56 @@
   outline-offset: 2px;
 }
 
+/* ── Help tip ── */
+.tf-help-tip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.tf-help-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25em;
+  height: 1.25em;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-foreground-tertiary);
+  cursor: help;
+}
+
+.tf-help-tip-trigger:hover,
+.tf-help-tip.is-open .tf-help-tip-trigger {
+  color: var(--color-brand);
+}
+
+.tf-help-tip-bubble {
+  position: fixed;
+  z-index: 80;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--layer-stroke);
+  border-radius: var(--radius-flyout);
+  background: var(--layer-fill-default);
+  color: var(--color-foreground-secondary);
+  box-shadow: var(--shadow-flyout);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.33;
+  pointer-events: none;
+  animation: tf-help-tip-in var(--motion-fast) var(--ease-decelerate);
+}
+
+@keyframes tf-help-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 /* ── App Shell — NavigationView ── */
 .tf-app-root {
   display: flex;
@@ -545,6 +595,34 @@
   border-bottom: none;
 }
 
+.tf-table-compact th,
+.tf-table-compact td {
+  padding: 6px 8px;
+  height: 34px;
+  font-size: 12px;
+}
+
+.tf-zone-soil-table-wrap {
+  max-height: 280px;
+}
+
+.tf-zone-soil-table {
+  min-width: 640px;
+}
+
+.tf-zone-soil-table .tf-input-compact {
+  width: 88px;
+  min-width: 72px;
+  height: 28px;
+  padding: 0 6px;
+}
+
+.tf-zone-soil-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ── Dialog — Smoke + Acrylic ── */
 .tf-dialog-overlay {
   position: fixed;
@@ -920,6 +998,15 @@
   color: var(--color-foreground-secondary);
 }
 
+.tf-spin {
+  animation: tf-spin 0.9s linear infinite;
+  align-self: center;
+}
+
+@keyframes tf-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Metric cards ── */
 .tf-metric-grid {
   display: grid;
@@ -1017,6 +1104,78 @@
 .tf-card.active {
   border-color: var(--color-brand);
   box-shadow: var(--shadow-8);
+}
+
+.tf-diagnostics-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.tf-diagnostics-heading {
+  align-items: flex-start;
+}
+
+.tf-diagnostic-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--layer-on-acrylic);
+  color: var(--color-warning);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tf-diagnostic-state.is-ok {
+  color: var(--color-success);
+}
+
+.tf-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.tf-diagnostic-item {
+  min-width: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--layer-on-acrylic);
+  border: 1px solid var(--layer-stroke);
+}
+
+.tf-diagnostic-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-foreground-secondary);
+  font-size: 12px;
+}
+
+.tf-diagnostic-value {
+  margin-top: 4px;
+  color: var(--color-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tf-diagnostic-value.is-ok {
+  color: var(--color-success);
+}
+
+.tf-diagnostic-value.is-warning {
+  color: var(--color-warning);
+}
+
+.tf-diagnostics-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .tf-project-card {
@@ -1415,9 +1574,80 @@
   margin-bottom: var(--space-4);
 }
 
+.tf-mt-4 {
+  margin-top: var(--space-4);
+}
+
+.tf-compute-gate-settings .tf-edda-compute-card {
+  box-shadow: none;
+}
+
 .tf-dialog-narrow {
   width: min(480px, 100%);
   padding: var(--space-6);
+}
+
+.tf-dialog-wide {
+  width: min(980px, 100%);
+  max-height: min(860px, calc(100vh - 32px));
+}
+
+.tf-dialog-wide .tf-dialog-body {
+  max-height: min(640px, calc(100vh - 220px));
+  padding: var(--space-5);
+}
+
+.tf-form-grid {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.tf-form-grid--two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tf-icon-badge {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: var(--radius-control);
+  color: var(--color-brand);
+  background: var(--layer-on-acrylic);
+  border: 1px solid var(--layer-stroke);
+}
+
+.tf-flex-wrap {
+  flex-wrap: wrap;
+}
+
+.tf-metric-grid--compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.tf-case-import-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(240px, .75fr);
+  gap: var(--space-3);
+}
+
+.tf-case-import-columns .tf-card {
+  min-width: 0;
+}
+
+.tf-case-import-columns .tf-card-body-sm {
+  max-height: 170px;
+  overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .tf-form-grid--two,
+  .tf-case-import-columns,
+  .tf-metric-grid--compact,
+  .tf-diagnostics-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .tf-form-stack {
@@ -1562,6 +1792,241 @@
 
 .tf-param-entry.is-changed {
   background: var(--color-brand-bg-subtle);
+}
+
+.tf-edda-compute-card {
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--color-brand) 24%, var(--layer-stroke));
+  background: var(--layer-on-acrylic);
+}
+
+.tf-edda-compute-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 12px;
+  border-bottom: 1px solid var(--layer-stroke);
+  background: linear-gradient(135deg, var(--color-brand-bg-subtle), transparent 76%);
+}
+
+.tf-edda-compute-header > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--color-brand);
+}
+
+.tf-edda-compute-header h2 {
+  margin: 0;
+}
+
+.tf-edda-control-count {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--color-brand) 22%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-bg-subtle);
+  color: var(--color-brand);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tf-edda-compute-card > .tf-banner {
+  margin: 10px 10px 0;
+}
+
+.tf-edda-control-groups {
+  display: grid;
+}
+
+.tf-edda-control-group + .tf-edda-control-group {
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-control-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 7px 12px;
+  background: var(--color-surface-secondary);
+  color: var(--color-foreground-secondary);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+}
+
+.tf-edda-control-group-title span:last-child {
+  color: var(--color-foreground-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.tf-edda-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 58px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--layer-stroke-subtle, var(--layer-stroke));
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.tf-edda-control:first-of-type {
+  border-top: 0;
+}
+
+.tf-edda-control:hover {
+  background: var(--layer-fill-selected);
+}
+
+.tf-edda-control.is-changed {
+  background: var(--color-brand-bg-subtle);
+}
+
+.tf-edda-control-copy {
+  min-width: 0;
+}
+
+.tf-edda-control-copy > .tf-caption {
+  margin-top: 3px;
+  line-height: 1.35;
+}
+
+.tf-edda-control-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tf-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--control-stroke, var(--layer-stroke));
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-tertiary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+
+.tf-switch:hover:not(:disabled) {
+  border-color: var(--color-brand);
+}
+
+.tf-switch:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.tf-switch[aria-checked="true"] {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.tf-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.tf-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-foreground-on-accent, #fff);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 22%);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.tf-switch[aria-checked="true"] .tf-switch-thumb {
+  transform: translateX(16px);
+}
+
+.tf-edda-restricted {
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-restricted > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: 8px 12px;
+  color: var(--color-foreground-secondary);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tf-edda-restricted > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tf-edda-restricted > summary:hover,
+.tf-edda-restricted > summary:focus-visible {
+  background: var(--layer-fill-selected);
+}
+
+.tf-edda-restricted > summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.tf-edda-restricted-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border-top: 1px solid var(--layer-stroke);
+}
+
+.tf-edda-restricted-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px var(--space-2);
+  padding: 8px 12px;
+  border-top: 1px solid var(--layer-stroke-subtle, var(--layer-stroke));
+  color: var(--color-foreground-tertiary);
+  font-size: 10px;
+}
+
+.tf-edda-restricted-row:first-child {
+  border-top: 0;
+}
+
+.tf-edda-restricted-row > div {
+  min-width: 0;
+}
+
+.tf-edda-restricted-row strong,
+.tf-edda-restricted-row .tf-mono {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-edda-restricted-row strong {
+  color: var(--color-foreground-secondary);
+  font-size: 11px;
+}
+
+.tf-edda-restricted-row > span {
+  align-self: start;
+  padding: 2px 5px;
+  border-radius: var(--radius-control);
+  background: var(--color-surface-tertiary);
+  white-space: nowrap;
+}
+
+.tf-edda-restricted-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  line-height: 1.4;
 }
 
 .tf-card-trigger {
@@ -2532,53 +2997,6 @@
   gap: 6px;
 }
 
-.tf-queue-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  padding: 2px 0 4px;
-}
-
-.tf-dock-queue-row {
-  transition: opacity 120ms ease, border-color 120ms ease, background 120ms ease, transform 120ms ease;
-}
-
-.tf-dock-queue-row.is-locked {
-  background: color-mix(in srgb, var(--layer-fill-default) 88%, var(--layer-on-acrylic));
-}
-
-.tf-dock-queue-row.is-dragging {
-  opacity: 0.42;
-}
-
-.tf-dock-queue-row.is-drop-target {
-  border-color: var(--color-brand);
-  background: color-mix(in srgb, var(--color-brand) 12%, var(--layer-fill-default));
-}
-
-.tf-dock-queue-drag-handle {
-  flex: 0 0 18px;
-  cursor: grab;
-}
-
-.tf-dock-queue-leading {
-  width: 18px;
-  flex: 0 0 18px;
-}
-
-.tf-dock-queue-checkbox {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-  accent-color: var(--color-brand);
-}
-
-.tf-queue-delete-dialog .tf-dialog-body {
-  max-height: 320px;
-  overflow: auto;
-}
-
 .tf-dock-empty {
   padding: 12px 4px;
 }
@@ -2970,6 +3388,20 @@
   font-size: 11px;
 }
 
+.tf-zone-soil-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.tf-zone-soil-summary-aside {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 10px;
+}
+
 .tf-legacy-wizard,
 .tf-import-preview,
 .tf-time-reconcile {
@@ -3084,6 +3516,48 @@
   overflow: hidden;
   background: var(--mica-base);
   color: var(--color-foreground);
+}
+
+.tf-zone-soil-workspace {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+  background: var(--mica-base);
+  color: var(--color-foreground);
+}
+
+.tf-zone-soil-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tf-zone-soil-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table-wrap {
+  max-height: none;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table {
+  min-width: 100%;
+}
+
+.tf-zone-soil-workspace .tf-zone-soil-table .tf-input-compact {
+  width: 100%;
+  min-width: 72px;
 }
 
 .tf-rainfall-toolbar,
@@ -3460,7 +3934,8 @@ html[data-theme="high-contrast"] .tf-inspector-tabs button.is-active {
     max-width: 112px;
   }
 
-  .tf-rainfall-workspace {
+  .tf-rainfall-workspace,
+  .tf-zone-soil-workspace {
     gap: 8px;
     padding: 8px;
   }

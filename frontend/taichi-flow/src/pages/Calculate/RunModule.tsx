@@ -1,39 +1,40 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Cpu, List, ListPlus, Monitor, RefreshCw, Terminal, Timer } from "lucide-react";
+import { AlertCircle, CheckCircle2, Cpu, List, Monitor, Play, RefreshCw, Square, Terminal, Timer } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
 import { StatusBadge } from "../../components/StatusBadge";
-import type { QueueItem, Scenario } from "../../types";
+import { FailureSourcePolicySummary } from "../../components/FailureSourcePolicySummary";
+import type { Scenario } from "../../types";
 import { runApi } from "../../api/taichiFlowAdapter";
-
-export function selectScenarioQueueItem(
-  queue: QueueItem[],
-  scenario: Pick<Scenario, "scenario_id" | "latest_simulation_id">,
-): QueueItem | undefined {
-  const scenarioItems = queue.filter((item) => item.scenario_id === scenario.scenario_id);
-  const currentQueueItem = scenarioItems.find((item) =>
-    ["waiting", "queued", "starting", "running", "stopping"].includes(item.status),
-  );
-  if (currentQueueItem) return currentQueueItem;
-  const latestSimulationItem = scenarioItems.find(
-    (item) => Boolean(scenario.latest_simulation_id) && item.simulation_id === scenario.latest_simulation_id,
-  );
-  return latestSimulationItem ?? scenarioItems[scenarioItems.length - 1];
-}
 
 export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const queue = useTaichiFlowStore((state) => state.queue);
   const metrics = useTaichiFlowStore((state) => state.metrics);
   const enqueueScenario = useTaichiFlowStore((state) => state.enqueueScenario);
+  const cancelQueueItem = useTaichiFlowStore((state) => state.cancelQueueItem);
+  const stopRunningItem = useTaichiFlowStore((state) => state.stopRunningItem);
   const retryQueueItem = useTaichiFlowStore((state) => state.retryQueueItem);
-  const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
+  const catalog = useTaichiFlowStore((state) => state.parameterCatalog);
+  const fetchParameterCatalog = useTaichiFlowStore((state) => state.fetchParameterCatalog);
   const scenarioConfiguration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
+  const navigate = useNavigate();
 
-  const item = selectScenarioQueueItem(queue, scenario);
+  const item = queue.find((q) => q.scenario_id === scenario.scenario_id);
+  const policyResolution = scenarioConfiguration?.compute_policy_resolution;
+  const policyBlocked = policyResolution?.status === "blocked";
+  const policyResolved = policyResolution?.status === "resolved";
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+  const [runtimeProfile, setRuntimeProfile] = useState("cuda_production_default");
+  const profileOptions = catalog?.runtime_profiles?.user_selectable?.length
+    ? catalog.runtime_profiles.user_selectable
+    : [
+        { name: "cuda_production_default", label_zh: "CUDA 加速", description_zh: "使用 GPU 运行生产求解器（默认）。" },
+        { name: "compat_default_off", label_zh: "CPU 兼容", description_zh: "使用 CPU 运行，适合无 GPU 环境。" },
+      ];
 
   useEffect(() => {
     if (readOnly) return;
@@ -52,9 +53,13 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
     if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
   }, [fetchScenarioConfiguration, readOnly, scenario.scenario_id, scenario.version]);
 
+  useEffect(() => {
+    if (!catalog) void fetchParameterCatalog();
+  }, [catalog, fetchParameterCatalog]);
+
   const handleEnqueue = async () => {
     if (readOnly) return;
-    await enqueueScenario(scenario.scenario_id);
+    await enqueueScenario(scenario.scenario_id, runtimeProfile);
   };
 
   const elapsed = item?.started_at ? Math.floor((Date.now() - new Date(item.started_at).getTime()) / 1000) : 0;
@@ -69,7 +74,7 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <StatusBadge variant="neutral">只读</StatusBadge>
           </div>
           <div className="tf-caption tf-text-secondary">
-            打开项目并选择方案后，可在此进行预检、入队并查看运行状态。
+            打开项目并选择方案后，可在此进行预检、入队与运行控制。
           </div>
         </div>
         <div className="tf-stack-md">
@@ -79,7 +84,7 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <CheckItem ok={false} text="运行输入将在开始计算时冻结" />
             <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
           </div>
-          <Button icon={<ListPlus size={16} />} disabled>
+          <Button icon={<Play size={16} />} disabled>
             加入模拟队列
           </Button>
         </div>
@@ -110,34 +115,69 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
         <div className="tf-stack-md">
           <h4 className="tf-subtitle">运行预检</h4>
           <div className="tf-stack-sm">
-            <CheckItem ok={Boolean(scenarioConfiguration?.validation?.valid)} text="草稿输入已通过预检" />
-            <CheckItem ok={scenario.binding_state !== "runtime_snapshot" || Boolean(scenario.input_revision_id)} text="运行快照将在开始计算时冻结" />
+            <CheckItem ok={Boolean(scenarioConfiguration?.validation?.valid)} text="方案输入已通过预检" />
+            <CheckItem ok={policyResolved} text="失稳源策略已严格解析" />
+            <CheckItem ok={scenario.binding_state !== "runtime_snapshot" || Boolean(scenario.input_revision_id)} text="入队时冻结输入与计算策略" />
             <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
           </div>
-          {!scenarioConfiguration?.validation?.valid ? (
+          {!scenarioConfiguration ? (
+            <div className="tf-caption tf-text-info">正在解析失稳源策略…</div>
+          ) : null}
+          {policyBlocked ? (
+            <div className="tf-status-row is-error" role="alert">
+              <AlertCircle size={16} />
+              <span className="tf-body">{policyResolution.blocking_issue.message}</span>
+            </div>
+          ) : null}
+          {!scenarioConfiguration?.validation?.valid && scenarioConfiguration ? (
             <div className="tf-caption tf-text-secondary">
               请补齐草稿输入绑定或参数校验项后再加入队列。
             </div>
           ) : null}
-          <Button icon={<ListPlus size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid}>
+          <label className="tf-stack-sm" htmlFor="run-runtime-profile">
+            <span className="tf-body tf-font-medium">计算后端（仅本次运行）</span>
+            <select
+              id="run-runtime-profile"
+              className="tf-input"
+              data-testid="run-runtime-profile"
+              value={runtimeProfile}
+              onChange={(event) => setRuntimeProfile(event.target.value)}
+            >
+              {profileOptions.map((option) => (
+                <option key={option.name} value={option.name}>
+                  {option.label_zh || option.name}
+                </option>
+              ))}
+            </select>
+            <span className="tf-caption tf-text-tertiary">
+              {profileOptions.find((option) => option.name === runtimeProfile)?.description_zh
+                || "CUDA 与 CPU 仅影响本次入队任务，不写入方案参数。"}
+            </span>
+          </label>
+          <FailureSourcePolicySummary resolution={policyResolution} />
+          <button type="button" className="tf-link-button" onClick={() => navigate("/settings#compute-gates")}>
+            {policyBlocked ? "前往设置调整策略 →" : "管理计算门禁 →"}
+          </button>
+          <Button icon={<Play size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid || !policyResolved}>
             加入模拟队列
           </Button>
         </div>
       ) : null}
 
       {/* 等待中 */}
-      {(scenario.status === "waiting" || scenario.status === "queued") && item && (item.status === "waiting" || item.status === "queued") && (
+      {scenario.status === "queued" && item && (item.status === "waiting" || item.status === "queued") && (
         <div className="tf-stack-md">
           <h4 className="tf-subtitle">队列位置</h4>
           <div className="tf-display tf-text-brand">
-            #{item.queue_order ?? item.position}
+            #{item.position}
           </div>
           <p className="tf-body tf-text-secondary">
-            {item.status === "waiting" ? "已加入待运行批次；请在底部队列点击“运行队列”。" : "当前批次已释放给调度器，排序已锁定。"}
+            当前队列并发数限制为 1，前面还有 {item.position - 1} 个任务。
           </p>
-          <p className="tf-caption tf-text-warning">计算开始前输入仍可修改；开始后将冻结运行快照。</p>
-          <Button variant="secondary" icon={<List size={16} />} onClick={() => setDockTab("queue")}>
-            打开队列
+           <p className="tf-caption tf-text-info">入队时已冻结输入修订与计算策略；如需使用新的 Settings，请重新加入队列。</p>
+           <FailureSourcePolicySummary resolution={item.compute_policy_resolution} />
+          <Button variant="secondary" icon={<Square size={16} />} onClick={() => cancelQueueItem(item.queue_item_id)}>
+            取消排队
           </Button>
         </div>
       )}
@@ -167,6 +207,9 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <Terminal size={12} />
             轮询状态 · simulation_id: {item.simulation_id || "—"}
           </div>
+          <Button variant="danger" icon={<Square size={16} />} onClick={() => stopRunningItem(item.queue_item_id)}>
+            停止模拟
+          </Button>
         </div>
       )}
 

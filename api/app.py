@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from api.routes import cases, parameters, realtime, results_v2, workbench
+from api.routes import cases, parameters, realtime, results_v2, settings, workbench
 from api.services.runmode_capabilities import build_runmode_capabilities
 from api.services.directory_picker import DirectoryPickerService
 from api.services.scheduler import (
@@ -37,6 +37,10 @@ SERVICE_ID = "taichi-flow-api"
 API_CONTRACT_VERSION = 1
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKOUT_ID = sha256(os.path.normcase(str(PROJECT_ROOT)).encode("utf-8")).hexdigest()[:16]
+# The desktop launcher supplies this value for newly created API processes so a
+# reused Vite proxy can be compared with the exact API instance it targets.
+# Empty is intentionally tolerated for services started by older entry points.
+API_INSTANCE_ID = os.environ.get("TAICHI_FLOW_API_INSTANCE_ID", "")
 
 
 def _allowed_origins() -> list[str]:
@@ -243,6 +247,7 @@ def create_app(
     application.include_router(realtime.router, tags=["realtime"])
     application.include_router(cases.router, prefix="/api/cases", tags=["cases"])
     application.include_router(parameters.router, prefix="/api/parameters", tags=["parameters"])
+    application.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
     @application.get("/api/system/directories", tags=["system"], response_model=DirectoryListingResponse)
     async def system_directories(request: Request, path: Optional[str] = None):
@@ -266,6 +271,7 @@ def create_app(
             "service_id": SERVICE_ID,
             "api_contract_version": API_CONTRACT_VERSION,
             "checkout_id": CHECKOUT_ID,
+            "api_instance_id": API_INSTANCE_ID,
             "active_simulations": coordinator.active_count if scheduler_enabled else 0,
             "state_dir": str(store.state_dir),
             "scheduler_enabled": scheduler_enabled,

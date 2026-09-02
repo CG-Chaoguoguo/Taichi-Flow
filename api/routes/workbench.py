@@ -84,6 +84,7 @@ class ScenarioCreate(BaseModel):
     base_scenario_id: Optional[str] = None
     parameter_patch: Dict[str, Any] = Field(default_factory=dict)
     parameter_template_id: Optional[str] = None
+    control_overrides: Optional[Dict[str, Any]] = None
 
 
 class ScenarioUpdate(BaseModel):
@@ -92,6 +93,7 @@ class ScenarioUpdate(BaseModel):
     input_revision_id: Optional[str] = None
     input_bindings: Optional[list[InputBindingPayload]] = None
     parameter_template_id: Optional[str] = None
+    control_overrides: Optional[Dict[str, Any]] = None
     expected_version: Optional[int] = Field(None, ge=1)
 
 
@@ -106,15 +108,12 @@ class LegacyMigrationCommitRequest(BaseModel):
 
 class QueueCreate(BaseModel):
     scenario_id: str = Field(..., min_length=1)
+    runtime_profile: Optional[str] = None
 
 
 class QueueReorder(BaseModel):
     item_id: str = Field(..., min_length=1)
     new_position: int = Field(..., ge=1)
-
-
-class QueueDeleteRequest(BaseModel):
-    queue_item_ids: list[str] = Field(..., min_length=1)
 
 
 @router.get("/projects")
@@ -599,6 +598,7 @@ async def create_scenario(request: Request, project_id: str, payload: ScenarioCr
         base_scenario_id=payload.base_scenario_id,
         parameter_patch=payload.parameter_patch,
         parameter_template_id=payload.parameter_template_id,
+        control_overrides=payload.control_overrides,
     )
 
 
@@ -630,6 +630,7 @@ async def update_scenario(
         input_revision_id=payload.input_revision_id,
         input_bindings=[item.model_dump() for item in payload.input_bindings] if payload.input_bindings is not None else None,
         parameter_template_id=payload.parameter_template_id,
+        control_overrides=payload.control_overrides,
         expected_version=payload.expected_version,
     )
 
@@ -658,12 +659,11 @@ async def list_queue(request: Request, project_id: str):
 
 @router.post("/projects/{project_id}/queue", status_code=status.HTTP_201_CREATED)
 async def enqueue_scenario(request: Request, project_id: str, payload: QueueCreate):
-    return request.app.state.workbench.enqueue_scenario(project_id, payload.scenario_id)
-
-
-@router.post("/projects/{project_id}/queue/start")
-async def start_queue(request: Request, project_id: str):
-    return request.app.state.workbench.start_queue_batch(project_id)
+    return request.app.state.workbench.enqueue_scenario(
+        project_id,
+        payload.scenario_id,
+        runtime_profile=payload.runtime_profile,
+    )
 
 
 @router.patch("/projects/{project_id}/queue/order")
@@ -674,16 +674,6 @@ async def reorder_queue(request: Request, project_id: str, payload: QueueReorder
         payload.new_position,
     )
     return {"items": items, "count": len(items)}
-
-
-@router.post("/projects/{project_id}/queue/delete-preview")
-async def preview_queue_delete(request: Request, project_id: str, payload: QueueDeleteRequest):
-    return request.app.state.workbench.preview_queue_delete(project_id, payload.queue_item_ids)
-
-
-@router.post("/projects/{project_id}/queue/batch-delete")
-async def batch_delete_queue(request: Request, project_id: str, payload: QueueDeleteRequest):
-    return request.app.state.workbench.batch_delete_queue_items(project_id, payload.queue_item_ids)
 
 
 @router.delete("/projects/{project_id}/queue/{queue_item_id}")

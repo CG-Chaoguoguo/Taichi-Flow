@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate, useParams } from "react-router-dom";
-import { AlertCircle, ArrowLeft, CheckCircle2, Cpu, Monitor, Moon, Sun, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, Cpu, Monitor, Moon, Settings, Sun, X } from "lucide-react";
 import { useTaichiFlowStore } from "../stores/taichiFlowStore";
 import { IconButton } from "../components/IconButton";
 import { Button } from "../components/Button";
@@ -77,6 +77,12 @@ export function ProjectEditorShell() {
             icon={resolvedTheme === "dark" ? <Moon size={16} /> : <Sun size={16} />}
             label="切换主题"
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            size="small"
+          />
+          <IconButton
+            icon={<Settings size={16} />}
+            label="设置"
+            onClick={() => navigate("/settings#compute-gates")}
             size="small"
           />
           <EditorSettingsPopover />

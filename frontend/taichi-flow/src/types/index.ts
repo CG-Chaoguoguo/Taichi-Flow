@@ -158,6 +158,7 @@ export type InputFamily =
   | "slope"
   | "zones"
   | "thickness"
+  | "trigger"
   | "manning"
   | "rainfall"
   | "groundwater"
@@ -207,7 +208,7 @@ export type AssetBatchDeleteResult = {
   retained_snapshot_blob_count: number;
 };
 
-export type ScenarioStatus = "draft" | "ready" | "waiting" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "archived";
+export type ScenarioStatus = "draft" | "ready" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "archived";
 export type Scenario = {
   scenario_id: string;
   project_id: string;
@@ -217,7 +218,11 @@ export type Scenario = {
   parameter_template_id?: string | null;
   parameter_baseline?: Record<string, unknown>;
   parameter_patch: Record<string, unknown>;
+  control_overrides?: Record<string, unknown>;
+  configuration_ownership?: "reference_case" | "global_defaults" | string;
+  case_fingerprint?: string | null;
   effective_parameters: Record<string, unknown>;
+  compute_policy_resolution?: ComputePolicyResolution;
   input_bindings?: InputBinding[];
   binding_state?: "draft" | "runtime_snapshot";
   version?: number;
@@ -249,50 +254,32 @@ export type SimulationRun = {
   elapsed_seconds: number;
   terminal_log?: string[];
   output_dir?: string;
+  effective_config?: Record<string, unknown>;
+  compute_policy_resolution: ComputePolicyResolution;
   resource_summary?: Record<string, unknown>;
 };
 
-export type QueueItemStatus = "queued" | "starting" | "running" | "stopping" | "completed" | "failed" | "stopped" | "interrupted" | "cancelled" | "waiting" | "canceled";
+export type QueueItemStatus = "queued" | "starting" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "cancelled" | "waiting" | "canceled";
 export type QueueItem = {
   queue_item_id: string;
   project_id: string;
   scenario_id: string;
   scenario_name: string;
   position: number;
-  queue_order?: number | null;
   status: QueueItemStatus;
   simulation_id: string | null;
   scenario_version?: number | null;
   input_revision_id?: string | null;
   cancel_reason?: string | null;
   retry_of?: string | null;
+  runtime_profile?: string | null;
+  effective_config: Record<string, unknown>;
+  compute_policy_resolution: ComputePolicyResolution;
   enqueued_at: string;
   started_at: string | null;
   finished_at: string | null;
   progress: number;
   summary: string;
-  deletable?: boolean;
-};
-
-export type QueueDeletePreview = {
-  queue_item_ids: string[];
-  items: QueueItem[];
-  active_items: QueueItem[];
-  can_delete: boolean;
-  preserves_results: boolean;
-};
-
-export type QueueBatchDeleteResult = {
-  deleted_ids: string[];
-  cancelled_ids: string[];
-  preserved_result_count: number;
-  items: QueueItem[];
-};
-
-export type QueueStartResult = {
-  started_item_ids: string[];
-  items: QueueItem[];
-  count: number;
 };
 
 export type ResultFile = {
@@ -315,6 +302,76 @@ export type ResultFamily = {
   total_size: number;
   files: ResultFile[];
   metadata?: Record<string, unknown>;
+};
+
+export type NumericalDiagnostics = {
+  schema_version?: number;
+  status?: string;
+  simulation?: {
+    current_time_s?: number;
+    end_time_s?: number;
+    output_count?: number;
+  };
+  backend?: {
+    requested_backend?: string;
+    manager_backend?: string;
+    live_arch?: string;
+    default_fp?: string;
+    cuda_probe_kernel?: string;
+    fallback_active?: boolean;
+    [key: string]: unknown;
+  };
+  time_integration?: {
+    accepted_steps?: number;
+    candidate_steps?: number;
+    rejected_steps?: number;
+    rejection_reasons?: Record<string, number>;
+    dt_min_configured_s?: number;
+    dt_max_configured_s?: number;
+    dt_min_hits?: number;
+    dt?: {
+      accepted_min_s?: number | null;
+      accepted_max_s?: number | null;
+      accepted_mean_s?: number | null;
+      accepted_std_s?: number | null;
+    };
+  };
+  local_conservation?: {
+    tolerance?: number;
+    max_abs_relative_error?: number;
+    accepted_step_violation_count?: number;
+    last_step?: Record<string, unknown>;
+  };
+  global_volume_ledger?: {
+    rainfall_m3?: number;
+    inflow_m3?: number;
+    erosion_m3?: number;
+    failure_source_m3?: number;
+    infiltration_m3?: number;
+    outflow_m3?: number;
+    flow_storage_m3?: number;
+    deposit_storage_m3?: number;
+    source_total_m3?: number;
+    sink_and_storage_total_m3?: number;
+    residual_m3?: number;
+    relative_error?: number;
+    tolerance?: number;
+    passed?: boolean;
+    trigger_inventory_available_m3?: number;
+    drainage_m3?: number;
+    [key: string]: unknown;
+  };
+  nonfinite_counts?: Record<string, number>;
+  classification?: {
+    functional_e2e?: boolean | null;
+    conservation_closure?: boolean | null;
+    strict_code_parity?: boolean | null;
+    discretization_convergence?: string;
+  };
+};
+
+export type ResultMetadata = Record<string, unknown> & {
+  numerical_diagnostics?: NumericalDiagnostics | null;
 };
 
 export type ExportStatus = "queued" | "running" | "completed" | "failed" | "estimating" | "generating" | "ready" | "expired";
@@ -355,8 +412,12 @@ export type DirectoryListing = {
 };
 export type ParameterCatalogEntry = {
   key: string;
+  control_key?: string | null;
+  control_family?: string | null;
+  source_index?: number | null;
   label: string;
   label_zh?: string | null;
+  description_zh?: string | null;
   abbrev?: string | null;
   group?: string | null;
   config_path?: string | null;
@@ -364,9 +425,53 @@ export type ParameterCatalogEntry = {
   runtime_consumer?: string | null;
   activation_condition?: string | null;
   runtime_status: string;
+  status_label_zh?: string | null;
   editable: boolean;
+  frontend_policy?: "editable" | "read_only" | string;
+  value_type?: "boolean" | "integer" | "number_array" | "enum" | string;
+  allowed_values?: unknown[];
+  allowed_value_labels_zh?: Record<string, string> | null;
+  dependencies?: string[];
+  dependency_paths?: string[];
+  affected_output_families?: string[];
+  original_variable?: string | null;
+  source_stage?: string | null;
+  status_reason?: string | null;
 };
-export type ParameterCatalog = { catalog_version: string; editable_statuses: string[]; parameters: ParameterCatalogEntry[]; status_counts: Record<string, number> };
+export type EddaControlRegistrySummary = {
+  registry_version: string;
+  entry_count: number;
+  editable_count: number;
+  restricted_count: number;
+};
+export type RuntimeProfileOption = {
+  name: string;
+  default_backend?: string;
+  label_zh?: string;
+  description_zh?: string;
+  description?: string;
+};
+
+export type ParameterCatalog = {
+  catalog_version: string;
+  editable_statuses: string[];
+  parameters: ParameterCatalogEntry[];
+  status_counts: Record<string, number>;
+  control_registry?: EddaControlRegistrySummary | null;
+  gate_parameter_keys?: string[];
+  runtime_profiles?: {
+    default_profile?: string;
+    user_selectable?: RuntimeProfileOption[];
+  } | null;
+};
+
+export type ComputeGateDefaults = {
+  catalog_version: string;
+  values: Record<string, unknown>;
+  baseline: Record<string, unknown>;
+  effective: Record<string, unknown>;
+  updated_at?: string | null;
+};
 
 export type RainfallPeriod = {
   period_id?: string;
@@ -418,15 +523,115 @@ export type ValidationState = {
   issues?: ValidationIssue[];
 };
 
+export type ComputePolicyDetected = {
+  simulate_shallow_landslide: boolean | null;
+  dfs_failure_source_variant: string | null;
+  topology?: string | null;
+  topology_status?: string | null;
+  evidence: Array<Record<string, unknown>>;
+};
+
+export type ComputePolicyEffective = {
+  mode: "disabled" | "precomputed" | "live" | null;
+  simulate_shallow_landslide: boolean | null;
+  configured_variant?: string | null;
+  active_variant?: string | null;
+};
+
+export type ComputePolicyResolutionCommon = {
+  source: "auto" | "global_override" | "direct_api_compatibility" | string;
+  requested: "auto" | "disabled" | "precomputed" | "live" | string;
+  detected: ComputePolicyDetected;
+  effective: ComputePolicyEffective;
+  numeric_variants: Record<string, { source?: string; value?: unknown }>;
+  settings_snapshot: Record<string, unknown>;
+  warnings: string[];
+  resolution_id: string;
+  resolution_hash: string;
+};
+
+export type ComputePolicyResolution =
+  | (ComputePolicyResolutionCommon & { status: "resolved" })
+  | (ComputePolicyResolutionCommon & {
+      status: "blocked";
+      blocking_issue: { code: string; severity?: string; message: string; details?: Record<string, unknown> };
+    })
+  | (ComputePolicyResolutionCommon & { status: "legacy_unrecorded" });
+
+export const EMPTY_COMPUTE_POLICY_RESOLUTION: ComputePolicyResolution = {
+  status: "blocked",
+  source: "auto",
+  requested: "auto",
+  detected: {
+    simulate_shallow_landslide: null,
+    dfs_failure_source_variant: null,
+    evidence: [],
+  },
+  effective: { mode: null, simulate_shallow_landslide: null, active_variant: null },
+  numeric_variants: {},
+  settings_snapshot: {},
+  warnings: [],
+  blocking_issue: { code: "configuration_refresh_required", message: "正在等待方案计算策略解析。" },
+  resolution_id: "cpr-unresolved",
+  resolution_hash: "unresolved",
+};
+
 export type ScenarioConfiguration = {
   scenario_id: string;
   parameter_template_id?: string | null;
   baseline: Record<string, unknown>;
   overrides: Record<string, unknown>;
+  control_overrides?: Record<string, unknown>;
+  configuration_ownership?: "reference_case" | "global_defaults" | string;
+  case_fingerprint?: string | null;
   effective: Record<string, unknown>;
   bindings: InputBinding[];
   validation: ValidationState;
+  compute_policy_resolution: ComputePolicyResolution;
   version: number;
+};
+
+export type CaseImportPreview = {
+  source_root: string;
+  case_config_file: string;
+  case_name: string;
+  config_sha256: string;
+  case_fingerprint: string;
+  case_summary: {
+    dimensions?: { imax?: number; rows?: number; cols?: number };
+    nzon: number;
+    simul_s: number;
+    tout_s: number;
+    rainfall_period_count: number;
+    rainfall_mode: string;
+    zmax: number;
+    ltstar_raw: number;
+    lbstar: number;
+    active_binding_count: number;
+    missing_reference_count: number;
+  };
+  controls: {
+    run: Record<string, unknown>;
+    output: Record<string, unknown>;
+    extension: Record<string, unknown>;
+    raw_flags: Record<string, unknown>;
+    normalized_values: Record<string, unknown>;
+  };
+  variants: Record<string, string | null>;
+  capabilities: Record<string, unknown>;
+  bindings: LegacyMigrationReference[];
+  sidecars: Record<string, { family: string; exists: boolean; line_count: number; preview: string[]; path_name?: string }>;
+  issues: Array<{ severity: "error" | "warning"; code: string; message: string; binding_key?: string }>;
+  commit_allowed: boolean;
+};
+
+export type CaseImportCommitResult = {
+  project: ProjectInfo;
+  scenario: Scenario;
+  case_fingerprint: string;
+  input_revision_id?: string;
+  asset_count?: number;
+  idempotent?: boolean;
 };
 
 export type ParameterImportPreview = {
@@ -513,6 +718,7 @@ export type CaseConfigInterface = {
     rainfall_mode?: string;
     manning_source?: string;
     flags?: Record<string, unknown>;
+    extension_flags?: Record<string, unknown>;
     recognized_unsupported_fields?: string[];
     audit_notes?: string[];
   };

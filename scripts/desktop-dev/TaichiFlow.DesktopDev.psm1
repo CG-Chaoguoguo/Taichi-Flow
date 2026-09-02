@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $script:RequiredServiceId = "taichi-flow-api"
 $script:RequiredApiContractVersion = 1
-$script:MinimumNodeVersion = "20.19.0"
+$script:MinimumNodeVersion = "22.12.0"
 
 function Resolve-TaichiFlowDesktopMode {
     param([AllowEmptyString()][string]$Mode = "dev")
@@ -39,13 +39,34 @@ function Get-TaichiFlowHash {
 
 function Get-TaichiFlowFileHash {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
 }
 
 function Get-TaichiFlowCheckoutId {
     param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
     $normalized = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd("\").ToLowerInvariant()
     return (Get-TaichiFlowHash $normalized).Substring(0, 16)
+}
+
+function Get-TaichiFlowSourceRevision {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+    $normalizedRoot = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd("\")
+    $head = "unknown"
+    try {
+        $git = Get-Command "git.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $git) {
+            $candidate = (& $git.Source -C $normalizedRoot rev-parse HEAD 2>$null).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) { $head = $candidate }
+        }
+    } catch { }
+    return Get-TaichiFlowHash "$normalizedRoot|$head"
 }
 
 function Add-TaichiFlowPythonCandidate {
@@ -200,24 +221,80 @@ function Find-TaichiFlowFreePort {
     throw "No free loopback port was found in range $PreferredPort-$lastPort."
 }
 
+function Enter-TaichiFlowStartupLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+    $lockName = "Local\TaichiFlowDesktopDev-$((Get-TaichiFlowCheckoutId -RepositoryRoot $RepositoryRoot))"
+    $mutex = [System.Threading.Mutex]::new($false, $lockName)
+    try {
+        $acquired = $false
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw "Another Taichi-Flow desktop launcher is starting this checkout. Wait for it to finish or inspect .runtime\desktop-dev."
+        }
+        return $mutex
+    } catch {
+        $mutex.Dispose()
+        throw
+    }
+}
+
+function Exit-TaichiFlowStartupLock {
+    param([AllowNull()]$Mutex)
+    if ($null -eq $Mutex) { return }
+    try { $Mutex.ReleaseMutex() } catch { }
+    try { $Mutex.Dispose() } catch { }
+}
+
 function Get-TaichiFlowProcessIdentity {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
-    if ($null -eq $process) { return $null }
-    $creation = $process.CreationDate
-    if ($creation -is [datetime]) {
-        $creationUtc = $creation.ToUniversalTime().ToString("o")
-    } else {
-        $creationUtc = [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$creation).ToUniversalTime().ToString("o")
+    if ($null -ne $process) {
+        $creation = $process.CreationDate
+        if ($creation -is [datetime]) {
+            $creationUtc = $creation.ToUniversalTime().ToString("o")
+        } else {
+            $creationUtc = [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$creation).ToUniversalTime().ToString("o")
+        }
+        $commandLine = [string]$process.CommandLine
+        return [pscustomobject]@{
+            pid = [int]$process.ProcessId
+            parent_pid = [int]$process.ParentProcessId
+            creation_time_utc = $creationUtc
+            command_line = $commandLine
+            command_fingerprint = Get-TaichiFlowHash $commandLine
+            executable_path = [string]$process.ExecutablePath
+            identity_source = "wmi"
+        }
     }
-    $commandLine = [string]$process.CommandLine
-    return [pscustomobject]@{
-        pid = [int]$process.ProcessId
-        parent_pid = [int]$process.ParentProcessId
-        creation_time_utc = $creationUtc
-        command_line = $commandLine
-        command_fingerprint = Get-TaichiFlowHash $commandLine
-        executable_path = [string]$process.ExecutablePath
+
+    # Some locked-down Windows installations expose no Win32_Process WMI data.
+    # Keep identity checks fail-safe by falling back to Process.StartTime and
+    # the executable path; never fall back to PID alone.
+    $fallback = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $fallback) { return $null }
+    try {
+        $creationUtc = $fallback.StartTime.ToUniversalTime().ToString("o")
+        $executablePath = [string]$fallback.Path
+        if ([string]::IsNullOrWhiteSpace($executablePath)) { $executablePath = [string]$fallback.ProcessName }
+        $commandLine = $executablePath
+        return [pscustomobject]@{
+            pid = [int]$fallback.Id
+            parent_pid = 0
+            creation_time_utc = $creationUtc
+            command_line = $commandLine
+            command_fingerprint = Get-TaichiFlowHash $commandLine
+            executable_path = $executablePath
+            identity_source = "process-api"
+        }
+    } catch {
+        return $null
     }
 }
 
@@ -226,10 +303,41 @@ function Test-TaichiFlowOwnedProcessIdentity {
         [Parameter(Mandatory = $true)]$Record,
         $Actual
     )
-    if ($null -eq $Actual -or -not [bool]$Record.owned) { return $false }
-    return ([int]$Record.pid -eq [int]$Actual.pid) -and
-        ([string]$Record.creation_time_utc -eq [string]$Actual.creation_time_utc) -and
-        ([string]$Record.command_fingerprint -eq [string]$Actual.command_fingerprint)
+    if ($null -eq $Actual -or $null -eq $Record -or
+        $null -eq $Record.PSObject.Properties["owned"] -or
+        -not [bool]$Record.owned) { return $false }
+    return Test-TaichiFlowProcessIdentityMatch -Record $Record -Actual $Actual
+}
+
+function Test-TaichiFlowProcessIdentityMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        $Actual
+    )
+    if ($null -eq $Actual -or $null -eq $Record) { return $false }
+    foreach ($property in @("pid", "creation_time_utc", "command_fingerprint", "executable_path")) {
+        if ($null -eq $Record.PSObject.Properties[$property] -or $null -eq $Actual.PSObject.Properties[$property]) { return $false }
+    }
+    $baseMatches = ([int]$Record.pid -eq [int]$Actual.pid) -and
+        ([string]$Record.creation_time_utc -eq [string]$Actual.creation_time_utc)
+    if (-not $baseMatches) { return $false }
+    if ([string]$Record.command_fingerprint -eq [string]$Actual.command_fingerprint -and
+        [string]$Record.executable_path -eq [string]$Actual.executable_path) { return $true }
+
+    # A non-elevated launcher can only see the Process API while an elevated
+    # stop can see WMI (or the reverse). In that one direction, command-line
+    # access is unavailable by definition; PID + creation time + executable
+    # basename remains the strongest safe cross-privilege identity check.
+    $recordSource = if ($null -ne $Record.PSObject.Properties["identity_source"]) { [string]$Record.identity_source } else { "unknown" }
+    $actualSource = if ($null -ne $Actual.PSObject.Properties["identity_source"]) { [string]$Actual.identity_source } else { "unknown" }
+    $crossPrivilegePair = ($recordSource -in @("process-api", "unknown") -and $actualSource -in @("wmi", "process-api")) -or
+        ($recordSource -eq "wmi" -and $actualSource -eq "process-api")
+    if ($crossPrivilegePair) {
+        $recordName = [System.IO.Path]::GetFileNameWithoutExtension([string]$Record.executable_path).ToLowerInvariant()
+        $actualName = [System.IO.Path]::GetFileNameWithoutExtension([string]$Actual.executable_path).ToLowerInvariant()
+        return -not [string]::IsNullOrWhiteSpace($recordName) -and $recordName -eq $actualName
+    }
+    return $false
 }
 
 function Get-TaichiFlowSessionDisposition {
@@ -248,44 +356,145 @@ function Get-TaichiFlowSessionDisposition {
 function Get-TaichiFlowPortOwner {
     param([Parameter(Mandatory = $true)][int]$Port)
     $connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $connection) { return $null }
-    return Get-TaichiFlowProcessIdentity -ProcessId ([int]$connection.OwningProcess)
+    if ($null -ne $connection) { return Get-TaichiFlowProcessIdentity -ProcessId ([int]$connection.OwningProcess) }
+
+    # Get-NetTCPConnection can be unavailable to non-admin or constrained
+    # PowerShell hosts. netstat still gives us the listener PID without
+    # weakening the subsequent process-identity check.
+    try {
+        $match = & netstat.exe -ano -p tcp 2>$null | Select-String -Pattern ("^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$") | Select-Object -First 1
+        if ($null -ne $match) {
+            $listenerPid = [int]$match.Matches[0].Groups[1].Value
+            return Get-TaichiFlowProcessIdentity -ProcessId $listenerPid
+        }
+    } catch { }
+    return $null
+}
+
+function Test-TaichiFlowCorsOrigin {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Origin
+    )
+    if ([string]::IsNullOrWhiteSpace($Origin)) { return $true }
+    for ($attempt = 0; $attempt -lt 3; $attempt += 1) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/health" -Method Options -Headers @{
+                Origin = $Origin
+                "Access-Control-Request-Method" = "GET"
+            } -TimeoutSec 2
+            $allowOrigin = [string]$response.Headers["Access-Control-Allow-Origin"]
+            if ($allowOrigin -eq $Origin) { return $true }
+        } catch { }
+        Start-Sleep -Milliseconds 150
+    }
+    return $false
 }
 
 function Test-TaichiFlowApiService {
     param(
         [Parameter(Mandatory = $true)][int]$Port,
-        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [string]$RendererOrigin = "",
+        [string]$ExpectedExecutablePath = ""
     )
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
+        $response = $null
+        for ($attempt = 0; $attempt -lt 3 -and $null -eq $response; $attempt += 1) {
+            try { $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 150 }
+        }
+        if ($null -eq $response) { throw "API health request did not complete." }
         $health = $response.Content | ConvertFrom-Json
         $owner = Get-TaichiFlowPortOwner -Port $Port
         $ownerCommand = if ($null -ne $owner) { ([string]$owner.command_line).ToLowerInvariant() } else { "" }
+        $rootToken = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd("\").ToLowerInvariant()
         $sourceMatches = $null -ne $owner -and $ownerCommand.Contains("uvicorn") -and $ownerCommand.Contains("api.app:app")
+        if (-not $sourceMatches -and $null -ne $owner -and [string]$owner.identity_source -eq "process-api") {
+            $sourceMatches = [System.IO.Path]::GetFileNameWithoutExtension([string]$owner.executable_path).ToLowerInvariant() -eq "python"
+        }
+        if (-not $sourceMatches -and $null -ne $owner -and -not [string]::IsNullOrWhiteSpace($ExpectedExecutablePath)) {
+            $expectedPath = [System.IO.Path]::GetFullPath($ExpectedExecutablePath)
+            $expectedName = [System.IO.Path]::GetFileNameWithoutExtension($expectedPath).ToLowerInvariant()
+            $actualPath = [string]$owner.executable_path
+            $actualName = [System.IO.Path]::GetFileNameWithoutExtension($actualPath).ToLowerInvariant()
+            $sourceMatches = $actualPath -eq $expectedPath -or
+                ($actualName -eq $expectedName -and [string]$owner.command_line -eq $actualPath)
+        }
         $contractMatches = [string]$health.service_id -eq $script:RequiredServiceId -and
             [int]$health.api_contract_version -eq $script:RequiredApiContractVersion -and
             [string]$health.checkout_id -eq (Get-TaichiFlowCheckoutId -RepositoryRoot $RepositoryRoot)
-        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contractMatches); Health = $health; Owner = $owner }
+        $corsMatches = Test-TaichiFlowCorsOrigin -Port $Port -Origin $RendererOrigin
+        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contractMatches -and $corsMatches); Health = $health; Owner = $owner; CorsMatches = $corsMatches }
     } catch {
-        return [pscustomobject]@{ Reusable = $false; Health = $null; Owner = (Get-TaichiFlowPortOwner -Port $Port); Error = $_.Exception.Message }
+        return [pscustomobject]@{ Reusable = $false; Health = $null; Owner = (Get-TaichiFlowPortOwner -Port $Port); CorsMatches = $false; Error = $_.Exception.Message }
     }
 }
 
 function Test-TaichiFlowViteService {
     param(
         [Parameter(Mandatory = $true)][int]$Port,
-        [Parameter(Mandatory = $true)][string]$FrontendRoot
+        [Parameter(Mandatory = $true)][string]$FrontendRoot,
+        [string]$ExpectedApiUrl = "",
+        [string]$ExpectedExecutablePath = ""
     )
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 2
+        $response = $null
+        for ($attempt = 0; $attempt -lt 3 -and $null -eq $response; $attempt += 1) {
+            try { $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 150 }
+        }
+        if ($null -eq $response) { throw "Vite root request did not complete." }
         $owner = Get-TaichiFlowPortOwner -Port $Port
         $rootToken = [System.IO.Path]::GetFullPath($FrontendRoot).TrimEnd("\").ToLowerInvariant()
         $sourceMatches = $null -ne $owner -and ([string]$owner.command_line).ToLowerInvariant().Contains($rootToken) -and ([string]$owner.command_line).ToLowerInvariant().Contains("vite")
+        if (-not $sourceMatches -and $null -ne $owner -and [string]$owner.identity_source -eq "process-api") {
+            $sourceMatches = [System.IO.Path]::GetFileNameWithoutExtension([string]$owner.executable_path).ToLowerInvariant() -eq "node"
+        }
+        if (-not $sourceMatches -and $null -ne $owner -and -not [string]::IsNullOrWhiteSpace($ExpectedExecutablePath)) {
+            $expectedPath = [System.IO.Path]::GetFullPath($ExpectedExecutablePath)
+            $expectedName = [System.IO.Path]::GetFileNameWithoutExtension($expectedPath).ToLowerInvariant()
+            $actualPath = [string]$owner.executable_path
+            $actualName = [System.IO.Path]::GetFileNameWithoutExtension($actualPath).ToLowerInvariant()
+            $sourceMatches = $actualPath -eq $expectedPath -or
+                ($actualName -eq $expectedName -and [string]$owner.command_line -eq $actualPath)
+        }
         $contentMatches = $response.StatusCode -eq 200 -and ([string]$response.Content).Contains("/@vite/client")
-        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contentMatches); Owner = $owner }
+        $proxyMatches = $false
+        $proxyHealth = $null
+        for ($attempt = 0; $attempt -lt 3 -and $null -eq $proxyHealth; $attempt += 1) {
+            try { $proxyHealth = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 150 }
+        }
+        if ($null -eq $proxyHealth) { throw "Vite API proxy request did not complete." }
+        $proxyPayload = $proxyHealth.Content | ConvertFrom-Json
+        $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $FrontendRoot "..\.."))
+        $proxyMatches = [string]$proxyPayload.service_id -eq $script:RequiredServiceId -and
+            [int]$proxyPayload.api_contract_version -eq $script:RequiredApiContractVersion -and
+            [string]$proxyPayload.checkout_id -eq (Get-TaichiFlowCheckoutId -RepositoryRoot $repositoryRoot)
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedApiUrl)) {
+            $directHealth = $null
+            for ($attempt = 0; $attempt -lt 3 -and $null -eq $directHealth; $attempt += 1) {
+                try { $directHealth = Invoke-WebRequest -UseBasicParsing -Uri "${ExpectedApiUrl}/api/health" -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 150 }
+            }
+            if ($null -eq $directHealth) { throw "Selected API health request did not complete." }
+            $directPayload = $directHealth.Content | ConvertFrom-Json
+            $proxyMatches = $proxyMatches -and [string]$proxyPayload.service_id -eq [string]$directPayload.service_id -and
+                [int]$proxyPayload.api_contract_version -eq [int]$directPayload.api_contract_version -and
+                [string]$proxyPayload.checkout_id -eq [string]$directPayload.checkout_id
+            $proxyInstanceId = if ($null -ne $proxyPayload.PSObject.Properties["api_instance_id"]) { [string]$proxyPayload.api_instance_id } else { "" }
+            $directInstanceId = if ($null -ne $directPayload.PSObject.Properties["api_instance_id"]) { [string]$directPayload.api_instance_id } else { "" }
+            if (-not [string]::IsNullOrWhiteSpace($proxyInstanceId) -or -not [string]::IsNullOrWhiteSpace($directInstanceId)) {
+                $proxyMatches = $proxyMatches -and -not [string]::IsNullOrWhiteSpace($proxyInstanceId) -and
+                    $proxyInstanceId -eq $directInstanceId
+            } else {
+                # Older API processes do not publish an instance marker. Keep
+                # the safe default-port reuse path, but do not claim an exact
+                # proxy match for an unmarked dynamically selected API port.
+                $expectedUri = [Uri]$ExpectedApiUrl
+                if ($expectedUri.Port -ne 8000) { $proxyMatches = $false }
+            }
+        }
+        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contentMatches -and $proxyMatches); Owner = $owner; ProxyMatches = $proxyMatches }
     } catch {
-        return [pscustomobject]@{ Reusable = $false; Owner = (Get-TaichiFlowPortOwner -Port $Port); Error = $_.Exception.Message }
+        return [pscustomobject]@{ Reusable = $false; Owner = (Get-TaichiFlowPortOwner -Port $Port); ProxyMatches = $false; Error = $_.Exception.Message }
     }
 }
 
@@ -345,6 +554,7 @@ function New-TaichiFlowProcessRecord {
         creation_time_utc = [string]$Identity.creation_time_utc
         command_fingerprint = [string]$Identity.command_fingerprint
         executable_path = [string]$Identity.executable_path
+        identity_source = if ($null -ne $Identity.PSObject.Properties["identity_source"]) { [string]$Identity.identity_source } else { "unknown" }
         owned = $Owned
         stdout = $StandardOutputPath
         stderr = $StandardErrorPath
@@ -460,15 +670,29 @@ function Test-TaichiFlowNpmDependencies {
 function Resolve-TaichiFlowElectronExitCode {
     param(
         [AllowNull()]$ProcessExitCode,
-        [AllowNull()]$ExitReport
+        [AllowNull()]$ExitReport,
+        [string]$ExpectedMode = ""
     )
-    if ($null -ne $ExitReport) {
-        if ([bool]$ExitReport.success) { return 0 }
-        if ($null -ne $ExitReport.PSObject.Properties["exitCode"]) { return [int]$ExitReport.exitCode }
+    if ($null -eq $ExitReport) {
         return 1
     }
-    if ($null -ne $ProcessExitCode -and [string]$ProcessExitCode -ne "") { return [int]$ProcessExitCode }
-    return -1
+    $hasSuccess = $null -ne $ExitReport.PSObject.Properties["success"]
+    $hasExitCode = $null -ne $ExitReport.PSObject.Properties["exitCode"]
+    $hasMode = $null -ne $ExitReport.PSObject.Properties["mode"]
+    if (-not $hasSuccess -or -not $hasExitCode -or -not [bool]$ExitReport.success -or [int]$ExitReport.exitCode -ne 0) {
+        if ($hasExitCode) { return [Math]::Max(1, [int]$ExitReport.exitCode) }
+        return 1
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedMode) -and (-not $hasMode -or [string]$ExitReport.mode -ne $ExpectedMode)) {
+        return 1
+    }
+    if ($null -ne $ExitReport.PSObject.Properties["runtimeErrors"] -and @($ExitReport.runtimeErrors).Count -gt 0) {
+        return 1
+    }
+    if ($null -ne $ProcessExitCode -and [string]$ProcessExitCode -ne "" -and [int]$ProcessExitCode -ne 0) {
+        return [Math]::Max(1, [int]$ProcessExitCode)
+    }
+    return 0
 }
 
 Export-ModuleMember -Function @(
@@ -477,16 +701,21 @@ Export-ModuleMember -Function @(
     "Get-TaichiFlowHash",
     "Get-TaichiFlowFileHash",
     "Get-TaichiFlowCheckoutId",
+    "Get-TaichiFlowSourceRevision",
     "Get-TaichiFlowPythonCandidate",
     "Invoke-TaichiFlowPythonProbe",
     "Select-TaichiFlowPythonProbe",
     "Resolve-TaichiFlowPython",
     "Test-TaichiFlowPortFree",
     "Find-TaichiFlowFreePort",
+    "Enter-TaichiFlowStartupLock",
+    "Exit-TaichiFlowStartupLock",
     "Get-TaichiFlowProcessIdentity",
+    "Test-TaichiFlowProcessIdentityMatch",
     "Test-TaichiFlowOwnedProcessIdentity",
     "Get-TaichiFlowSessionDisposition",
     "Get-TaichiFlowPortOwner",
+    "Test-TaichiFlowCorsOrigin",
     "Test-TaichiFlowApiService",
     "Test-TaichiFlowViteService",
     "Start-TaichiFlowLoggedProcess",

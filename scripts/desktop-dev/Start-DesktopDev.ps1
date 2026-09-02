@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [ValidateSet("dev", "preview")][string]$Mode = "dev",
+    [ValidateSet("electron", "browser", "services")][string]$Presentation = "electron",
+    [string]$ApiHost = "127.0.0.1",
     [ValidateRange(1, 65535)][int]$ApiPort = 8000,
+    [string]$FrontendHost = "127.0.0.1",
     [ValidateRange(1, 65535)][int]$FrontendPort = 3000,
     [ValidateRange(10, 300)][int]$TimeoutSeconds = 90,
     [switch]$OpenDevTools,
@@ -18,6 +21,14 @@ $modulePath = Join-Path $PSScriptRoot "TaichiFlow.DesktopDev.psm1"
 Import-Module $modulePath -Force
 
 $modeName = Resolve-TaichiFlowDesktopMode $Mode
+$presentationName = $Presentation.Trim().ToLowerInvariant()
+if ($presentationName -ne "electron" -and $modeName -ne "dev") {
+    throw "The '$presentationName' presentation is available only with -Mode dev. Preview mode requires the Electron presentation."
+}
+if ($ApiHost -notin @("127.0.0.1", "localhost", "::1") -or $FrontendHost -notin @("127.0.0.1", "localhost", "::1")) {
+    throw "The managed Taichi-Flow launcher only permits loopback -ApiHost and -FrontendHost values."
+}
+$bindHost = "127.0.0.1"
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $frontendRoot = Join-Path $repositoryRoot "frontend\taichi-flow"
 $runtimeRoot = Join-Path $repositoryRoot ".runtime\desktop-dev"
@@ -27,9 +38,12 @@ $statePath = Join-Path $sessionRoot "state.json"
 $activeStatePath = Join-Path $runtimeRoot "active.json"
 $launcherLogPath = Join-Path $sessionRoot "launcher.log"
 $checkoutId = Get-TaichiFlowCheckoutId -RepositoryRoot $repositoryRoot
+$sourceRevision = Get-TaichiFlowSourceRevision -RepositoryRoot $repositoryRoot
 $script:SessionState = $null
 $script:PublishActiveState = $false
-$existingActiveState = Read-TaichiFlowSessionState -StatePath $activeStatePath
+$startupMutex = $null
+$existingActiveState = $null
+$persistServices = $false
 
 New-Item -ItemType Directory -Path $sessionRoot -Force | Out-Null
 
@@ -94,9 +108,16 @@ function Invoke-ExistingDesktopFocus {
     $actual = Get-TaichiFlowProcessIdentity -ProcessId ([int]$desktopRecord.pid)
     if (-not (Test-TaichiFlowOwnedProcessIdentity -Record $desktopRecord -Actual $actual)) { return $false }
     if ([string]$ExistingState.repository_root -ne $repositoryRoot) { return $false }
+    if ($null -ne $ExistingState.PSObject.Properties["source_revision"] -and [string]$ExistingState.source_revision -ne $sourceRevision) { return $false }
 
     $electronExecutable = Join-Path $frontendRoot "node_modules\electron\dist\electron.exe"
     if (-not (Test-Path -LiteralPath $electronExecutable -PathType Leaf)) { return $false }
+    $existingUserDataDir = if ($null -ne $ExistingState.PSObject.Properties["electron_user_data_dir"] -and -not [string]::IsNullOrWhiteSpace([string]$ExistingState.electron_user_data_dir)) {
+        [string]$ExistingState.electron_user_data_dir
+    } else {
+        Join-Path $runtimeRoot "electron-user-data"
+    }
+    New-Item -ItemType Directory -Path $existingUserDataDir -Force | Out-Null
     $environment = @{
         TAICHI_FLOW_DESKTOP_MODE = [string]$ExistingState.mode
         TAICHI_FLOW_API_URL = [string]$ExistingState.api_url
@@ -110,7 +131,7 @@ function Invoke-ExistingDesktopFocus {
             [Environment]::SetEnvironmentVariable([string]$key, [string]$environment[$key], "Process")
         }
         Write-LauncherLog "An active desktop session was found; forwarding a second-instance focus request."
-        $focusProcess = Start-Process -FilePath $electronExecutable -ArgumentList @("desktop\main.cjs") -WorkingDirectory $frontendRoot -PassThru
+        $focusProcess = Start-Process -FilePath $electronExecutable -ArgumentList @("--disable-gpu", "--disable-gpu-compositing", "--user-data-dir=$existingUserDataDir", "desktop\main.cjs") -WorkingDirectory $frontendRoot -PassThru
         $focusAcknowledged = $focusProcess.WaitForExit(10000)
         if (-not $focusAcknowledged) {
             Stop-Process -Id $focusProcess.Id -Force -ErrorAction SilentlyContinue
@@ -124,6 +145,38 @@ function Invoke-ExistingDesktopFocus {
     return $true
 }
 
+function Invoke-ExistingServiceSession {
+    param([Parameter(Mandatory = $true)]$ExistingState)
+    if ([string]$ExistingState.repository_root -ne $repositoryRoot -or
+        [string]$ExistingState.mode -ne "dev" -or
+        ($null -ne $ExistingState.PSObject.Properties["source_revision"] -and [string]$ExistingState.source_revision -ne $sourceRevision)) {
+        return $false
+    }
+    if ($null -eq $ExistingState.PSObject.Properties["presentation"] -or
+        [string]$ExistingState.presentation -notin @("browser", "services")) {
+        return $false
+    }
+    $serviceRecords = @($ExistingState.processes | Where-Object { $_.name -in @("api", "vite") })
+    if ($serviceRecords.Count -ne 2) { return $false }
+    foreach ($record in $serviceRecords) {
+        $actual = Get-TaichiFlowProcessIdentity -ProcessId ([int]$record.pid)
+        if (-not (Test-TaichiFlowProcessIdentityMatch -Record $record -Actual $actual)) { return $false }
+    }
+    $serviceUrl = [string]$ExistingState.desktop_url
+    if ([string]::IsNullOrWhiteSpace($serviceUrl)) { return $false }
+    if ($presentationName -eq "browser") {
+        Write-LauncherLog "A live browser/services session was found; opening its verified renderer URL."
+        Start-Process $serviceUrl | Out-Null
+    } else {
+        Write-LauncherLog "A live browser/services session was found; reusing its verified services without opening a UI."
+    }
+    $script:SessionState.api_url = [string]$ExistingState.api_url
+    $script:SessionState.desktop_url = $serviceUrl
+    $script:SessionState.status = "focused-existing-service-session"
+    Write-TaichiFlowSessionState -State $script:SessionState -StatePath $statePath
+    return $true
+}
+
 function Remove-ActiveStateIfOwned {
     if (-not (Test-Path -LiteralPath $activeStatePath -PathType Leaf)) { return }
     $active = Read-TaichiFlowSessionState -StatePath $activeStatePath
@@ -134,6 +187,8 @@ function Remove-ActiveStateIfOwned {
 
 $exitCode = 1
 try {
+    $startupMutex = Enter-TaichiFlowStartupLock -RepositoryRoot $repositoryRoot -TimeoutSeconds ([Math]::Min(30, $TimeoutSeconds))
+    $existingActiveState = Read-TaichiFlowSessionState -StatePath $activeStatePath
     Write-LauncherLog "Taichi-Flow desktop launcher session=$sessionId mode=$modeName repository=$repositoryRoot"
     foreach ($requiredPath in @(
         (Join-Path $repositoryRoot "api\app.py"),
@@ -150,13 +205,17 @@ try {
         session_id = $sessionId
         repository_root = $repositoryRoot
         checkout_id = $checkoutId
+        source_revision = $sourceRevision
         created_at = [DateTime]::UtcNow.ToString("o")
         updated_at = [DateTime]::UtcNow.ToString("o")
         launcher_pid = $PID
         mode = $modeName
+        presentation = $presentationName
         status = "starting"
         api_url = ""
+        api_instance_id = ""
         desktop_url = ""
+        electron_user_data_dir = (Join-Path $runtimeRoot "electron-user-data")
         state_path = $statePath
         launcher_log = $launcherLogPath
         processes = @()
@@ -165,7 +224,11 @@ try {
     Write-TaichiFlowSessionState -State $script:SessionState -StatePath $statePath
 
     if ($null -ne $existingActiveState -and [string]$existingActiveState.session_id -ne $sessionId) {
-        if (Invoke-ExistingDesktopFocus -ExistingState $existingActiveState) {
+        if ($presentationName -ne "electron" -and (Invoke-ExistingServiceSession -ExistingState $existingActiveState)) {
+            $exitCode = 0
+            return
+        }
+        if ($presentationName -eq "electron" -and (Invoke-ExistingDesktopFocus -ExistingState $existingActiveState)) {
             $script:SessionState.status = "focused-existing-session"
             Write-TaichiFlowSessionState -State $script:SessionState -StatePath $statePath
             $exitCode = 0
@@ -180,7 +243,7 @@ try {
     $nodeCommand = Get-Command "node.exe" -ErrorAction Stop | Select-Object -First 1
     $nodeVersion = (& $nodeCommand.Source -p "process.versions.node").Trim()
     if (-not (Test-MinimumNodeVersion -ActualVersion $nodeVersion)) {
-        throw "Node.js $nodeVersion is unsupported. Install Node.js 20.19 or newer."
+        throw "Node.js $nodeVersion is unsupported. Install Node.js 22.12 or newer (Electron 43.2.0 requirement)."
     }
     Write-LauncherLog "Node.js $nodeVersion passed the minimum-version check."
 
@@ -201,6 +264,9 @@ try {
     if ($modeName -eq "dev") {
         if (-not (Test-TaichiFlowPortFree -Port $FrontendPort)) {
             $viteSelection = Test-TaichiFlowViteService -Port $FrontendPort -FrontendRoot $frontendRoot
+            if ($null -ne $viteSelection -and -not $viteSelection.Reusable) {
+                Write-LauncherLog "Vite reuse rejected: source=$([bool]($null -ne $viteSelection.Owner)) proxy=$([bool]$viteSelection.ProxyMatches) error=$([string]$viteSelection.Error)"
+            }
         }
         if ($null -eq $viteSelection -or -not $viteSelection.Reusable) {
             $selectedFrontendPort = Find-TaichiFlowFreePort -PreferredPort $FrontendPort
@@ -208,12 +274,19 @@ try {
     }
 
     $apiSelection = $null
+    $rendererOrigin = if ($modeName -eq "preview") { "app://taichi-flow" } else { "http://$bindHost`:$selectedFrontendPort" }
     if (-not (Test-TaichiFlowPortFree -Port $ApiPort)) {
-        $apiSelection = Test-TaichiFlowApiService -Port $ApiPort -RepositoryRoot $repositoryRoot
+        $apiSelection = Test-TaichiFlowApiService -Port $ApiPort -RepositoryRoot $repositoryRoot -RendererOrigin $rendererOrigin
+        if ($null -ne $apiSelection -and -not $apiSelection.Reusable) {
+            Write-LauncherLog "API reuse rejected: source=$([bool]($null -ne $apiSelection.Owner)) cors=$([bool]$apiSelection.CorsMatches) error=$([string]$apiSelection.Error)"
+        }
     }
     $apiProcess = $null
     if ($null -ne $apiSelection -and $apiSelection.Reusable) {
         $selectedApiPort = $ApiPort
+        $apiInstanceId = if ($null -ne $apiSelection.Health -and $null -ne $apiSelection.Health.PSObject.Properties["api_instance_id"]) {
+            [string]$apiSelection.Health.api_instance_id
+        } else { "" }
         Add-LauncherProcessRecord (New-TaichiFlowProcessRecord -Name "api" -Identity $apiSelection.Owner -Owned $false)
         Write-LauncherLog "Reusing verified Taichi-Flow API service on port $selectedApiPort."
     } else {
@@ -223,33 +296,43 @@ try {
         }
         $pythonProbe = Resolve-TaichiFlowPython -RepositoryRoot $repositoryRoot
         Write-LauncherLog "Python $($pythonProbe.Version) selected from $($pythonProbe.Candidate.Source): $($pythonProbe.Candidate.FilePath)"
+        $apiInstanceId = Get-TaichiFlowHash "$checkoutId|$sourceRevision|$selectedApiPort"
         $apiStdout = Join-Path $sessionRoot "api.stdout.log"
         $apiStderr = Join-Path $sessionRoot "api.stderr.log"
         $apiArguments = @($pythonProbe.Candidate.PrefixArguments) + @(
             "-m", "uvicorn", "api.app:app", "--app-dir", $repositoryRoot,
-            "--host", "127.0.0.1", "--port", [string]$selectedApiPort, "--log-level", "info"
+            "--host", $bindHost, "--port", [string]$selectedApiPort, "--log-level", "info"
         )
         $apiEnvironment = @{
-            TAICHI_FLOW_ALLOWED_ORIGINS = "app://taichi-flow,http://127.0.0.1:$selectedFrontendPort"
+            TAICHI_FLOW_ALLOWED_ORIGINS = "app://taichi-flow,http://$bindHost`:$selectedFrontendPort"
+            TAICHI_FLOW_API_INSTANCE_ID = $apiInstanceId
             # Force UTF-8 mode so Chinese scenario/project names survive SQLite and JSON round-trips on Windows.
             PYTHONUTF8 = "1"
         }
         $apiProcess = Start-TaichiFlowLoggedProcess -Name "api" -FilePath $pythonProbe.Candidate.FilePath -ArgumentList $apiArguments -WorkingDirectory $repositoryRoot -StandardOutputPath $apiStdout -StandardErrorPath $apiStderr -Environment $apiEnvironment
         Add-LauncherProcessRecord (New-TaichiFlowProcessRecord -Name "api" -Identity $apiProcess.Identity -Owned $true -StandardOutputPath $apiStdout -StandardErrorPath $apiStderr)
-        Wait-TaichiFlowHttpReady -Url "http://127.0.0.1:$selectedApiPort/api/health" -TimeoutSeconds $TimeoutSeconds -Process $apiProcess.Process -Validator {
+        Wait-TaichiFlowHttpReady -Url "http://$bindHost`:$selectedApiPort/api/health" -TimeoutSeconds $TimeoutSeconds -Process $apiProcess.Process -Validator {
             param($Response)
             try {
                 $health = $Response.Content | ConvertFrom-Json
                 return [string]$health.service_id -eq "taichi-flow-api" -and [int]$health.api_contract_version -eq 1 -and [string]$health.checkout_id -eq $checkoutId
             } catch { return $false }
         }
-        $apiSelection = Test-TaichiFlowApiService -Port $selectedApiPort -RepositoryRoot $repositoryRoot
+        $apiSelection = Test-TaichiFlowApiService -Port $selectedApiPort -RepositoryRoot $repositoryRoot -RendererOrigin $rendererOrigin -ExpectedExecutablePath $pythonProbe.Candidate.FilePath
         if (-not $apiSelection.Reusable) { throw "Started API did not pass source, checkout, and contract verification." }
         Write-LauncherLog "Owned API service is healthy on port $selectedApiPort."
     }
-    $apiUrl = "http://127.0.0.1:$selectedApiPort"
+    $apiUrl = "http://$bindHost`:$selectedApiPort"
     $script:SessionState.api_url = $apiUrl
+    $script:SessionState.api_instance_id = $apiInstanceId
     Save-LauncherState
+
+    if ($modeName -eq "dev" -and $null -ne $viteSelection -and $viteSelection.Reusable) {
+        $viteProxyCheck = Test-TaichiFlowViteService -Port $selectedFrontendPort -FrontendRoot $frontendRoot -ExpectedApiUrl $apiUrl
+        if (-not $viteProxyCheck.Reusable) {
+            throw "The reusable Vite service does not proxy to the selected API. Choose a free -FrontendPort or stop the conflicting Vite process."
+        }
+    }
 
     $desktopUrl = ""
     if ($modeName -eq "dev") {
@@ -264,17 +347,17 @@ try {
             $viteScript = Join-Path $frontendRoot "node_modules\vite\bin\vite.js"
             $viteStdout = Join-Path $sessionRoot "vite.stdout.log"
             $viteStderr = Join-Path $sessionRoot "vite.stderr.log"
-            $viteProcess = Start-TaichiFlowLoggedProcess -Name "vite" -FilePath $nodeCommand.Source -ArgumentList @($viteScript, "--host", "127.0.0.1", "--port", [string]$selectedFrontendPort, "--strictPort") -WorkingDirectory $frontendRoot -StandardOutputPath $viteStdout -StandardErrorPath $viteStderr -Environment @{ TAICHI_FLOW_API_URL = $apiUrl }
+            $viteProcess = Start-TaichiFlowLoggedProcess -Name "vite" -FilePath $nodeCommand.Source -ArgumentList @($viteScript, "--host", $bindHost, "--port", [string]$selectedFrontendPort, "--strictPort") -WorkingDirectory $frontendRoot -StandardOutputPath $viteStdout -StandardErrorPath $viteStderr -Environment @{ TAICHI_FLOW_API_URL = $apiUrl }
             Add-LauncherProcessRecord (New-TaichiFlowProcessRecord -Name "vite" -Identity $viteProcess.Identity -Owned $true -StandardOutputPath $viteStdout -StandardErrorPath $viteStderr)
-            Wait-TaichiFlowHttpReady -Url "http://127.0.0.1:$selectedFrontendPort/" -TimeoutSeconds $TimeoutSeconds -Process $viteProcess.Process -Validator {
+            Wait-TaichiFlowHttpReady -Url "http://$bindHost`:$selectedFrontendPort/" -TimeoutSeconds $TimeoutSeconds -Process $viteProcess.Process -Validator {
                 param($Response)
                 return $Response.StatusCode -eq 200 -and ([string]$Response.Content).Contains("/@vite/client")
             }
-            $viteSelection = Test-TaichiFlowViteService -Port $selectedFrontendPort -FrontendRoot $frontendRoot
+            $viteSelection = Test-TaichiFlowViteService -Port $selectedFrontendPort -FrontendRoot $frontendRoot -ExpectedApiUrl $apiUrl -ExpectedExecutablePath $nodeCommand.Source
             if (-not $viteSelection.Reusable) { throw "Started Vite service did not pass process-source verification." }
             Write-LauncherLog "Owned Vite service is ready on port $selectedFrontendPort."
         }
-        $desktopUrl = "http://127.0.0.1:$selectedFrontendPort"
+        $desktopUrl = "http://$bindHost`:$selectedFrontendPort"
     } else {
         Invoke-LauncherNpmStep -Name "npm-build" -Arguments @("run", "build")
         Write-LauncherLog "Preview mode will load the compiled dist through app://taichi-flow."
@@ -282,10 +365,28 @@ try {
     $script:SessionState.desktop_url = $desktopUrl
     Save-LauncherState
 
+    if ($presentationName -ne "electron") {
+        if ($presentationName -eq "browser") {
+            Write-LauncherLog "Opening the explicitly requested browser presentation at $desktopUrl."
+            Start-Process $desktopUrl | Out-Null
+        } else {
+            Write-LauncherLog "Services-only presentation selected; no UI was opened. Renderer URL: $desktopUrl"
+        }
+        $persistServices = $true
+        $script:SessionState.status = if ($presentationName -eq "browser") { "browser-running" } else { "services-running" }
+        Save-LauncherState
+        $exitCode = 0
+        Exit-TaichiFlowStartupLock -Mutex $startupMutex
+        $startupMutex = $null
+        return
+    }
+
     $electronExecutable = Join-Path $frontendRoot "node_modules\electron\dist\electron.exe"
     $electronStdout = Join-Path $sessionRoot "electron.stdout.log"
     $electronStderr = Join-Path $sessionRoot "electron.stderr.log"
     $electronExitReportPath = Join-Path $sessionRoot "electron-exit-report.json"
+    $electronUserDataDir = [string]$script:SessionState.electron_user_data_dir
+    New-Item -ItemType Directory -Path $electronUserDataDir -Force | Out-Null
     if ([string]::IsNullOrWhiteSpace($SmokeReportPath)) { $SmokeReportPath = Join-Path $sessionRoot "desktop-smoke-report.json" }
     if ([string]::IsNullOrWhiteSpace($SmokeScreenshotPath)) { $SmokeScreenshotPath = Join-Path $sessionRoot "desktop-smoke.png" }
     $electronEnvironment = @{
@@ -299,15 +400,17 @@ try {
         TAICHI_FLOW_DESKTOP_EXIT_REPORT = $electronExitReportPath
     }
     Write-LauncherLog "Starting Electron mode=$modeName api=$apiUrl renderer=$($desktopUrl.Trim())"
-    $electronProcess = Start-TaichiFlowLoggedProcess -Name "electron" -FilePath $electronExecutable -ArgumentList @("desktop\main.cjs") -WorkingDirectory $frontendRoot -StandardOutputPath $electronStdout -StandardErrorPath $electronStderr -Environment $electronEnvironment -Visible
+    $electronProcess = Start-TaichiFlowLoggedProcess -Name "electron" -FilePath $electronExecutable -ArgumentList @("--disable-gpu", "--disable-gpu-compositing", "--user-data-dir=$electronUserDataDir", "desktop\main.cjs") -WorkingDirectory $frontendRoot -StandardOutputPath $electronStdout -StandardErrorPath $electronStderr -Environment $electronEnvironment -Visible
     Add-LauncherProcessRecord (New-TaichiFlowProcessRecord -Name "electron" -Identity $electronProcess.Identity -Owned $true -StandardOutputPath $electronStdout -StandardErrorPath $electronStderr)
     $script:SessionState.status = "running"
     Save-LauncherState
+    Exit-TaichiFlowStartupLock -Mutex $startupMutex
+    $startupMutex = $null
     $electronProcess.Process.WaitForExit()
     $nativeExitCode = $null
     try { $nativeExitCode = $electronProcess.Process.get_ExitCode() } catch { }
     $desktopExitReport = Read-TaichiFlowSessionState -StatePath $electronExitReportPath
-    $exitCode = Resolve-TaichiFlowElectronExitCode -ProcessExitCode $nativeExitCode -ExitReport $desktopExitReport
+    $exitCode = Resolve-TaichiFlowElectronExitCode -ProcessExitCode $nativeExitCode -ExitReport $desktopExitReport -ExpectedMode $modeName
     if ($exitCode -ne 0) { throw "Electron exited without a successful lifecycle report (resolved code $exitCode). See $electronStderr" }
     Write-LauncherLog "Electron exited normally."
     $script:SessionState.status = "electron-closed"
@@ -318,21 +421,26 @@ try {
 } finally {
     if ($null -ne $script:SessionState) {
         $cleanup = @()
-        $cleanupRecords = @($script:SessionState.processes)
-        [array]::Reverse($cleanupRecords)
-        foreach ($record in $cleanupRecords) {
-            $result = Stop-TaichiFlowOwnedProcess -Record $record
-            $cleanup += $result
-            if ($result.Stopped) { Write-LauncherLog "Cleanup stopped owned process '$($record.name)' PID $($record.pid)." }
+        if (-not $persistServices) {
+            $cleanupRecords = @($script:SessionState.processes)
+            [array]::Reverse($cleanupRecords)
+            foreach ($record in $cleanupRecords) {
+                $result = Stop-TaichiFlowOwnedProcess -Record $record
+                $cleanup += $result
+                if ($result.Stopped) { Write-LauncherLog "Cleanup stopped owned process '$($record.name)' PID $($record.pid)." }
+            }
+        } else {
+            Write-LauncherLog "Leaving service processes running for the '$presentationName' presentation; stop-dev.ps1 owns explicit shutdown."
         }
         $script:SessionState.cleanup = $cleanup
         $script:SessionState.updated_at = [DateTime]::UtcNow.ToString("o")
-        if ($script:SessionState.status -ne "focused-existing-session") {
+        if (-not $persistServices -and $script:SessionState.status -ne "focused-existing-session" -and $script:SessionState.status -ne "focused-existing-service-session") {
             $script:SessionState.status = if ($exitCode -eq 0) { "closed-clean" } else { "failed-cleaned" }
         }
         Write-TaichiFlowSessionState -State $script:SessionState -StatePath $statePath
     }
-    Remove-ActiveStateIfOwned
+    if (-not $persistServices) { Remove-ActiveStateIfOwned }
+    Exit-TaichiFlowStartupLock -Mutex $startupMutex
     $ownedLive = 0
     if ($null -ne $script:SessionState) {
         foreach ($record in @($script:SessionState.processes | Where-Object { $_.owned })) {

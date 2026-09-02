@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { BarChart3, Download, FileText, Folder, Waves } from "lucide-react";
+import { AlertCircle, BarChart3, Download, FileText, Folder, LoaderCircle, RefreshCw, Waves } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
+import { NumericalDiagnosticsCard } from "../../components/NumericalDiagnosticsCard";
 import type { Scenario, ResultFamily } from "../../types";
 import { resultApi } from "../../api/taichiFlowAdapter";
 
@@ -17,16 +18,25 @@ const familyIcon: Record<string, React.ReactNode> = {
 export function ResultModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const resultFamilies = useTaichiFlowStore((state) => state.resultFamilies);
   const fetchResultFamilies = useTaichiFlowStore((state) => state.fetchResultFamilies);
+  const resultMetadata = useTaichiFlowStore((state) => state.resultMetadata);
+  const fetchResultMetadata = useTaichiFlowStore((state) => state.fetchResultMetadata);
+  const resultsLoading = useTaichiFlowStore((state) => Boolean(scenario.latest_simulation_id && state.loading[`results:${scenario.latest_simulation_id}`]));
+  const resultError = useTaichiFlowStore((state) => state.errors.results || null);
+  const metadataLoading = useTaichiFlowStore((state) => Boolean(scenario.latest_simulation_id && state.loading[`resultMetadata:${scenario.latest_simulation_id}`]));
+  const metadataError = useTaichiFlowStore((state) => state.errors.resultMetadata || null);
   const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const [selectedFamily, setSelectedFamily] = useState<string | null>(null);
+  const simulationId = scenario.latest_simulation_id;
 
   useEffect(() => {
-    if (!readOnly && scenario.latest_simulation_id) {
-      fetchResultFamilies(scenario.latest_simulation_id);
+    if (!readOnly && scenario.status === "completed" && simulationId) {
+      void fetchResultFamilies(simulationId);
+      void fetchResultMetadata(simulationId);
     }
-  }, [readOnly, scenario.latest_simulation_id, fetchResultFamilies]);
+  }, [readOnly, scenario.status, simulationId, fetchResultFamilies, fetchResultMetadata]);
 
-  const families = scenario.latest_simulation_id ? resultFamilies[scenario.latest_simulation_id] || [] : [];
+  const families = simulationId ? resultFamilies[simulationId] || [] : [];
+  const diagnostics = simulationId ? resultMetadata[simulationId]?.numerical_diagnostics : null;
 
   if (readOnly) {
     return (
@@ -49,6 +59,33 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
     );
   }
 
+  if (resultsLoading && families.length === 0) {
+    return (
+      <div className="tf-empty tf-stack-sm" role="status" aria-live="polite">
+        <LoaderCircle size={22} className="tf-spin tf-text-secondary" />
+        <p className="tf-body tf-text-secondary">正在读取结果族…</p>
+        <p className="tf-caption tf-text-tertiary">结果文件较多，首屏加载完成后会显示完整清单。</p>
+      </div>
+    );
+  }
+
+  if (resultError && families.length === 0) {
+    return (
+      <div className="tf-empty tf-stack-sm" role="alert">
+        <AlertCircle size={22} className="tf-text-error" />
+        <p className="tf-body tf-text-secondary">结果族读取失败</p>
+        <p className="tf-caption tf-text-tertiary">{resultError}</p>
+        <Button
+          size="small"
+          icon={<RefreshCw size={14} />}
+          onClick={() => simulationId && void fetchResultFamilies(simulationId)}
+        >
+          重试
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="tf-module-body tf-stack tf-module-scroll">
       <div className="tf-row tf-justify-between">
@@ -64,10 +101,22 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
         </Button>
       </div>
 
+      {metadataLoading ? (
+        <div className="tf-info-banner tf-caption tf-text-secondary" role="status" aria-live="polite">
+          <LoaderCircle size={14} className="tf-spin" /> 正在读取数值诊断…
+        </div>
+      ) : null}
+      {metadataError ? (
+        <div className="tf-info-banner tf-caption tf-text-secondary" role="status">
+          数值诊断暂不可用：{metadataError}
+        </div>
+      ) : null}
+      {diagnostics ? <NumericalDiagnosticsCard diagnostics={diagnostics} /> : null}
+
       <div className="tf-stack-sm">
         {families.length === 0 ? (
           <p className="tf-empty tf-body tf-text-secondary">
-            暂无结果族数据
+            当前运行没有可展示的结果族
           </p>
         ) : (
           families.map((family) => (

@@ -17,6 +17,7 @@ import type { InputBinding, InputFile, RainfallPeriod, RainfallTimeline } from "
 import { filenameOrdinal, sortAssetsByFilename, sortRainfallFiles } from "../utils/filenameSort";
 import { AssetBindingField } from "./AssetBindingField";
 import { Button } from "./Button";
+import { HelpTip } from "./HelpTip";
 import { SourceModeControl, type SourceMode } from "./SourceModeControl";
 
 export { sortRainfallFiles } from "../utils/filenameSort";
@@ -421,10 +422,13 @@ export function RainfallProcessEditor({
       <section className="tf-rainfall-timeline" aria-label="降雨时间轴">
         <div className="tf-rainfall-timeline-heading">
           <div>
-            <div className="tf-body tf-font-semibold">时间轴</div>
-            <div className="tf-caption tf-text-tertiary">
-              时段数由开始、结束和间隔计算；表格边界只读。{resolvedTimeline.mode === "custom" ? " 当前导入的是非等间隔 capt 边界，应用后将转为等间隔。" : ""}
+            <div className="tf-row tf-gap-1">
+              <div className="tf-body tf-font-semibold">时间轴</div>
+              <HelpTip content="时段数由开始、结束和间隔计算；表格边界只读。" />
             </div>
+            {resolvedTimeline.mode === "custom" ? (
+              <div className="tf-caption tf-text-tertiary">当前导入的是非等间隔 capt 边界，应用后将转为等间隔。</div>
+            ) : null}
           </div>
           <span className={`tf-chip${timelinePreview.error ? " tf-text-danger" : ""}`}>
             {timelinePreview.value ? `${timelinePreview.value.period_count} 个时段` : "时间轴无效"}
@@ -471,11 +475,13 @@ export function RainfallProcessEditor({
         <div className="tf-mapping-preview" role="region" aria-label="降雨文件映射预览">
           <div className="tf-row tf-justify-between">
             <div>
-              <div className="tf-body tf-font-semibold">{mappingKind === "library" ? "库内自动映射" : "映射预览"}</div>
-              <div className="tf-caption tf-text-tertiary">
-                {mappingKind === "library"
-                  ? "仅填充未绑定时段；按文件名末尾数字匹配时段编号。歧义项必须修正后才能应用。"
-                  : "按文件名末尾数字优先匹配时段；歧义项必须修正后才能应用。"}
+              <div className="tf-row tf-gap-1">
+                <div className="tf-body tf-font-semibold">{mappingKind === "library" ? "库内自动映射" : "映射预览"}</div>
+                <HelpTip
+                  content={mappingKind === "library"
+                    ? "仅填充未绑定时段；按文件名末尾数字匹配时段编号。歧义项必须修正后才能应用。"
+                    : "按文件名末尾数字优先匹配时段；歧义项必须修正后才能应用。"}
+                />
               </div>
             </div>
             <div className="tf-row tf-gap-2">

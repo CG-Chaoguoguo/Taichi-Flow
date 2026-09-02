@@ -73,3 +73,8 @@ scripts/seed_bj_hxl_project.py
 tests/data/
 tests/test_2h_rainfall.py
 tests/test_physics.py
+
+# Local audit intermediates; publish durable reports as Markdown/JSON instead
+docs/audit/_*.py
+docs/audit/*.txt
+docs/audit/*.html

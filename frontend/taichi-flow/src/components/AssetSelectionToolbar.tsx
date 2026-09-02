@@ -10,8 +10,6 @@ type AssetSelectionToolbarProps = {
   onToggleAll: () => void;
   onDelete: () => void;
   onCancel: () => void;
-  ariaLabel?: string;
-  selectAllLabel?: string;
 };
 
 export function AssetSelectionToolbar({
@@ -22,8 +20,6 @@ export function AssetSelectionToolbar({
   onToggleAll,
   onDelete,
   onCancel,
-  ariaLabel = "文件批量选择",
-  selectAllLabel = "全选当前筛选结果中可删除的文件",
 }: AssetSelectionToolbarProps) {
   const selectAllRef = useRef<HTMLInputElement>(null);
 
@@ -32,7 +28,7 @@ export function AssetSelectionToolbar({
   }, [partiallySelected]);
 
   return (
-    <div className="tf-asset-selection-toolbar" role="toolbar" aria-label={ariaLabel}>
+    <div className="tf-asset-selection-toolbar" role="toolbar" aria-label="文件批量选择">
       <label className="tf-selection-toggle">
         <input
           ref={selectAllRef}
@@ -40,7 +36,7 @@ export function AssetSelectionToolbar({
           checked={allSelected}
           disabled={selectableCount === 0}
           onChange={onToggleAll}
-          aria-label={selectAllLabel}
+          aria-label="全选当前筛选结果中可删除的文件"
         />
         <span>全选</span>
       </label>

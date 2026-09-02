@@ -6,7 +6,8 @@ import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
 import { StatusBadge } from "../../components/StatusBadge";
 import { DirectoryPickerDialog } from "../../components/DirectoryPickerDialog";
-import type { ProjectInfo } from "../../types";
+import { LegacyCaseImportDialog } from "../../components/LegacyCaseImportDialog";
+import type { CaseImportCommitResult, ProjectInfo } from "../../types";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -31,6 +32,7 @@ export function ProjectList() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSelectingDirectory, setIsSelectingDirectory] = useState(false);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
+  const [showCaseImport, setShowCaseImport] = useState(false);
 
   useEffect(() => {
     fetchProjectList().then(setProjects).catch(() => setProjects([]));
@@ -104,7 +106,7 @@ export function ProjectList() {
             <Button variant="secondary" icon={<FolderOpen size={16} />} onClick={() => openProjectDialog("import")}>
               打开本地项目
             </Button>
-            <Button variant="secondary" icon={<Upload size={16} />} onClick={() => openProjectDialog("import")}>
+            <Button variant="secondary" icon={<Upload size={16} />} onClick={() => setShowCaseImport(true)}>
               导入兼容算例
             </Button>
           </div>
@@ -260,6 +262,18 @@ export function ProjectList() {
             }}
           />
         )}
+        {showCaseImport ? (
+          <LegacyCaseImportDialog
+            onClose={() => setShowCaseImport(false)}
+            onCommitted={async (result: CaseImportCommitResult) => {
+              setShowCaseImport(false);
+              await openProject(result.project.root_path);
+              const list = await fetchProjectList();
+              setProjects(list);
+              navigate(`/launch/${result.project.project_id}`);
+            }}
+          />
+        ) : null}
       </div>
     </div>
   );

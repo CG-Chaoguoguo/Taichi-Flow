@@ -76,8 +76,14 @@ class ResultExporter:
             logger.warning("No transform provided, using default identity transform")
             self.transform = Affine.identity()
 
-        # Set default CRS if not provided
-        if self.crs is None:
+        # Set default CRS if not provided.  Rasterio-backed readers may expose
+        # an absent CRS as the string ``"None"`` (for example when an ESRI
+        # ASCII grid is staged without a companion .prj file).  Passing that
+        # sentinel through to GDAL makes the first result write fail with
+        # ``The WKT could not be parsed``; treat it exactly like a missing CRS.
+        if self.crs is None or (
+            isinstance(self.crs, str) and self.crs.strip().lower() in {"", "none", "null"}
+        ):
             logger.warning("No CRS provided, using EPSG:4326")
             self.crs = CRS.from_epsg(4326)
 
@@ -298,17 +304,20 @@ class ResultExporter:
             yllcorner = 0.0
             cellsize = 1.0
 
-        # Write ASCII grid
-        with open(output_path, 'w') as f:
-            f.write(f"ncols         {width}\n")
-            f.write(f"nrows         {height}\n")
-            f.write(f"xllcorner     {xllcorner}\n")
-            f.write(f"yllcorner     {yllcorner}\n")
-            f.write(f"cellsize      {cellsize}\n")
-            f.write(f"NODATA_value  {self.nodata_value}\n")
-
-            # Write data
-            np.savetxt(f, data_to_export, fmt='%.6f')
+        # Write ASCII grid.  Binary buffered I/O plus a single savetxt pass is
+        # substantially faster than line-at-a-time text writes on Chamoli-size
+        # grids (~748x715) without changing the `%.6f` Fortran-compatible body.
+        header = (
+            f"ncols         {width}\n"
+            f"nrows         {height}\n"
+            f"xllcorner     {xllcorner}\n"
+            f"yllcorner     {yllcorner}\n"
+            f"cellsize      {cellsize}\n"
+            f"NODATA_value  {self.nodata_value}\n"
+        )
+        with open(output_path, "wb", buffering=8 * 1024 * 1024) as f:
+            f.write(header.encode("ascii"))
+            np.savetxt(f, data_to_export, fmt="%.6f")
 
         logger.info(f"ASCII Grid export complete: {output_file}")
 

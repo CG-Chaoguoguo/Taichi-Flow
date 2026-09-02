@@ -27,12 +27,14 @@ import logging
 from tqdm import tqdm
 
 from edda.config.sim_config import SimulationConfig
+from edda.config.edda_runtime_plan import build_runtime_control_plan
 from edda.core.fields import EDDAFields
-from edda.backend.backend_manager import initialize_taichi
+from edda.backend.backend_manager import assert_live_cuda, initialize_taichi, live_backend_snapshot
 from edda.io.dem_reader import DEMReader
 from edda.io.hydrograph_exporter import write_hydrograph_file
 from edda.io.rainfall_reader import RainfallReader
 from edda.io.result_exporter import ResultExporter
+from edda.io.async_result_writer import AsyncResultWriter, GridWriteJob
 from edda.io.topoindex_sidecar import build_rnoff_pre_dfs_period_precompute_contract
 from edda.io.zone_reader import ZoneReader
 from edda.physics.hydrology import HydrologyModel
@@ -80,6 +82,27 @@ class EDDASolver:
     """
 
     OUTPUT_STATE_EXCLUDED_FIELDS: Tuple[str, ...] = ("pt",)
+    PERIODIC_OUTPUT_FIELDS: Tuple[str, ...] = (
+        "h",
+        "Cv",
+        "z_bed",
+        "z_original",
+        "is_nodata",
+        "fv_fortran",
+        "erosion_depth",
+        "deposition_depth",
+        "max_flow_depth",
+        "max_flow_velocity",
+        "max_solid_depth",
+        "total_depth",
+        "fdepth",
+        "sfh",
+        "dfh",
+        "ffh",
+        "maxsfh",
+        "maxdfh",
+        "maxffh",
+    )
 
     def __init__(self, config: SimulationConfig):
         """
@@ -89,9 +112,20 @@ class EDDASolver:
             config: Simulation configuration
         """
         self.config = config
+        self.edda_runtime_control_plan = build_runtime_control_plan(config)
         self.fields = None
         self.time_stepper = None
         self.results = []
+        self.backend_snapshot: Dict[str, Any] = {}
+        self.numerical_dt_history: List[float] = []
+        self.numerical_reject_reasons: Dict[str, int] = {}
+        self.numerical_reject_examples: Dict[str, Dict[str, Any]] = {}
+        self.numerical_max_abs_relative_error = 0.0
+        self.numerical_volume_violation_count = 0
+        self.numerical_dt_min_hits = 0
+        self.numerical_nonfinite_counts: Dict[str, int] = {}
+        self._async_output_writer: Optional[AsyncResultWriter] = None
+        self.numerical_observe_count = 0
 
         # Physics modules
         self.hydrology = None
@@ -208,16 +242,59 @@ class EDDASolver:
         if len(self.step_lifecycle_trace_records) < self.step_lifecycle_trace_limit:
             self.step_lifecycle_trace_records.append(record)
 
+    def _run_control_enabled(self, key: str, *, compatibility_default: bool = True) -> bool:
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        if plan is None:
+            return bool(compatibility_default)
+        return plan.run_enabled(key, compatibility_default=compatibility_default)
+
     def initialize(self):
         """Initialize all components."""
         logger.info("Initializing EDDA solver...")
+        self.numerical_dt_history = []
+        self.numerical_reject_reasons = {}
+        self.numerical_reject_examples = {}
+        self.numerical_max_abs_relative_error = 0.0
+        self.numerical_volume_violation_count = 0
+        self.numerical_dt_min_hits = 0
+        self.numerical_nonfinite_counts = {}
+        self.numerical_observe_count = 0
 
         # Initialize Taichi backend
+        requested_backend = str(self.config.compute.backend).lower()
         initialize_taichi(
-            backend=self.config.compute.backend,
+            backend=requested_backend,
             use_double_precision=self.config.compute.use_double_precision,
-            num_threads=self.config.compute.num_threads
+            num_threads=self.config.compute.num_threads,
+            device_memory_GB=8.0 if requested_backend in {"cuda", "auto"} else 1.0,
         )
+        if requested_backend == "cuda":
+            snapshot = assert_live_cuda()
+            print(
+                "[edda] CUDA backend confirmed: "
+                f"arch={snapshot.get('live_arch')} "
+                f"gpu={snapshot.get('gpu_name')} "
+                f"vram={snapshot.get('gpu_memory_used_MB')}MB/"
+                f"{snapshot.get('gpu_memory_total_MB')}MB",
+                flush=True,
+            )
+        else:
+            snapshot = live_backend_snapshot()
+            print(
+                f"[edda] compute backend={requested_backend} live_arch={snapshot.get('live_arch')}",
+                flush=True,
+            )
+        self.backend_snapshot = {
+            "requested_backend": requested_backend,
+            **dict(snapshot),
+            "fallback_active": bool(
+                requested_backend == "cuda"
+                and (
+                    str(snapshot.get("manager_backend") or "").lower() != "cuda"
+                    or "cuda" not in str(snapshot.get("live_arch") or "").lower()
+                )
+            ),
+        }
 
         # Load DEM
         logger.info(f"Loading DEM: {self.config.dem_file}")
@@ -325,6 +402,7 @@ class EDDASolver:
             self.fields,
             self.config,
             self.dynamic_wave_workspace,
+            runtime_control_plan=self.edda_runtime_control_plan,
         )
 
         # Connect Manning field from rheology to SWE solver for Newton-Raphson
@@ -397,6 +475,31 @@ class EDDASolver:
         if self.fields is None:
             raise RuntimeError("Solver must be initialized before configuring outflow process observation.")
 
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        if plan is not None and plan.strict and not plan.run_enabled(
+            "simulate_outflow_cell",
+            compatibility_default=False,
+        ):
+            self.fields.dfs_outflow_mask.fill(0)
+            self.outflow_process_observer = {
+                "sidecar_path": sidecar_path,
+                "output_filename": output_filename,
+                "cells": [],
+                "missing_cell_ids": [],
+                "samples": [],
+                "last_sample": [],
+                "configured_cell_count": 0,
+                "max_discharge": {},
+                "max_time_hours": {},
+                "disabled_by_control": True,
+            }
+            return {
+                "configured_cell_count": 0,
+                "missing_cell_ids": [],
+                "output_filename": output_filename,
+                "disabled_by_control": True,
+            }
+
         cell_id_grid = self.fields.cell_id.to_numpy()
         id_to_coord: Dict[int, Tuple[int, int]] = {}
         for i in range(cell_id_grid.shape[0]):
@@ -415,14 +518,9 @@ class EDDASolver:
             selected_cells.append({"cell_id": int(cell_id), "i": coord[0], "j": coord[1]})
 
         if selected_cells:
-            boundary_mask = self.fields.is_boundary.to_numpy().astype(np.int32, copy=True)
-            boundary_types = self.fields.boundary_type.to_numpy().astype(np.int32, copy=True)
             dfs_outflow_mask = self.fields.dfs_outflow_mask.to_numpy().astype(np.int32, copy=True)
             for cell in selected_cells:
-                boundary_mask[cell["i"], cell["j"]] = 1
-                boundary_types[cell["i"], cell["j"]] = 1
                 dfs_outflow_mask[cell["i"], cell["j"]] = 1
-            self.fields.set_boundary_conditions(boundary_mask, boundary_types)
             self.fields.dfs_outflow_mask.from_numpy(dfs_outflow_mask)
 
         self.outflow_process_observer = {
@@ -435,11 +533,13 @@ class EDDASolver:
             "configured_cell_count": len(selected_cells),
             "max_discharge": {cell["cell_id"]: 0.0 for cell in selected_cells},
             "max_time_hours": {cell["cell_id"]: 0.0 for cell in selected_cells},
+            "disabled_by_control": False,
         }
         return {
             "configured_cell_count": len(selected_cells),
             "missing_cell_ids": missing_cell_ids,
             "output_filename": output_filename,
+            "disabled_by_control": False,
         }
 
     def configure_hydrograph_monitor_observer(
@@ -1261,6 +1361,206 @@ class EDDASolver:
         diagnostics["stormdrain_runtime"] = self.get_stormdrain_runtime_diagnostics()
         return diagnostics
 
+    def _observe_numerical_step(
+        self,
+        step_info: Dict[str, Any],
+        *,
+        accepted: bool,
+        attempted_dt: float,
+        force_volume: bool = False,
+    ) -> None:
+        """Collect scalar retry/volume evidence without changing the solver.
+
+        This is intentionally called after the existing physics step has made
+        its accept/reject decision.  The values are used only for the final
+        audit manifest and therefore cannot affect a retry, output, or state
+        commit.
+        """
+
+        attempted_dt = float(attempted_dt)
+        compute = getattr(self.config, "compute", None)
+        observe_stride = max(1, int(getattr(compute, "numerical_observe_stride", 20) or 20))
+        candidate_id = int(getattr(self, "dfs_candidate_step_id", 0) or 0)
+        sample_volume = (
+            force_volume
+            or (not accepted)
+            or (candidate_id <= 1)
+            or (observe_stride <= 1)
+            or (candidate_id % observe_stride == 0)
+        )
+        if sample_volume and self.dfs_dynamic_wave is not None:
+            try:
+                volume = self.dfs_dynamic_wave.get_volume_balance_snapshot()
+                self.numerical_observe_count += 1
+                relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+                if np.isfinite(relative_error):
+                    self.numerical_max_abs_relative_error = max(
+                        self.numerical_max_abs_relative_error,
+                        abs(relative_error),
+                    )
+                    if accepted and abs(relative_error) > 1.0e-3:
+                        self.numerical_volume_violation_count += 1
+                else:
+                    self.numerical_nonfinite_counts["volume_relative_error"] = (
+                        self.numerical_nonfinite_counts.get("volume_relative_error", 0) + 1
+                    )
+            except Exception as exc:
+                self.numerical_nonfinite_counts["volume_snapshot_error"] = (
+                    self.numerical_nonfinite_counts.get("volume_snapshot_error", 0) + 1
+                )
+                logger.debug("Unable to capture numerical volume snapshot: %s", exc)
+
+        if attempted_dt <= float(self.config.time.dt_min) * (1.0 + 1.0e-12):
+            self.numerical_dt_min_hits += 1
+
+        if accepted:
+            used_dt = float(step_info.get("used_dt", attempted_dt))
+            self.numerical_dt_history.append(used_dt)
+            return
+
+        first_reject = step_info.get("first_reject") or {}
+        reason_name = str(first_reject.get("first_reject_reason_name") or "unknown")
+        self.numerical_reject_reasons[reason_name] = (
+            self.numerical_reject_reasons.get(reason_name, 0) + 1
+        )
+        if reason_name not in self.numerical_reject_examples:
+            self.numerical_reject_examples[reason_name] = {
+                "t_start_s": float(
+                    first_reject.get(
+                        "t_start_s",
+                        self.time_stepper.t_current if self.time_stepper is not None else 0.0,
+                    )
+                    or (self.time_stepper.t_current if self.time_stepper is not None else 0.0)
+                ),
+                "dt_s": attempted_dt,
+                "value": first_reject.get("value"),
+                "threshold": first_reject.get("threshold"),
+                "cell_id": first_reject.get("cell_id"),
+                "neighbor_cell_id": first_reject.get("neighbor_cell_id"),
+                "direction_one_based": first_reject.get("direction_one_based"),
+            }
+
+    def get_numerical_diagnostics(self, *, status: Optional[str] = None) -> Dict[str, Any]:
+        """Build a JSON-safe numerical audit snapshot for the current run."""
+
+        time_stepper = self.time_stepper
+        stats = time_stepper.get_statistics() if time_stepper is not None else {}
+        dt_values = np.asarray(self.numerical_dt_history, dtype=np.float64)
+        if dt_values.size:
+            dt_stats: Dict[str, Any] = {
+                "accepted_min_s": float(np.min(dt_values)),
+                "accepted_max_s": float(np.max(dt_values)),
+                "accepted_mean_s": float(np.mean(dt_values)),
+                "accepted_std_s": float(np.std(dt_values)),
+            }
+        else:
+            dt_stats = {
+                "accepted_min_s": None,
+                "accepted_max_s": None,
+                "accepted_mean_s": None,
+                "accepted_std_s": None,
+            }
+
+        volume: Dict[str, Any] = {
+            "rainfall_m3": 0.0,
+            "inflow_m3": 0.0,
+            "erosion_m3": 0.0,
+            "failure_source_m3": 0.0,
+            "infiltration_m3": 0.0,
+            "outflow_m3": 0.0,
+            "deposition_flux_m3": 0.0,
+            "flow_storage_m3": 0.0,
+            "deposit_storage_m3": 0.0,
+            "source_total_m3": 0.0,
+            "sink_and_storage_total_m3": 0.0,
+            "denominator_m3": 0.0,
+            "residual_m3": 0.0,
+            "relative_error": 0.0,
+            "within_retry_tolerance": True,
+        }
+        trigger_inventory = 0.0
+        if self.dfs_dynamic_wave is not None:
+            try:
+                volume.update(self.dfs_dynamic_wave.get_volume_balance_snapshot())
+            except Exception as exc:
+                logger.debug("Unable to capture final numerical volume snapshot: %s", exc)
+            try:
+                trigger_grid = np.asarray(self.dfs_dynamic_wave.triggerslide_field.to_numpy(), dtype=np.float64)
+                area_grid = np.asarray(self.fields.cell_area_cal.to_numpy(), dtype=np.float64)
+                active_grid = np.asarray(self.fields.is_nodata.to_numpy(), dtype=np.int32) == 0
+                finite = np.isfinite(trigger_grid) & np.isfinite(area_grid) & active_grid
+                trigger_inventory = float(np.sum(np.maximum(trigger_grid[finite], 0.0) * area_grid[finite]))
+            except Exception as exc:
+                logger.debug("Unable to calculate trigger inventory: %s", exc)
+
+        nonfinite_counts = dict(self.numerical_nonfinite_counts)
+        if self.fields is not None:
+            active_mask = np.asarray(self.fields.is_nodata.to_numpy(), dtype=np.int32) == 0
+            for field_name in ("h", "u", "v", "rho", "Cv", "erosion_depth", "deposition_depth", "FS"):
+                field = getattr(self.fields, field_name, None)
+                if field is None:
+                    continue
+                try:
+                    values = np.asarray(field.to_numpy())
+                    nonfinite_counts[field_name] = int(np.count_nonzero(~np.isfinite(values[active_mask])))
+                except Exception:
+                    nonfinite_counts[field_name] = -1
+
+        global_relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+        return {
+            "schema_version": 1,
+            "status": status or ("running" if time_stepper and not time_stepper.is_finished() else "completed"),
+            "simulation": {
+                "current_time_s": float(time_stepper.t_current) if time_stepper is not None else 0.0,
+                "end_time_s": float(time_stepper.t_end) if time_stepper is not None else float(self.config.time.t_end),
+                "output_count": int(time_stepper.output_count) if time_stepper is not None else 0,
+            },
+            "backend": dict(self.backend_snapshot),
+            "time_integration": {
+                "accepted_steps": int(self.dfs_accepted_step_id),
+                "candidate_steps": int(self.dfs_candidate_step_id),
+                "rejected_steps": int(time_stepper.rejected_steps) if time_stepper is not None else 0,
+                "rejection_reasons": dict(self.numerical_reject_reasons),
+                "rejection_examples": dict(self.numerical_reject_examples),
+                "dt_min_configured_s": float(self.config.time.dt_min),
+                "dt_max_configured_s": float(self.config.time.dt_max),
+                "dt_min_hits": int(self.numerical_dt_min_hits),
+                "dt": dt_stats,
+                "time_stepper": {
+                    "step_count": int(stats.get("step_count", 0) or 0),
+                    "total_steps": int(stats.get("total_steps", 0) or 0),
+                    "current_dt_s": float(stats.get("dt_current", 0.0) or 0.0),
+                },
+            },
+            "local_conservation": {
+                "tolerance": 1.0e-3,
+                "max_abs_relative_error": float(self.numerical_max_abs_relative_error),
+                "accepted_step_violation_count": int(self.numerical_volume_violation_count),
+                "observe_stride": max(
+                    1,
+                    int(getattr(getattr(self.config, "compute", None), "numerical_observe_stride", 20) or 20),
+                ),
+                "observe_count": int(getattr(self, "numerical_observe_count", 0) or 0),
+                "last_step": dict(volume),
+            },
+            "global_volume_ledger": {
+                **volume,
+                "tolerance": 1.0e-3,
+                "passed": abs(global_relative_error) <= 1.0e-3,
+                "trigger_inventory_available_m3": trigger_inventory,
+                "trigger_inventory_role": "input inventory diagnostic; failure_source_m3 is the closure term",
+                "drainage_m3": 0.0,
+                "drainage_role": "no independent drainage volume counter is active in the current EDDA path",
+            },
+            "nonfinite_counts": nonfinite_counts,
+            "classification": {
+                "functional_e2e": None,
+                "conservation_closure": abs(global_relative_error) <= 1.0e-3,
+                "strict_code_parity": None,
+                "discretization_convergence": "not_assessed",
+            },
+        }
+
     def _update_outflow_process_state(self, dt_used: float) -> None:
         observer = getattr(self, "outflow_process_observer", None)
         if not observer or not observer["cells"]:
@@ -1268,38 +1568,42 @@ class EDDASolver:
         if dt_used <= 0.0:
             return
 
-        h = self.fields.h.to_numpy()
-        rho = self.fields.rho.to_numpy()
-        cell_area = float(self.fields.dx * self.fields.dy)
-        rho_water = float(self.config.rheology.rho_water)
-        rho_sediment = float(self.config.rheology.rho_sediment)
-        density_span = rho_sediment - rho_water
+        if self._use_fortran_dfs() and hasattr(
+            self.dfs_dynamic_wave, "get_last_accepted_outflow_samples"
+        ):
+            last_sample = self.dfs_dynamic_wave.get_last_accepted_outflow_samples(
+                observer["cells"], dt_used=dt_used
+            )
+        else:
+            h = self.fields.h.to_numpy()
+            rho = self.fields.rho.to_numpy()
+            cell_area = float(self.fields.dx * self.fields.dy)
+            rho_water = float(self.config.rheology.rho_water)
+            rho_sediment = float(self.config.rheology.rho_sediment)
+            density_span = rho_sediment - rho_water
+            last_sample = []
+            for cell in observer["cells"]:
+                i = cell["i"]
+                j = cell["j"]
+                discharge = float(h[i, j] * cell_area / dt_used)
+                cv = 0.0 if density_span <= 0.0 else max(
+                    float((rho[i, j] - rho_water) / density_span), 0.0
+                )
+                last_sample.append(
+                    {
+                        "cell_id": int(cell["cell_id"]),
+                        "discharge_cms": discharge,
+                        "cv": cv,
+                    }
+                )
 
-        last_sample: List[Dict[str, float]] = []
         time_hours = float(self.time_stepper.t_current / 3600.0)
-        for cell in observer["cells"]:
-            i = cell["i"]
-            j = cell["j"]
-            discharge = float(h[i, j] * cell_area / dt_used)
-            if density_span <= 0.0:
-                cv = 0.0
-            else:
-                cv = float((rho[i, j] - rho_water) / density_span)
-            if cv < 0.0:
-                cv = 0.0
-
-            cell_id = int(cell["cell_id"])
+        for sample in last_sample:
+            cell_id = int(sample["cell_id"])
+            discharge = float(sample["discharge_cms"])
             if discharge > observer["max_discharge"][cell_id]:
                 observer["max_discharge"][cell_id] = discharge
                 observer["max_time_hours"][cell_id] = time_hours
-
-            last_sample.append(
-                {
-                    "cell_id": cell_id,
-                    "discharge_cms": discharge,
-                    "cv": cv,
-                }
-            )
 
         observer["last_sample"] = last_sample
 
@@ -1315,6 +1619,11 @@ class EDDASolver:
         )
 
     def _export_outflow_process_text(self) -> Optional[Path]:
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        if plan is not None and not plan.output_enabled(
+            "save_outflow_process", compatibility_default=True
+        ):
+            return None
         observer = getattr(self, "outflow_process_observer", None)
         if not observer:
             return None
@@ -1337,7 +1646,6 @@ class EDDASolver:
                     {
                         "time_hours": time_hours,
                         "discharge_cms": float(cell_sample["discharge_cms"]),
-                        "cv": float(cell_sample["cv"]),
                     }
                 )
 
@@ -1351,16 +1659,16 @@ class EDDASolver:
                 )
             for cell in self.outflow_process_observer["cells"]:
                 cell_id = int(cell["cell_id"])
-                handle.write(f"{'ELEMENT':<14}{'TIME (HRS)':<15}{'DISCHARGE (CMS)':<20}{'CV'}\n")
+                handle.write(f"{'ELEMENT':<14}{'TIME (HRS)':<15}{'DISCHARGE (CMS)'}\n")
                 cell_series = samples_by_cell[cell_id]
                 for index, sample in enumerate(cell_series):
                     if index == 0:
                         handle.write(
-                            f"{cell_id:6d}{sample['time_hours']:14.2f}{sample['discharge_cms']:15.2f}{sample['cv']:15.4f}\n"
+                            f"{cell_id:6d}{sample['time_hours']:14.2f}{sample['discharge_cms']:15.2f}\n"
                         )
                     else:
                         handle.write(
-                            f"{'':6}{sample['time_hours']:14.2f}{sample['discharge_cms']:15.2f}{sample['cv']:15.4f}\n"
+                            f"{'':6}{sample['time_hours']:14.2f}{sample['discharge_cms']:15.2f}\n"
                         )
 
         return output_path
@@ -1428,6 +1736,12 @@ class EDDASolver:
         observer["samples"].append({"time_hours": time_hours, "cells": samples})
 
     def _export_hydrograph_monitor_text(self) -> Optional[Path]:
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        if plan is not None and plan.strict and not plan.extension_enabled(
+            "save_hydrograph_cells",
+            compatibility_default=False,
+        ):
+            return None
         observer = getattr(self, "hydrograph_monitor_observer", None)
         if not observer:
             return None
@@ -1744,7 +2058,9 @@ class EDDASolver:
             # Apply to Taichi fields
             self.fields.set_zone_parameters(zone_mask, zone_params)
 
-            # Initialize erodible thickness from soil depth
+            # Seed erodible thickness from soil depth unless zfil (ltstar<0)
+            # will replace both ltstar_field and inierodithick, matching
+            # edda main program.F90:79-81,174-190 (ltstar starts at 0).
             erodible_np = self.fields.depth_field.to_numpy()
             self.fields.erodible_thickness.from_numpy(erodible_np)
 
@@ -1837,7 +2153,8 @@ class EDDASolver:
             self.fields.ltstar_field.from_numpy(ltstar)
             self.fields.lbstar_field.from_numpy(lbstar)
 
-        # FIX 6a: Initialize erodible thickness from soil depth
+        # Seed erodible thickness from soil depth; apply_native_runtime_inputs
+        # may later replace this with ltstar_field (glacier.asc) when ltstar < 0.
         erodible_np = self.fields.depth_field.to_numpy()
         self.fields.erodible_thickness.from_numpy(erodible_np)
 
@@ -1852,6 +2169,8 @@ class EDDASolver:
         logger.info("Starting EDDA simulation")
         logger.info("=" * 60)
 
+        self._last_output_time_written = None
+
         # Create progress bar (can be disabled for batch/benchmark runs)
         disable_tqdm = os.getenv("TQDM_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}
         pbar = tqdm(
@@ -1863,6 +2182,7 @@ class EDDASolver:
         )
 
         try:
+            self._start_async_output_writer()
             # Main time loop
             while not self.time_stepper.is_finished():
                 # Get current time and time step
@@ -1892,7 +2212,12 @@ class EDDASolver:
                     self.time_stepper.dt_current = dt_candidate
 
                     # Update rainfall for the candidate interval.
-                    if self.rainfall_reader:
+                    if (
+                        self._run_control_enabled(
+                            "simulate_rainfall", compatibility_default=True
+                        )
+                        and self.rainfall_reader
+                    ):
                         rainfall = self._get_rainfall_field_for_interval(t, t + dt_candidate)
                         self._apply_rainfall(rainfall)
 
@@ -1912,6 +2237,15 @@ class EDDASolver:
 
                     # Physics sequence
                     step_info = self._physics_step(dt_candidate)
+                    self._observe_numerical_step(
+                        step_info,
+                        accepted=bool(step_info.get("accepted", True)),
+                        attempted_dt=dt_candidate,
+                        force_volume=bool(
+                            t + dt_candidate >= next_output_time - 1.0e-6
+                            or t + dt_candidate >= float(self.time_stepper.t_end) - 1.0e-6
+                        ),
+                    )
                     trace_candidate = self._step_lifecycle_trace_in_window(t, t + dt_candidate)
 
                     if not step_info.get("accepted", True):
@@ -1967,6 +2301,7 @@ class EDDASolver:
                     self._record_outflow_process_output_sample()
                     self._record_hydrograph_monitor_output_sample()
                     self._output_results()
+                    self._last_output_time_written = float(self.time_stepper.t_current)
                     self.time_stepper.mark_output()
                     did_output = True
 
@@ -2019,9 +2354,16 @@ class EDDASolver:
             raise
         finally:
             pbar.close()
+            self._stop_async_output_writer()
 
-        # Final output
-        self._output_results()
+        # Final output is needed only when the simulation did not already emit
+        # this exact accepted time at an output boundary.
+        last_output_time = getattr(self, "_last_output_time_written", None)
+        if last_output_time is None or not np.isclose(
+            float(last_output_time), float(self.time_stepper.t_current), rtol=0.0, atol=1.0e-9
+        ):
+            self._output_results()
+            self._last_output_time_written = float(self.time_stepper.t_current)
 
         # Log statistics
         self.time_stepper.log_statistics()
@@ -2045,6 +2387,12 @@ class EDDASolver:
         Route debris-flow / double-layer production cases to the Fortran-aligned
         full dynamic-wave solver.
         """
+        if self.edda_runtime_control_plan.strict:
+            if not self.edda_runtime_control_plan.run_enabled("simulate_debris_flow"):
+                raise RuntimeError(
+                    "edda_wfs_unsupported: strict simulate_debris_flow=false cannot use the unvalidated WFS path"
+                )
+            return self.dfs_dynamic_wave is not None
         return (
             self.dfs_dynamic_wave is not None
             and self.double_layer is not None
@@ -2064,6 +2412,9 @@ class EDDASolver:
         # `DFSDynamicWaveSolver.step()` after `tempir` is available, matching
         # original dfs.F90 ordering.
         use_fortran_dfs = self._use_fortran_dfs()
+        simulate_shallow_landslide = self._run_control_enabled(
+            "simulate_shallow_landslide", compatibility_default=True
+        )
         if use_fortran_dfs and self.double_layer and self.config.soil.double_layer.enabled:
             pass
         elif self.double_layer and self.config.soil.double_layer.enabled:
@@ -2074,10 +2425,11 @@ class EDDASolver:
         else:
             # Single-layer hydrology / stability path
             self.hydrology.step(dt)
-            self.stability.step(
-                check_failure=False,
-                Cv_failure=self.config.rheology.Cv_max * 0.85
-            )
+            if simulate_shallow_landslide:
+                self.stability.step(
+                    check_failure=False,
+                    Cv_failure=self.config.rheology.Cv_max * 0.85
+                )
 
         # 2. Refresh density state needed by source-term evaluation.
         # The Fortran-aligned DFS path carries `frho`/`Cv` as transported
@@ -2088,7 +2440,9 @@ class EDDASolver:
             self.rheology.update_properties()
 
         if use_fortran_dfs:
-            if not (self.double_layer and self.config.soil.double_layer.enabled):
+            if simulate_shallow_landslide and not (
+                self.double_layer and self.config.soil.double_layer.enabled
+            ):
                 self.stability.populate_failure_source_terms(
                     Cv_failure=self.config.rheology.Cv_max * 0.85,
                     rho_sediment=self.config.rheology.rho_sediment,
@@ -2097,7 +2451,10 @@ class EDDASolver:
 
             self.dfs_dynamic_wave.set_current_time(self.time_stepper.t_current)
             step_info = self.dfs_dynamic_wave.step(dt)
-            if step_info.get("accepted", False):
+            if step_info.get("accepted", False) and not self.edda_runtime_control_plan.strict:
+                # Preserve the historical control-free direct API contract.
+                # Strict EDDA plans use only the sidecar-backed DFS mask inside
+                # DFSDynamicWaveSolver and must not leak generic DEM boundaries.
                 apply_outflow_boundaries_kernel(self.fields)
             return step_info
 
@@ -2201,8 +2558,13 @@ class EDDASolver:
 
         logger.info(f"Writing output #{output_count} at t={t:.2f}s")
 
-        # Get current state
-        state = self.fields.get_full_state(exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS)
+        # Get current state.  Periodic writers only need the EDDA output-family
+        # fields; pulling the 60+ diagnostic arrays every `tout` is the main
+        # D2H cost on Chamoli-size grids.
+        state = self.fields.get_full_state(
+            include_fields=self.PERIODIC_OUTPUT_FIELDS,
+            exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS,
+        )
         state['erosion_depth_fortran_output'] = self._build_fortran_erosion_depth_output(state)
 
         # Store the full state history only for offline workflows that request
@@ -2214,8 +2576,31 @@ class EDDASolver:
                 'state': state
             })
 
-        # Export to files if requested
-        if self.config.save_intermediate:
+        # Original EDDA output-family controls schedule their own periodic
+        # writers.  The generic GeoTIFF convenience flag must not suppress a
+        # strict EDDA family that is explicitly enabled.
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        periodic_edda_controls = (
+            "save_fs_min_grid",
+            "save_flow_depth",
+            "save_max_flow_depth",
+            "save_flow_velocity",
+            "save_max_flow_velocity",
+            "save_erosion_depth",
+            "save_deposition_depth",
+            "save_total_depth",
+            "save_max_solid_depth",
+            "save_volumetric_sediment_concentration",
+        )
+        write_edda_text = bool(self.config.save_intermediate)
+        if plan is not None and plan.strict:
+            write_edda_text = any(
+                plan.output_enabled(key, compatibility_default=False)
+                for key in periodic_edda_controls
+            )
+
+        # Export to files if requested by either independent surface.
+        if self.config.save_intermediate or write_edda_text:
             filename_base = f"result_{output_count:04d}"
 
             # Get NoData mask
@@ -2226,51 +2611,47 @@ class EDDASolver:
             # Transpose from Taichi (nx, ny)=(cols, rows) to GeoTIFF (rows, cols)
             h_export = state['h'].T.copy()
             h_export[nodata_mask.T == 1] = nodata_value
-            exporter = ResultExporter(
-                data=h_export,
-                transform=self.export_metadata.get('transform'),
-                crs=self.export_metadata.get('crs'),
-                nodata_value=nodata_value
-            )
-            exporter.to_geotiff(
-                str(self.output_dir / f"{filename_base}_depth.tif")
-            )
+            write_geotiff = self._write_geotiff_frames_enabled()
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_depth.tif"),
+                    data=h_export,
+                    nodata_value=nodata_value,
+                )
 
             # Export flow velocity with original EDDA writer semantics.
             velocity = self._build_fortran_flow_velocity_output(state).copy()
             velocity[nodata_mask.T == 1] = nodata_value
-            exporter = ResultExporter(
-                data=velocity,
-                transform=self.export_metadata.get('transform'),
-                crs=self.export_metadata.get('crs'),
-                nodata_value=nodata_value
-            )
-            exporter.to_geotiff(
-                str(self.output_dir / f"{filename_base}_velocity.tif")
-            )
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_velocity.tif"),
+                    data=velocity,
+                    nodata_value=nodata_value,
+                )
 
             # Export concentration with original EDDA writer semantics:
             # dfs.F90 writes `cv(i)` but zeros cells with `fh(i)<0.005`.
             Cv_export = self._build_fortran_volumetric_sediment_output(state).T.copy()
             Cv_export[nodata_mask.T == 1] = nodata_value
-            exporter = ResultExporter(
-                data=Cv_export,
-                transform=self.export_metadata.get('transform'),
-                crs=self.export_metadata.get('crs'),
-                nodata_value=nodata_value
-            )
-            exporter.to_geotiff(
-                str(self.output_dir / f"{filename_base}_concentration.tif")
-            )
-            self._export_taichi_named_edda_text_outputs(
-                state=state,
-                t=t,
-                h_export=h_export,
-                velocity_export=velocity,
-                cv_export=Cv_export,
-                nodata_mask=nodata_mask.T,
-                nodata_value=nodata_value,
-            )
+            if self.config.save_intermediate and write_geotiff:
+                self._enqueue_or_write_grid(
+                    kind="geotiff",
+                    path=str(self.output_dir / f"{filename_base}_concentration.tif"),
+                    data=Cv_export,
+                    nodata_value=nodata_value,
+                )
+            if write_edda_text:
+                self._export_taichi_named_edda_text_outputs(
+                    state=state,
+                    t=t,
+                    h_export=h_export,
+                    velocity_export=velocity,
+                    cv_export=Cv_export,
+                    nodata_mask=nodata_mask.T,
+                    nodata_value=nodata_value,
+                )
 
         # Call output callback if provided
         if self.output_callback:
@@ -2311,13 +2692,12 @@ class EDDASolver:
             )
         data_to_write[nodata_mask == 1] = nodata_value
         filename = f"{original_stem.replace('EDDA', 'Taichi')}_{self._format_edda_output_time(t)}.txt"
-        exporter = ResultExporter(
+        self._enqueue_or_write_grid(
+            kind="ascii",
+            path=str(self.output_dir / filename),
             data=data_to_write,
-            transform=self.export_metadata.get('transform'),
-            crs=self.export_metadata.get('crs'),
             nodata_value=nodata_value,
         )
-        exporter.to_ascii_grid(str(self.output_dir / filename))
 
     def _export_taichi_named_edda_text_outputs(
         self,
@@ -2335,30 +2715,112 @@ class EDDASolver:
         This is an output-format compatibility layer only; it does not change
         solver state, equations, update order, source terms, or time stepping.
         """
-        deposition_export = np.asarray(state['deposition_depth'], dtype=np.float64).T.copy()
+        plan = getattr(self, "edda_runtime_control_plan", None)
+
+        def output_enabled(key: str) -> bool:
+            return True if plan is None else plan.output_enabled(key, compatibility_default=True)
+
+        def run_enabled(key: str) -> bool:
+            return True if plan is None else plan.run_enabled(key, compatibility_default=True)
+
+        z_bed = np.asarray(state['z_bed'], dtype=np.float64)
+        z_original = np.asarray(state['z_original'], dtype=np.float64)
+        deposition_export = np.maximum(z_bed - z_original, 0.0).T.copy()
         erosion_export = np.asarray(state['erosion_depth_fortran_output'], dtype=np.float64).T.copy()
-        total_depth_export = h_export + deposition_export
-        max_depth_export = self._update_output_max_cache("_edda_text_max_flow_depth", h_export)
-        max_velocity_export = self._update_output_max_cache("_edda_text_max_flow_velocity", velocity_export)
-        solid_depth_export = h_export * np.clip(cv_export, 0.0, None)
-        max_solid_depth_export = self._update_output_max_cache("_edda_text_max_solid_depth", solid_depth_export)
+        total_depth_export = (
+            np.asarray(state['h'], dtype=np.float64) + z_bed - z_original
+        ).T.copy()
+        # Accepted-step extrema are a strict EDDA/DFS contract.  The older
+        # control-free direct API may run the modular solver, where these fields
+        # exist but are not maintained; preserve its checkpoint-cache behavior.
+        use_accepted_maxima = bool(plan is not None and plan.strict)
+        max_depth_state = state.get('max_flow_depth') if use_accepted_maxima else None
+        max_depth_export = (
+            np.asarray(max_depth_state, dtype=np.float64).T.copy()
+            if max_depth_state is not None
+            else self._update_output_max_cache("_edda_text_max_flow_depth", h_export)
+        )
+        max_velocity_state = state.get('max_flow_velocity') if use_accepted_maxima else None
+        max_velocity_export = (
+            np.asarray(max_velocity_state, dtype=np.float64).T.copy()
+            if max_velocity_state is not None
+            else self._update_output_max_cache("_edda_text_max_flow_velocity", velocity_export)
+        )
+        max_solid_state = state.get('max_solid_depth') if use_accepted_maxima else None
+        if max_solid_state is None:
+            solid_depth_export = h_export * np.clip(cv_export, 0.0, None)
+            max_solid_depth_export = self._update_output_max_cache(
+                "_edda_text_max_solid_depth", solid_depth_export
+            )
+        else:
+            max_solid_depth_export = np.asarray(max_solid_state, dtype=np.float64).T.copy()
+        max_solid_depth_export = np.where(
+            max_solid_depth_export <= 0.005, 0.0, max_solid_depth_export
+        )
 
         fdepth = np.asarray(state.get('fdepth', np.zeros_like(state['h'])), dtype=np.float64).T.copy()
-        ls_scar = np.where(fdepth > 0.0, 1.0, 0.0)
+        gindx = None
+        if self.dfs_dynamic_wave is not None:
+            gindx = getattr(self.dfs_dynamic_wave, "precomputed_failure_gindx", None)
+        if gindx is not None and np.asarray(gindx).shape == np.asarray(state['h']).shape:
+            gindx_export = np.asarray(gindx, dtype=np.float64).T.copy()
+        else:
+            gindx_export = np.where(fdepth > 0.0, 1.0, 0.0)
+        ls_scar = gindx_export
+        failure_depth_export = np.where(gindx_export == 1.0, fdepth, 0.0)
 
-        families = {
-            "Flow_depth_EDDA": h_export,
-            "Flow_velocity_EDDA": velocity_export,
-            "Max_flow_depth_EDDA": max_depth_export,
-            "Max_flow_velocity_EDDA": max_velocity_export,
-            "Erosion_depth_EDDA": erosion_export,
-            "Deposit_depth_EDDA": deposition_export,
-            "Total_depth_EDDA": total_depth_export,
-            "Volumetric_sediment_conceEDDA": cv_export,
-            "LS_ScarEDDA": ls_scar,
-            "faildphEDDA": fdepth,
-            "MaxsoliddepthEDDA": max_solid_depth_export,
-        }
+        families: Dict[str, np.ndarray] = {}
+        if output_enabled("save_flow_depth"):
+            families["Flow_depth_EDDA"] = h_export
+        if output_enabled("save_flow_velocity"):
+            families["Flow_velocity_EDDA"] = velocity_export
+        if output_enabled("save_max_flow_depth"):
+            families["Max_flow_depth_EDDA"] = max_depth_export
+        if output_enabled("save_max_flow_velocity"):
+            families["Max_flow_velocity_EDDA"] = max_velocity_export
+        if output_enabled("save_erosion_depth") and run_enabled("simulate_erosion"):
+            families["Erosion_depth_EDDA"] = erosion_export
+        if output_enabled("save_deposition_depth") and run_enabled(
+            "simulate_water_and_solid_separately"
+        ):
+            families["Deposit_depth_EDDA"] = deposition_export
+        if output_enabled("save_total_depth") and run_enabled(
+            "simulate_water_and_solid_separately"
+        ):
+            families["Total_depth_EDDA"] = total_depth_export
+        if output_enabled("save_volumetric_sediment_concentration"):
+            families["Volumetric_sediment_conceEDDA"] = cv_export
+        # Chamoli/BJ dfs.F90 write LS_Scar/faildph whenever fsminsave is true,
+        # independent of fssimul. With fssimul=F the arrays stay zeros.
+        if output_enabled("save_fs_min_grid"):
+            families["LS_ScarEDDA"] = ls_scar
+            families["faildphEDDA"] = failure_depth_export
+        if output_enabled("save_max_solid_depth"):
+            families["MaxsoliddepthEDDA"] = max_solid_depth_export
+        chamoli_regime = (
+            getattr(getattr(self.config, "hydrology", None), "dfs_manningbar_variant", "")
+            == "debrisflowmanning_cvtol"
+        )
+        if chamoli_regime and output_enabled("save_flow_depth"):
+            families["SFdepthEDDA"] = np.asarray(
+                state.get("sfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["DFdepthEDDA"] = np.asarray(
+                state.get("dfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["FFdepthEDDA"] = np.asarray(
+                state.get("ffh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+        if chamoli_regime and output_enabled("save_max_flow_depth"):
+            families["MaxSFdepthEDDA"] = np.asarray(
+                state.get("maxsfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["MaxDFdepthEDDA"] = np.asarray(
+                state.get("maxdfh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
+            families["MaxFFdepthEDDA"] = np.asarray(
+                state.get("maxffh", np.zeros_like(state["h"])), dtype=np.float64
+            ).T.copy()
 
         for original_stem, data in families.items():
             self._write_edda_text_grid(original_stem, t, data, nodata_mask, nodata_value)
@@ -2446,8 +2908,12 @@ class EDDASolver:
             format: Output format ('geotiff', 'netcdf', 'csv')
         """
         logger.info(f"Exporting final results in {format} format...")
+        self.flush_output_writer()
 
-        final_state = self.fields.get_full_state(exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS)
+        final_state = self.fields.get_full_state(
+            include_fields=self.PERIODIC_OUTPUT_FIELDS,
+            exclude_fields=self.OUTPUT_STATE_EXCLUDED_FIELDS,
+        )
         nodata_mask = final_state['is_nodata'].T  # Transpose to (rows, cols) for GeoTIFF
         nodata_value = self.export_metadata.get('nodata_value', -9999.0)
 
@@ -2514,13 +2980,21 @@ class EDDASolver:
         self._export_list_z_p_fs_text()
         logger.info("Export complete")
 
-    def _export_list_z_p_fs_text(self) -> None:
+    def _export_list_z_p_fs_text(self) -> Optional[Path]:
         """Write the EDDA `list_z_p_fs_*` text artifact with Taichi naming.
 
         The reference NO.5 case ships this file as a header-only stability
         listing. Emitting the same stable artifact name keeps the result family
         complete without changing runtime equations or safety-factor logic.
         """
+        plan = getattr(self, "edda_runtime_control_plan", None)
+        if plan is not None and plan.strict:
+            # `-2` is rejected by the semantic preflight because the detailed
+            # six-column UNSFIN body is not implemented.  Only the supported
+            # original normal-header mode (`-1`) may reach this writer.
+            if plan.output_value("pressure_head_fs_listing_flag") != -1:
+                return None
+
         output_path = self.output_dir / "list_z_p_fs_Taichi.txt"
         output_path.write_text(
             "TRIGRS depth profiles at each cell\n"
@@ -2529,6 +3003,7 @@ class EDDASolver:
             "Z         P         FS\n",
             encoding="utf-8",
         )
+        return output_path
 
     @staticmethod
     def _iter_taichi_fields(container):
@@ -2718,6 +3193,69 @@ class EDDASolver:
             callback: Function(time_info: dict) -> None
         """
         self.progress_callback = callback
+
+    def _write_geotiff_frames_enabled(self) -> bool:
+        compute = getattr(self.config, "compute", None)
+        return bool(getattr(compute, "write_geotiff_frames", True))
+
+    def _start_async_output_writer(self) -> None:
+        compute = getattr(self.config, "compute", None)
+        if not bool(getattr(compute, "async_output", False)):
+            return
+        if self._async_output_writer is not None:
+            return
+        writer = AsyncResultWriter(max_queued_frames=4)
+        writer.start()
+        self._async_output_writer = writer
+        logger.info("Async result writer started (bounded queue=4)")
+
+    def flush_output_writer(self) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is not None:
+            writer.flush()
+
+    def _stop_async_output_writer(self) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.close()
+        finally:
+            self._async_output_writer = None
+
+    def _enqueue_or_write_grid(
+        self,
+        *,
+        kind: str,
+        path: str,
+        data: np.ndarray,
+        nodata_value: float,
+    ) -> None:
+        writer = getattr(self, "_async_output_writer", None)
+        if writer is None:
+            exporter = ResultExporter(
+                data=data,
+                transform=self.export_metadata.get("transform"),
+                crs=self.export_metadata.get("crs"),
+                nodata_value=nodata_value,
+            )
+            if kind == "geotiff":
+                exporter.to_geotiff(path)
+            elif kind == "ascii":
+                exporter.to_ascii_grid(path)
+            else:
+                raise ValueError(f"Unsupported result write kind: {kind}")
+            return
+        writer.submit(
+            GridWriteJob(
+                kind=kind,
+                path=path,
+                data=np.array(data, copy=True),
+                transform=self.export_metadata.get("transform"),
+                crs=self.export_metadata.get("crs"),
+                nodata_value=float(nodata_value),
+            )
+        )
 
     def set_output_callback(self, callback: Callable):
         """

@@ -177,7 +177,7 @@ class ZoneReader:
         # uses these values directly in late thin-front threshold decisions,
         # so down-casting them here would silently break the configured
         # precision of the solver.
-        zone_params = np.zeros((num_zones, 27), dtype=np.float64)
+        zone_params = np.zeros((num_zones, 28), dtype=np.float64)
 
         # Fill parameter array for each zone
         for idx, zone_id in enumerate(unique_zones):
@@ -213,6 +213,8 @@ class ZoneReader:
                 zone_params[idx, 24] = zone_obj.ltstar
                 zone_params[idx, 25] = zone_obj.lbstar
                 zone_params[idx, 26] = zone_obj.ctao
+                cvero = getattr(zone_obj, "cvero", None)
+                zone_params[idx, 27] = float(cvero) if cvero is not None else -1.0
 
         # Create zone mask with remapped indices (0 to num_zones-1)
         zone_mask = np.zeros_like(self.zone_grid, dtype=np.int32)

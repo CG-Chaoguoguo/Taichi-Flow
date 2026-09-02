@@ -27,6 +27,88 @@ from api.services.workbench_store import WorkbenchError, WorkbenchStore
 logger = logging.getLogger(__name__)
 
 
+_ALLOWED_UPDATE_KEYS = (
+    "status",
+    "progress",
+    "current_time",
+    "end_time",
+    "step_count",
+    "output_count",
+    "start_time",
+    "end_time_actual",
+    "error",
+    "error_code",
+    "error_details",
+)
+
+_LIFECYCLE_UPDATE_KEYS = frozenset(
+    ("status", "start_time", "end_time_actual", "error", "error_code", "error_details")
+)
+
+
+def _structured_error_payload(exc: Exception) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"error": str(exc)}
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    if code:
+        payload["error_code"] = str(code)
+    if details is not None:
+        payload["error_details"] = _ObservableState._safe(details)
+    return payload
+
+
+class _RunProgressPersister:
+    """Coalesce per-step progress writes until a lifecycle or output boundary.
+
+    ``RuntimeSession.progress_callback`` assigns ``progress``, ``current_time``,
+    ``step_count``, and ``output_count`` separately. Persisting each assignment
+    would open a SQLite connection up to four times per accepted step. Progress
+    fields are therefore buffered and flushed only when a lifecycle key arrives,
+    when ``output_count`` advances, or when the coordinator finalizes the run.
+    """
+
+    def __init__(self, persist: Callable[[Dict[str, Any]], None]) -> None:
+        self._persist = persist
+        self._lock = Lock()
+        self._pending: Dict[str, Any] = {}
+        self._last_persisted_output_count = 0
+
+    def observe(self, update: Dict[str, Any]) -> None:
+        safe = {key: update[key] for key in _ALLOWED_UPDATE_KEYS if key in update}
+        if not safe:
+            return
+        payload: Optional[Dict[str, Any]] = None
+        with self._lock:
+            self._pending.update(safe)
+            lifecycle = any(key in safe for key in _LIFECYCLE_UPDATE_KEYS)
+            output_boundary = (
+                "output_count" in safe
+                and int(safe.get("output_count") or 0) > self._last_persisted_output_count
+            )
+            if lifecycle or output_boundary:
+                payload = self._take_pending_locked()
+        if payload is not None:
+            self._persist(payload)
+
+    def flush(self) -> None:
+        with self._lock:
+            payload = self._take_pending_locked()
+        if payload is not None:
+            self._persist(payload)
+
+    def _take_pending_locked(self) -> Optional[Dict[str, Any]]:
+        if not self._pending:
+            return None
+        payload = dict(self._pending)
+        self._pending.clear()
+        if "output_count" in payload:
+            self._last_persisted_output_count = max(
+                self._last_persisted_output_count,
+                int(payload.get("output_count") or 0),
+            )
+        return payload
+
+
 class RunExecutor(Protocol):
     def signature(self, context: Dict[str, Any]) -> str:
         ...
@@ -72,6 +154,8 @@ class _ObservableState(dict):
             "start_time",
             "end_time_actual",
             "error",
+            "error_code",
+            "error_details",
         }:
             self._on_change({key: self._safe(value)})
 
@@ -92,6 +176,8 @@ class _ObservableState(dict):
                 "start_time",
                 "end_time_actual",
                 "error",
+                "error_code",
+                "error_details",
             }
         }
         if selected:
@@ -146,6 +232,8 @@ class RuntimeRunExecutor:
                 case_input_files=context.get("case_input_files") or {},
                 runtime_profile_name=context.get("runtime_profile"),
                 session_id=simulation_id,
+                frozen_effective_config=context.get("effective_config"),
+                frozen_compute_policy_resolution=context.get("compute_policy_resolution"),
             )
             # The queue id is the durable identity; preparation creates a
             # transient UUID for standalone legacy calls, so replace it here.
@@ -173,13 +261,19 @@ class RuntimeRunExecutor:
                 "step_count": int(observed.get("step_count") or 0),
                 "output_count": int(observed.get("output_count") or 0),
                 "error": observed.get("error"),
+                "error_code": observed.get("error_code"),
+                "error_details": observed.get("error_details") or {},
                 "resource_summary": observed.get("resource_summary") or {},
             }
         except Exception as exc:  # noqa: BLE001 - persist the execution failure
             logger.exception("Taichi run %s failed before completion", simulation_id)
             if session is not None and session._registered_active:
                 session.dispose()
-            return {"status": "failed", "error": str(exc), "resource_summary": {"children": 0}}
+            return {
+                "status": "failed",
+                **_structured_error_payload(exc),
+                "resource_summary": {"children": 0},
+            }
         finally:
             if stop_thread is not None and stop_thread.is_alive():
                 stop_event.set()
@@ -269,7 +363,15 @@ class SimulationCoordinator:
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
-            await self._dispatch_available()
+            try:
+                await self._dispatch_available()
+            except Exception:
+                # A transient store/executor failure must not silently terminate the
+                # scheduler task and strand already-queued simulations indefinitely.
+                # Queue state remains durable, so the next poll can safely retry.
+                logger.exception(
+                    "Scheduler dispatch cycle failed; queued work will be retried on the next poll."
+                )
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_interval)
             except asyncio.TimeoutError:
@@ -311,50 +413,12 @@ class SimulationCoordinator:
     async def _execute_claimed(self, context: Dict[str, Any], signature: str, stop_event: Event) -> None:
         project_id = str(context["project_id"])
         simulation_id = str(context["simulation_id"])
-        pending_update: Dict[str, Any] = {}
-        last_persisted_output_count = 0
-
-        def persist_pending() -> None:
-            nonlocal last_persisted_output_count
-            if not pending_update:
-                return
-            payload = dict(pending_update)
-            self.store.update_run(project_id, simulation_id, payload)
-            pending_update.clear()
-            if "output_count" in payload:
-                last_persisted_output_count = max(
-                    last_persisted_output_count,
-                    int(payload.get("output_count") or 0),
-                )
+        persister = _RunProgressPersister(
+            lambda payload: self.store.update_run(project_id, simulation_id, payload)
+        )
 
         def on_update(update: Dict[str, Any]) -> None:
-            safe: Dict[str, Any] = {}
-            for key in (
-                "status",
-                "progress",
-                "current_time",
-                "end_time",
-                "step_count",
-                "output_count",
-                "start_time",
-                "end_time_actual",
-                "error",
-            ):
-                if key in update:
-                    safe[key] = update[key]
-            if not safe:
-                return
-            pending_update.update(safe)
-            lifecycle_update = any(
-                key in safe
-                for key in ("status", "start_time", "end_time_actual", "error")
-            )
-            output_boundary = (
-                "output_count" in safe
-                and int(safe.get("output_count") or 0) > last_persisted_output_count
-            )
-            if lifecycle_update or output_boundary:
-                persist_pending()
+            persister.observe(update)
 
         try:
             self.store.update_run(
@@ -370,12 +434,12 @@ class SimulationCoordinator:
             raise
         except Exception as exc:  # noqa: BLE001 - domain state must record worker errors
             logger.exception("Queued simulation %s failed", simulation_id)
-            result = {"status": "failed", "error": str(exc)}
+            result = {"status": "failed", **_structured_error_payload(exc)}
         finally:
             try:
-                # Progress between output boundaries is intentionally not
-                # persisted. finish_run stores the executor's final snapshot.
-                pending_update.clear()
+                # Flush coalesced progress so current_time/step_count/output_count
+                # survive an early stop; finish_run does not write those columns.
+                persister.flush()
                 self.store.finish_run(project_id, simulation_id, locals().get("result", {"status": "failed"}))
             except Exception:
                 logger.exception("Could not finalize queued simulation %s", simulation_id)

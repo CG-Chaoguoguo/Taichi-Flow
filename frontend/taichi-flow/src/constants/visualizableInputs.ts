@@ -6,6 +6,7 @@ export const VISUALIZABLE_FAMILIES: ReadonlySet<InputFamily> = new Set([
   "slope",
   "zones",
   "thickness",
+  "trigger",
   "manning",
   "rainfall",
   "groundwater",

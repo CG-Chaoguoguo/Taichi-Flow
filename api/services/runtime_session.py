@@ -25,6 +25,11 @@ from api.services import (
     write_runtime_metadata_files,
 )
 from api.services.parameter_catalog import build_parameter_catalog
+from api.services.edda_semantic_gate import validate_runtime_control_plan
+from api.services.compute_policy_resolver import (
+    annotate_failure_source_registry,
+    compute_policy_resolution_identity,
+)
 from api.services.structured_input_resolver import materialize_structured_rainfall
 from api.services.runtime_profile import (
     RuntimeProfile,
@@ -34,6 +39,7 @@ from api.services.runtime_profile import (
 )
 from edda.backend.backend_manager import reset_taichi_runtime
 from edda.config.sim_config import BoundaryConditionConfig, SimulationConfig
+from edda.config.edda_runtime_plan import EddaRuntimeControlPlan, build_runtime_control_plan
 from taichi_flow.solver import FlowSolver
 
 
@@ -42,6 +48,48 @@ SolverFactory = Callable[[SimulationConfig], Any]
 
 class SimulationStopRequested(Exception):
     """Internal control-flow signal for a user-requested stop."""
+
+
+def _runtime_error_payload(exc: Exception) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"error": str(exc)}
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    if code:
+        payload["error_code"] = str(code)
+    if details is not None:
+        payload["error_details"] = deepcopy(details)
+    return payload
+
+
+def _policy_resolution_projection(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the mapper/frozen fields that must agree at runtime.
+
+    The mapper does not need to reproduce queue bookkeeping such as the
+    numeric-variant baseline or the original Settings map byte-for-byte.  It
+    must, however, reach the same failure-source decision before the frozen
+    resolution is copied into the runtime manifest.  When the effective mode
+    is disabled, source-only Fortran topology is provenance rather than a
+    runtime dependency: an imported project deliberately snapshots runnable
+    inputs, not the original source tree.  Active precomputed/live policies
+    still require the mapper to reproduce their topology decision.
+    """
+    detected = payload.get("detected") or {}
+    effective = payload.get("effective") or {}
+    projection = {
+        "status": payload.get("status"),
+        "simulate_shallow_landslide": detected.get("simulate_shallow_landslide"),
+        "mode": effective.get("mode"),
+        "effective_simulate_shallow_landslide": effective.get("simulate_shallow_landslide"),
+        "active_variant": effective.get("active_variant"),
+    }
+    if effective.get("mode") != "disabled":
+        projection.update(
+            {
+                "topology_status": detected.get("topology_status"),
+                "detected_variant": detected.get("dfs_failure_source_variant"),
+            }
+        )
+    return projection
 
 
 def _deep_merge(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -121,6 +169,7 @@ def _native_file_stage(family: str) -> Tuple[str, str, Optional[str]]:
     stages = {
         "demfil": ("production-reachable", "initialize.dem_reader", None),
         "slofil": ("production-reachable", "post_initialize.native_slope_loader", None),
+        "triggerslide": ("production-reachable", "post_initialize.native_triggerslide_loader", "Always-on original triggering-slide grid; one-shot DFS injection when tnow>0."),
         "zonfil": ("production-reachable", "initialize.zone_reader", None),
         "zfil": ("partial", "post_initialize.native_ltstar_loader", "Active when double-layer runtime is enabled and ltstar grid input is selected."),
         "manningfil": ("production-reachable", "post_initialize.native_manning_loader", None),
@@ -140,6 +189,7 @@ WORKBENCH_FAMILY_TO_NATIVE = {
     "manning": "manningfil",
     "slope": "slofil",
     "thickness": "zfil",
+    "trigger": "triggerslide",
     "groundwater": "depfil",
     "infiltration": "rizerofil",
     "rainfall": "rifil",
@@ -233,6 +283,7 @@ class PreparedRuntime:
     request_payload: Dict[str, Any]
     job_metadata: Dict[str, Any]
     runtime_profile: RuntimeProfile
+    runtime_control_plan: EddaRuntimeControlPlan
 
 
 def prepare_runtime_from_payload(
@@ -251,6 +302,8 @@ def prepare_runtime_from_payload(
     case_input_files: Optional[Dict[str, str]] = None,
     runtime_profile_name: Optional[str] = None,
     session_id: Optional[str] = None,
+    frozen_effective_config: Optional[Dict[str, Any]] = None,
+    frozen_compute_policy_resolution: Optional[Dict[str, Any]] = None,
 ) -> PreparedRuntime:
     """Prepare config/provenance without changing solver equations."""
     profile = resolve_runtime_profile(runtime_profile_name)
@@ -275,17 +328,17 @@ def prepare_runtime_from_payload(
     if isinstance(rainfall_payload, dict) and rainfall_payload.get("mode") == "uniform_periods":
         raw_overrides["rainfall"] = _write_frontend_uniform_rainfall(rainfall_payload, run_output_dir)
     run_flags = raw_overrides.get("run_flags") if isinstance(raw_overrides, dict) else None
+    # Structured workbench scenarios carry the frozen EDDA switches under
+    # ``edda.run_controls`` rather than the legacy direct-payload
+    # ``run_flags`` object.  Resolve both shapes before annotating native
+    # sidecars; otherwise an imported Chamoli ``inflow.txt`` is incorrectly
+    # marked inactive even though the frozen ``simulate_inflow_hydrograph``
+    # switch is true.
+    if not isinstance(run_flags, dict) and isinstance(raw_overrides, dict):
+        edda_overrides = raw_overrides.get("edda")
+        if isinstance(edda_overrides, dict) and isinstance(edda_overrides.get("run_controls"), dict):
+            run_flags = edda_overrides["run_controls"]
     raw_overrides = _deep_merge(raw_overrides, _case_input_overrides(case_input_files, run_flags if isinstance(run_flags, dict) else None))
-    if soil_zones_file:
-        raw_overrides = _deep_merge(
-            raw_overrides,
-            {
-                "spatial_zones": {
-                    "enabled": True,
-                    "zone_file": soil_zones_file,
-                }
-            },
-        )
     if not dem_file and isinstance(raw_overrides.get("dem_file"), str):
         dem_file = str(raw_overrides["dem_file"])
     if not soil_zones_file and isinstance(raw_overrides.get("soil_zones_file"), str):
@@ -320,14 +373,44 @@ def prepare_runtime_from_payload(
         "rainfall_file": rainfall_file,
         "soil_zones_file": soil_zones_file,
     }
+    # A workbench queue carries the Settings snapshot that was used at
+    # enqueue time.  Reference mapping must use that same sparse gate map for
+    # policy resolution (not the current Settings and not an implicit empty
+    # map), otherwise an explicitly unlocked live policy would be rejected
+    # during mapper preparation.
+    frozen_policy_gates = None
+    if isinstance(frozen_compute_policy_resolution, dict):
+        candidate_gates = frozen_compute_policy_resolution.get("settings_snapshot")
+        if isinstance(candidate_gates, dict):
+            frozen_policy_gates = deepcopy(candidate_gates)
 
     if case_config_file:
-        parsed_reference = parse_reference_config_file(case_config_file, case_base_dir)
+        # Reference-owned workbench cases preserve the original ``edda_in``
+        # file for semantics but keep imported rasters/sidecars as immutable
+        # blobs. Rebind those frozen files before parsing derived activation
+        # state, otherwise relative source paths point at an empty project root
+        # and active native inputs such as Chamoli's outflow sidecar disappear.
+        reference_file_overrides = {
+            _normalize_case_input_family(str(family)): str(path)
+            for family, path in (case_input_files or {}).items()
+            if isinstance(path, str) and path
+        }
+        if dem_file:
+            reference_file_overrides["demfil"] = str(dem_file)
+        if soil_zones_file:
+            reference_file_overrides["zonfil"] = str(soil_zones_file)
+        parsed_reference = parse_reference_config_file(
+            case_config_file,
+            case_base_dir,
+            native_file_overrides=reference_file_overrides,
+        )
         flow_config, effective_config, runtime_input_manifest, provenance = build_reference_runtime_metadata(
             parsed_reference,
             run_output_dir,
             config_overrides=normalized_overrides,
             top_level_overrides=top_level_overrides,
+            global_gates=frozen_policy_gates,
+            strict_reference=True,
         )
         if boundary_config:
             flow_config.boundary_conditions = BoundaryConditionConfig(**boundary_config)
@@ -360,13 +443,88 @@ def prepare_runtime_from_payload(
                 "include_nodata": True,
             }
         config_dict = _deep_merge(config_dict, normalized_overrides)
+
+        # Workbench reference-case payloads carry the uploaded zone raster as a
+        # canonical ``soil_zones_file``/``case_input_files`` value while the
+        # sparse effective-parameter payload only contains the zone rows.  The
+        # direct (non-``edda_in``) branch must make that explicit for the
+        # solver: a zone file implies the spatial-zone reader and Chamoli's
+        # double-layer soil model are enabled.  Keep this scoped to native
+        # zone-file payloads so unrelated scalar-only configurations retain
+        # their existing single-layer behaviour.
+        native_zone_payload = isinstance(case_input_files, dict) and any(
+            str(key).strip().lower() in {"zfil", "zonfil", "zones", "soil"}
+            for key in case_input_files
+        )
+        spatial_payload = config_dict.get("spatial_zones")
+        if soil_zones_file and (native_zone_payload or isinstance(spatial_payload, dict)):
+            spatial_config = dict(spatial_payload) if isinstance(spatial_payload, dict) else {}
+            spatial_config["enabled"] = True
+            spatial_config["zone_file"] = soil_zones_file
+            config_dict["spatial_zones"] = spatial_config
+
+            soil_config = config_dict.get("soil")
+            if isinstance(soil_config, dict):
+                double_layer_config = soil_config.get("double_layer")
+                if isinstance(double_layer_config, dict):
+                    soil_config["double_layer"] = {
+                        **double_layer_config,
+                        "enabled": True,
+                    }
+                    config_dict["soil"] = soil_config
         flow_config = SimulationConfig.from_dict(config_dict)
         effective_config, runtime_input_manifest, provenance = build_direct_runtime_metadata(flow_config)
+
+    if frozen_compute_policy_resolution is not None:
+        # Workbench runs carry an enqueue-time policy snapshot.  Reuse it as
+        # the authoritative audit/provenance record instead of resolving the
+        # current global Settings again during runtime preparation.
+        frozen_resolution = deepcopy(frozen_compute_policy_resolution)
+        expected_id, expected_hash = compute_policy_resolution_identity(frozen_resolution)
+        if frozen_resolution.get("resolution_id") not in {None, expected_id} or frozen_resolution.get("resolution_hash") not in {None, expected_hash}:
+            raise ValueError("Frozen compute policy resolution identity is invalid.")
+        frozen_resolution.setdefault("resolution_id", expected_id)
+        frozen_resolution.setdefault("resolution_hash", expected_hash)
+        mapped_resolution = runtime_input_manifest.get("compute_policy_resolution") or {}
+        if mapped_resolution and _policy_resolution_projection(mapped_resolution) != _policy_resolution_projection(frozen_resolution):
+            raise ValueError(
+                "Mapper compute policy resolution differs from the enqueue-time frozen resolution."
+            )
+        runtime_input_manifest["compute_policy_resolution"] = frozen_resolution
+        provenance["compute_policy_resolution"] = frozen_resolution
+        effective_config["compute_policy_resolution"] = frozen_resolution
+        registry = runtime_input_manifest.setdefault("input_source_registry", {})
+        failure_entry = registry.setdefault(
+            "dfs_failure_source_variant",
+            {
+                "family": "dfs_failure_source_variant",
+                "state": "config_fallback",
+                "selected_source": None,
+            },
+        )
+        registry["dfs_failure_source_variant"] = annotate_failure_source_registry(
+            dict(failure_entry), frozen_resolution
+        )
+    if frozen_effective_config is not None:
+        frozen_effective = deepcopy(frozen_effective_config)
+        runtime_input_manifest["frozen_effective_config"] = frozen_effective
+        provenance["frozen_effective_config"] = deepcopy(frozen_effective)
+        effective_config["frozen_effective_config"] = deepcopy(frozen_effective)
 
     if structured_rainfall_audit is not None:
         effective_config["structured_rainfall"] = structured_rainfall_audit
         runtime_input_manifest["structured_rainfall"] = structured_rainfall_audit
         provenance["structured_rainfall"] = structured_rainfall_audit
+
+    runtime_control_plan = build_runtime_control_plan(flow_config)
+    semantic_gate = validate_runtime_control_plan(runtime_control_plan)
+    control_plan_payload = runtime_control_plan.to_dict()
+    effective_config["edda_runtime_control_plan"] = control_plan_payload
+    effective_config["edda_semantic_gate"] = semantic_gate
+    runtime_input_manifest["edda_runtime_control_plan"] = control_plan_payload
+    runtime_input_manifest["edda_semantic_gate"] = semantic_gate
+    provenance["edda_runtime_control_plan"] = control_plan_payload
+    provenance["edda_semantic_gate"] = semantic_gate
 
     if not requested_backend and flow_config.compute.backend == "auto":
         flow_config.compute.backend = profile.default_backend
@@ -395,6 +553,7 @@ def prepare_runtime_from_payload(
         request_payload=request_payload,
         job_metadata=job_metadata,
         runtime_profile=profile,
+        runtime_control_plan=runtime_control_plan,
     )
 
 
@@ -419,6 +578,7 @@ class RuntimeSession:
         self._registered_active = False
         self._previous_environment: Optional[Dict[str, Optional[str]]] = None
         self.resource_summary: Dict[str, Any] = {}
+        self._latest_numerical_diagnostics: Optional[Dict[str, Any]] = None
 
     @property
     def simulation_id(self) -> str:
@@ -441,7 +601,14 @@ class RuntimeSession:
                 self.solver,
                 self.prepared.runtime_input_manifest,
             )
-            self._write_metadata_bundle()
+            runtime_gate = validate_runtime_control_plan(
+                self.prepared.runtime_control_plan,
+                runtime_input_manifest=self.prepared.runtime_input_manifest,
+            )
+            self.prepared.runtime_input_manifest["edda_semantic_gate"] = runtime_gate
+            self.prepared.effective_config["edda_semantic_gate"] = runtime_gate
+            self.prepared.provenance["edda_semantic_gate"] = runtime_gate
+            self._write_metadata_bundle(status="pending")
             return self.state_entry(status="pending")
         except Exception:
             self.dispose()
@@ -467,54 +634,39 @@ class RuntimeSession:
             "parameter_audit": None,
             "parameter_catalog": None,
             "runmode_capabilities": None,
+            "numerical_diagnostics": None,
             "output_manifest": None,
             "runtime_profile": self.prepared.runtime_profile.to_dict(),
             "output_dir": str(self.output_dir),
             "start_time": None,
             "end_time_actual": None,
             "error": None,
+            "error_code": None,
+            "error_details": {},
             "resource_summary": {},
         }
 
     def run_to_completion(self, app_state: Dict[str, Any]) -> None:
         sim_data = app_state["simulations"][self.simulation_id]
         try:
-            sim_data.update(
-                {
-                    "status": "running",
-                    "start_time": datetime.now().isoformat(),
-                }
-            )
-            last_published_output_count = int(sim_data.get("output_count") or 0)
+            sim_data["status"] = "running"
+            sim_data["start_time"] = datetime.now().isoformat()
 
             def progress_callback(time_info: Dict[str, Any]) -> None:
-                nonlocal last_published_output_count
                 if self.stop_requested or sim_data.get("stop_requested"):
                     raise SimulationStopRequested()
+                sim_data["progress"] = time_info["progress"]
+                sim_data["current_time"] = time_info["t_current"]
+                sim_data["step_count"] = time_info["step_count"]
                 solver = self.solver
-                output_count = (
-                    int(getattr(solver.time_stepper, "output_count", 0))
-                    if solver
-                    else int(sim_data.get("output_count") or 0)
-                )
-                if output_count <= last_published_output_count:
-                    return
-                last_published_output_count = output_count
-                sim_data.update(
-                    {
-                        "progress": time_info["progress"],
-                        "current_time": time_info["t_current"],
-                        "step_count": time_info["step_count"],
-                        "output_count": output_count,
-                    }
-                )
+                sim_data["output_count"] = getattr(solver.time_stepper, "output_count", 0) if solver else sim_data.get("output_count", 0)
 
             self.solver.set_progress_callback(progress_callback)
             self.solver.run()
             if self.stop_requested or sim_data.get("stop_requested"):
                 raise SimulationStopRequested()
             self.solver.export_final_results()
-            self._write_metadata_bundle()
+            self._write_metadata_bundle(status="completed")
 
             sim_data.update(
                 {
@@ -526,9 +678,10 @@ class RuntimeSession:
                     "runtime_input_manifest": self.prepared.runtime_input_manifest,
                     "runtime_provenance": self.prepared.provenance,
                     "parameter_audit": self._latest_parameter_audit,
-                    "parameter_catalog": self._latest_parameter_catalog,
-                    "runmode_capabilities": self._latest_runmode_capabilities,
-                    "output_manifest": self._latest_output_manifest,
+                     "parameter_catalog": self._latest_parameter_catalog,
+                     "runmode_capabilities": self._latest_runmode_capabilities,
+                     "numerical_diagnostics": self._latest_numerical_diagnostics,
+                     "output_manifest": self._latest_output_manifest,
                 }
             )
         except SimulationStopRequested:
@@ -537,28 +690,31 @@ class RuntimeSession:
                     "status": "stopped",
                     "end_time_actual": datetime.now().isoformat(),
                     "error": None,
+                    "error_code": None,
+                    "error_details": {},
                     "effective_config": self.prepared.effective_config,
                     "runtime_input_manifest": self.prepared.runtime_input_manifest,
                     "runtime_provenance": self.prepared.provenance,
                 }
             )
             try:
-                self._write_metadata_bundle()
+                self._write_metadata_bundle(status="stopped")
                 sim_data.update(
                     {
                         "parameter_audit": self._latest_parameter_audit,
-                        "parameter_catalog": self._latest_parameter_catalog,
-                        "runmode_capabilities": self._latest_runmode_capabilities,
-                        "output_manifest": self._latest_output_manifest,
+                         "parameter_catalog": self._latest_parameter_catalog,
+                         "runmode_capabilities": self._latest_runmode_capabilities,
+                         "numerical_diagnostics": self._latest_numerical_diagnostics,
+                         "output_manifest": self._latest_output_manifest,
                     }
                 )
             except Exception:
                 pass
         except Exception as exc:
             sim_data["status"] = "failed"
-            sim_data["error"] = str(exc)
+            sim_data.update(_runtime_error_payload(exc))
             try:
-                self._write_metadata_bundle()
+                self._write_metadata_bundle(status="failed")
             except Exception:
                 pass
         finally:
@@ -612,13 +768,21 @@ class RuntimeSession:
         }
         return dict(self.resource_summary)
 
-    def _write_metadata_bundle(self) -> None:
+    def _write_metadata_bundle(self, *, status: Optional[str] = None) -> None:
         write_runtime_metadata_files(
             self.output_dir,
             self.prepared.effective_config,
             self.prepared.runtime_input_manifest,
             self.prepared.provenance,
         )
+        if self.solver is not None and hasattr(self.solver, "get_numerical_diagnostics"):
+            try:
+                self._latest_numerical_diagnostics = self.solver.get_numerical_diagnostics(status=status)
+                _write_json(self.output_dir / "numerical_diagnostics.json", self._latest_numerical_diagnostics)
+            except Exception:
+                # Diagnostics are additive observability.  A failure to write
+                # them must not alter the solver result lifecycle.
+                self._latest_numerical_diagnostics = None
         output_manifest = write_output_manifest_file(
             self.output_dir,
             reference_output_expectations=self.prepared.provenance.get("reference_output_expectations"),

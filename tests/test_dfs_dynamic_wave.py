@@ -1,7 +1,7 @@
 import numpy as np
 import taichi as ti
 
-from edda.config.sim_config import SimulationConfig
+from edda.config.sim_config import DoubleLayerSoilParams, SimulationConfig
 from edda.core.fields import EDDAFields
 from edda.solver.dfs_dynamic_wave import (
     DFS_EROSION_DEPOSITION_DEEP_STATE_DIAGNOSTIC_KERNEL_ENV,
@@ -31,12 +31,16 @@ from edda.solver.dfs_dynamic_wave import (
     _green_ampt_average_infiltration_rate,
 )
 from edda.solver.dynamic_wave_fortran import FortranDynamicWaveWorkspace
+from edda.solver.edda_solver import EDDASolver
 
 
 def _build_config(
     *,
     face_flux_variant: str = "asymmetric_head_guard",
     failure_source_variant: str = "live_doublelayer_in_dfs",
+    dry_face_velocity_variant: str = "keep_velocity_bj",
+    artivis_variant: str = "depth_ratio_bj",
+    absubar_variant: str = "max_component_bj",
 ) -> SimulationConfig:
     return SimulationConfig.from_dict(
         {
@@ -61,6 +65,9 @@ def _build_config(
                 "rizero_initial": 1.0e-9,
                 "dfs_face_flux_variant": face_flux_variant,
                 "dfs_failure_source_variant": failure_source_variant,
+                "dfs_dry_face_velocity_variant": dry_face_velocity_variant,
+                "dfs_artivis_variant": artivis_variant,
+                "dfs_absubar_variant": absubar_variant,
             },
             "rheology": {
                 "rho_water": 1000.0,
@@ -76,6 +83,24 @@ def _build_config(
             },
         }
     )
+
+
+def _with_strict_run_controls(config: SimulationConfig, **overrides: bool) -> SimulationConfig:
+    controls = {
+        "simulate_debris_flow": True,
+        "simulate_rainfall": True,
+        "simulate_infiltration": True,
+        "simulate_inflow_hydrograph": False,
+        "simulate_outflow_cell": False,
+        "simulate_shallow_landslide": True,
+        "simulate_drainage_flow": False,
+        "simulate_erosion": True,
+        "simulate_water_and_solid_separately": True,
+        "simulate_barrier": False,
+    }
+    controls.update(overrides)
+    config.edda.run_controls = controls
+    return config
 
 
 def _build_fields() -> EDDAFields:
@@ -111,6 +136,25 @@ def _build_fields() -> EDDAFields:
     return fields
 
 
+def test_strict_background_flux_uses_immutable_runtime_plan_value():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        background_flux_offset=True,
+        simulate_shallow_landslide=False,
+    )
+    cfg.hydrology.use_background_flux_offset = False
+    fields = _build_fields()
+
+    solver = DFSDynamicWaveSolver(
+        fields,
+        cfg,
+        FortranDynamicWaveWorkspace(fields),
+    )
+
+    assert solver.runtime_control_plan.strict is True
+    assert solver.use_background_flux is True
+
+
 def test_dfs_step_accepts_small_dt_and_updates_pairwise_velocity():
     cfg = _build_config()
     fields = _build_fields()
@@ -126,6 +170,183 @@ def test_dfs_step_accepts_small_dt_and_updates_pairwise_velocity():
     fv = fields.fv_fortran.to_numpy()
     assert fv[0, 0, 2] != 0.0
     assert np.isclose(fv[0, 0, 2], -fv[1, 0, 6])
+
+
+def test_dfs_outflow_sample_uses_accepted_pre_clear_predictor_state():
+    cfg = _build_config()
+    fields = _build_fields()
+    fields.dfs_outflow_mask.from_numpy(np.array([[0], [1]], dtype=np.int32))
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    result = solver.step(1.0e-3)
+
+    assert result["accepted"] is True
+    assert float(fields.h[1, 0]) == 0.0
+    samples = solver.get_last_accepted_outflow_samples(
+        [{"cell_id": 2, "i": 1, "j": 0}],
+        dt_used=float(result["used_dt"]),
+    )
+    assert samples[0]["predictor_depth"] > 0.0
+    assert samples[0]["discharge_cms"] > 0.0
+
+
+def test_generic_boundary_metadata_does_not_remove_dfs_face_pair():
+    cfg = _with_strict_run_controls(
+        _build_config(), simulate_shallow_landslide=False
+    )
+    fields = _build_fields()
+    fields.set_boundary_conditions(
+        np.array([[1], [0]], dtype=np.int32),
+        np.array([[1], [0]], dtype=np.int32),
+    )
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    source_i, source_j, target_i, target_j = solver._ensure_legacy_fortran_order_face_pairs()
+
+    assert list(zip(source_i, source_j, target_i, target_j)) == [(0, 0, 1, 0)]
+
+
+def test_outer_boundary_clear_is_direct_compatibility_only():
+    class _AcceptedDFS:
+        @staticmethod
+        def set_current_time(_time):
+            return None
+
+        @staticmethod
+        def step(dt):
+            return {"accepted": True, "used_dt": dt}
+
+    remaining_depth = []
+    for strict in (False, True):
+        cfg = _build_config()
+        if strict:
+            cfg = _with_strict_run_controls(
+                cfg, simulate_shallow_landslide=False
+            )
+        cfg.soil.double_layer = DoubleLayerSoilParams(enabled=True)
+        fields = _build_fields()
+        fields.set_boundary_conditions(
+            np.array([[1], [0]], dtype=np.int32),
+            np.array([[1], [0]], dtype=np.int32),
+        )
+        solver = EDDASolver(cfg)
+        solver.fields = fields
+        solver.double_layer = object()
+        solver.dfs_dynamic_wave = _AcceptedDFS()
+        solver.time_stepper = type("_Time", (), {"t_current": 0.0})()
+
+        solver._physics_step(1.0e-3)
+        remaining_depth.append(float(fields.h[0, 0]))
+
+    assert remaining_depth == [0.0, 0.5]
+
+
+def test_strict_shallow_landslide_false_skips_outer_stability_calls():
+    class _AcceptedDFS:
+        @staticmethod
+        def set_current_time(_time):
+            return None
+
+        @staticmethod
+        def step(dt):
+            return {"accepted": True, "used_dt": dt}
+
+    class _Hydrology:
+        def step(self, _dt):
+            return None
+
+    class _Stability:
+        def __init__(self):
+            self.calls = []
+
+        def step(self, **kwargs):
+            self.calls.append(("step", kwargs))
+
+        def populate_failure_source_terms(self, **kwargs):
+            self.calls.append(("populate_failure_source_terms", kwargs))
+
+    cfg = _with_strict_run_controls(
+        _build_config(), simulate_shallow_landslide=False
+    )
+    solver = EDDASolver(cfg)
+    solver.fields = _build_fields()
+    solver.hydrology = _Hydrology()
+    solver.stability = _Stability()
+    solver.dfs_dynamic_wave = _AcceptedDFS()
+    solver.time_stepper = type("_Time", (), {"t_current": 0.0})()
+
+    solver._physics_step(1.0e-3)
+
+    assert solver.stability.calls == []
+
+
+def test_strict_infiltration_false_keeps_rainfall_but_stages_zero_infiltration():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        simulate_infiltration=False,
+        simulate_shallow_landslide=False,
+        simulate_erosion=False,
+        simulate_water_and_solid_separately=False,
+    )
+    fields = _build_fields()
+    fields.rainfall.from_numpy(np.full((2, 1), 1.0e-3, dtype=np.float64))
+    fields.K_sat_top_field.fill(1.0e-4)
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+
+    solver.step(1.0e-3)
+
+    np.testing.assert_allclose(fields.tempri.to_numpy(), 1.0e-3)
+    np.testing.assert_allclose(fields.infiltration.to_numpy(), 0.0)
+
+
+def test_strict_false_process_controls_zero_rain_and_skip_failure_advancement():
+    cfg = _with_strict_run_controls(
+        _build_config(),
+        simulate_rainfall=False,
+        simulate_infiltration=False,
+        simulate_shallow_landslide=False,
+        simulate_erosion=False,
+        simulate_water_and_solid_separately=False,
+    )
+    fields = _build_fields()
+    fields.rainfall.from_numpy(np.full((2, 1), 1.0e-3, dtype=np.float64))
+    fields.dfs_outflow_mask.from_numpy(np.array([[0], [1]], dtype=np.int32))
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+    fake = _FakeDoubleLayerModel()
+    solver.set_double_layer_model(fake)
+
+    solver.step(1.0e-3)
+
+    np.testing.assert_allclose(fields.tempri.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.infiltration.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.erosion_rate.to_numpy(), 0.0)
+    np.testing.assert_allclose(fields.deposition_rate.to_numpy(), 0.0)
+    assert np.count_nonzero(fields.dfs_outflow_mask.to_numpy()) == 0
+    assert fake.calls == []
+
+
+def test_accepted_commit_tracks_max_solid_depth_without_decreasing_history():
+    cfg = _build_config()
+    fields = _build_fields()
+    solver = DFSDynamicWaveSolver(fields, cfg, FortranDynamicWaveWorkspace(fields))
+    rho_water = cfg.rheology.rho_water
+    rho_sediment = cfg.rheology.rho_sediment
+    density_span = rho_sediment - rho_water
+
+    fields.fhpredi2.from_numpy(np.array([[2.0], [1.0]], dtype=np.float64))
+    fields.frhopredi2.from_numpy(
+        np.array([[rho_water + 0.25 * density_span], [rho_water + 0.50 * density_span]], dtype=np.float64)
+    )
+    fields.tempele.from_numpy(fields.z_bed.to_numpy())
+    solver._commit_step(0.1, 0.1, rho_water, rho_sediment, cfg.rheology.Cv_max)
+    np.testing.assert_allclose(fields.max_solid_depth.to_numpy(), np.array([[0.5], [0.5]]))
+
+    fields.fhpredi2.from_numpy(np.array([[0.5], [0.25]], dtype=np.float64))
+    fields.frhopredi2.from_numpy(
+        np.array([[rho_water + 0.10 * density_span], [rho_water + 0.20 * density_span]], dtype=np.float64)
+    )
+    solver._commit_step(0.1, 0.1, rho_water, rho_sediment, cfg.rheology.Cv_max)
+    np.testing.assert_allclose(fields.max_solid_depth.to_numpy(), np.array([[0.5], [0.5]]))
 
 
 def test_paired_face_flux_variant_opens_face_when_only_one_cell_is_thin():
@@ -223,6 +444,174 @@ def test_both_thin_weighted_face_flux_consumes_cellareacal_weights():
     assert np.isclose(fv_weighted_area[0, 0, 2], -fv_weighted_area[1, 0, 6])
     assert np.isclose(qq_weighted_area[0, 0, 2], -qq_weighted_area[1, 0, 6])
     assert not np.isclose(qq_equal_area[0, 0, 2], qq_weighted_area[0, 0, 2])
+
+
+def test_arithmetic_mean_chamoli_face_flux_diverges_from_both_thin_weighted_on_unequal_depth():
+    """Wet/dry-front Cv/rho averages differ between Chamoli arithmetic and BJ depth-weighted."""
+    h_values = np.array([[0.20], [0.02]], dtype=np.float64)
+    rho_values = np.array([[1800.0], [1000.0]], dtype=np.float64)
+
+    fields_weighted = _build_fields()
+    fields_weighted.h.from_numpy(h_values.copy())
+    fields_weighted.rho.from_numpy(rho_values.copy())
+    solver_weighted = DFSDynamicWaveSolver(
+        fields_weighted,
+        _build_config(face_flux_variant="both_thin_weighted"),
+        FortranDynamicWaveWorkspace(fields_weighted),
+    )
+
+    fields_chamoli = _build_fields()
+    fields_chamoli.h.from_numpy(h_values.copy())
+    fields_chamoli.rho.from_numpy(rho_values.copy())
+    solver_chamoli = DFSDynamicWaveSolver(
+        fields_chamoli,
+        _build_config(face_flux_variant="arithmetic_mean_chamoli"),
+        FortranDynamicWaveWorkspace(fields_chamoli),
+    )
+
+    assert solver_chamoli.dfs_face_flux_variant == "arithmetic_mean_chamoli"
+    result_weighted = solver_weighted.step(1.0e-3)
+    result_chamoli = solver_chamoli.step(1.0e-3)
+
+    qq_weighted = fields_weighted.qq_fortran.to_numpy()
+    qq_chamoli = fields_chamoli.qq_fortran.to_numpy()
+    fv_weighted = fields_weighted.fv_fortran.to_numpy()
+    fv_chamoli = fields_chamoli.fv_fortran.to_numpy()
+
+    assert result_weighted["accepted"] is True
+    assert result_chamoli["accepted"] is True
+    assert np.isclose(fv_chamoli[0, 0, 2], -fv_chamoli[1, 0, 6])
+    assert np.isclose(qq_chamoli[0, 0, 2], -qq_chamoli[1, 0, 6])
+    assert not np.isclose(qq_weighted[0, 0, 2], qq_chamoli[0, 0, 2])
+    assert not np.isclose(fv_weighted[0, 0, 2], fv_chamoli[0, 0, 2])
+
+
+def test_zero_dry_face_chamoli_clears_predicted_velocity_from_dry_upstream():
+    """Chamoli zeros fvpredi when the owning (upstream) cell is thinner than tol."""
+    h_values = np.array([[0.005], [0.20]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+
+    fields_keep = _build_fields()
+    fields_keep.h.from_numpy(h_values.copy())
+    fields_keep.rho.from_numpy(rho_values.copy())
+    solver_keep = DFSDynamicWaveSolver(
+        fields_keep,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            dry_face_velocity_variant="keep_velocity_bj",
+        ),
+        FortranDynamicWaveWorkspace(fields_keep),
+    )
+
+    fields_zero = _build_fields()
+    fields_zero.h.from_numpy(h_values.copy())
+    fields_zero.rho.from_numpy(rho_values.copy())
+    solver_zero = DFSDynamicWaveSolver(
+        fields_zero,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            dry_face_velocity_variant="zero_dry_face_chamoli",
+        ),
+        FortranDynamicWaveWorkspace(fields_zero),
+    )
+
+    assert solver_zero.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
+    result_keep = solver_keep.step(1.0e-3)
+    result_zero = solver_zero.step(1.0e-3)
+    assert result_keep["accepted"] is True
+    assert result_zero["accepted"] is True
+
+    fv_keep = fields_keep.fv_fortran.to_numpy()
+    fv_zero = fields_zero.fv_fortran.to_numpy()
+    # Owner cell (0,0) is dry (h=0.005 < tol); Chamoli must not emit into (1,0).
+    assert np.isclose(fv_zero[0, 0, 2], 0.0)
+    assert np.isclose(fv_zero[1, 0, 6], 0.0)
+    assert not np.isclose(fv_keep[0, 0, 2], 0.0)
+
+
+def test_velocity_ratio_chamoli_artivis_diverges_from_depth_ratio_bj():
+    """Unequal depths + seeded face velocity make the two artivis weights differ."""
+    h_values = np.array([[0.20], [0.02]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+    fv_seed = np.zeros((2, 1, 8), dtype=np.float64)
+    fv_seed[0, 0, 2] = 1.0
+    fv_seed[1, 0, 6] = -1.0
+
+    fields_bj = _build_fields()
+    fields_bj.h.from_numpy(h_values.copy())
+    fields_bj.rho.from_numpy(rho_values.copy())
+    fields_bj.fv_fortran.from_numpy(fv_seed.copy())
+    solver_bj = DFSDynamicWaveSolver(
+        fields_bj,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            artivis_variant="depth_ratio_bj",
+        ),
+        FortranDynamicWaveWorkspace(fields_bj),
+    )
+
+    fields_ch = _build_fields()
+    fields_ch.h.from_numpy(h_values.copy())
+    fields_ch.rho.from_numpy(rho_values.copy())
+    fields_ch.fv_fortran.from_numpy(fv_seed.copy())
+    solver_ch = DFSDynamicWaveSolver(
+        fields_ch,
+        _build_config(
+            face_flux_variant="arithmetic_mean_chamoli",
+            artivis_variant="velocity_ratio_chamoli",
+        ),
+        FortranDynamicWaveWorkspace(fields_ch),
+    )
+
+    assert solver_ch.dfs_artivis_variant == "velocity_ratio_chamoli"
+    result_bj = solver_bj.step(1.0e-3)
+    result_ch = solver_ch.step(1.0e-3)
+    assert result_bj["accepted"] is True
+    assert result_ch["accepted"] is True
+
+    fv_bj = fields_bj.fv_fortran.to_numpy()
+    fv_ch = fields_ch.fv_fortran.to_numpy()
+    assert not np.isclose(fv_bj[0, 0, 2], fv_ch[0, 0, 2])
+
+
+def test_signed_mean_chamoli_absubar_uses_raw_fv_not_half_max_component():
+    """Chamoli dfs.F90:209-212 signed mean on raw fv vs BJ max(vorth,vcomp) on 0.5*fv."""
+    h_values = np.array([[0.20], [0.20]], dtype=np.float64)
+    rho_values = np.array([[1000.0], [1000.0]], dtype=np.float64)
+    fv_seed = np.zeros((2, 1, 8), dtype=np.float64)
+    fv_seed[0, 0, 2] = 2.0
+
+    fields_bj = _build_fields()
+    fields_bj.h.from_numpy(h_values.copy())
+    fields_bj.rho.from_numpy(rho_values.copy())
+    fields_bj.fv_fortran.from_numpy(fv_seed.copy())
+    solver_bj = DFSDynamicWaveSolver(
+        fields_bj,
+        _build_config(absubar_variant="max_component_bj"),
+        FortranDynamicWaveWorkspace(fields_bj),
+    )
+
+    fields_ch = _build_fields()
+    fields_ch.h.from_numpy(h_values.copy())
+    fields_ch.rho.from_numpy(rho_values.copy())
+    fields_ch.fv_fortran.from_numpy(fv_seed.copy())
+    solver_ch = DFSDynamicWaveSolver(
+        fields_ch,
+        _build_config(absubar_variant="signed_mean_chamoli"),
+        FortranDynamicWaveWorkspace(fields_ch),
+    )
+
+    assert solver_bj.dfs_absubar_variant == "max_component_bj"
+    assert solver_ch.dfs_absubar_variant == "signed_mean_chamoli"
+    assert solver_bj.step(1.0e-3)["accepted"] is True
+    assert solver_ch.step(1.0e-3)["accepted"] is True
+
+    ab_bj = fields_bj.absubar_temp.to_numpy()[0, 0]
+    ab_ch = fields_ch.absubar_temp.to_numpy()[0, 0]
+    # BJ: 0.5 scale then 0.5*(|fv2|+|fv6|) => 0.5
+    # Chamoli: vy=(fv2-fv6)*0.5 => 1.0
+    assert np.isclose(ab_bj, 0.5)
+    assert np.isclose(ab_ch, 1.0)
 
 
 def test_paired_face_flux_tol_epsilon_is_default_off_and_opt_in(monkeypatch):
@@ -1150,6 +1539,9 @@ class _FakeDoubleLayerModel:
     def populate_failure_source_terms(self, cvstar, rho_sediment, rho_water):
         self.calls.append(("populate_failure_source_terms", float(cvstar), float(rho_sediment), float(rho_water)))
 
+    def restore_richards_committed_state(self):
+        self.calls.append(("restore_richards_committed_state",))
+
 
 def test_precomputed_unsfin_failure_source_variant_skips_live_doublelayer_advancement():
     cfg = _build_config(failure_source_variant="precomputed_unsfin_schedule")
@@ -2012,7 +2404,11 @@ def test_rholimit_persists_when_all_fortran_tanslodir_entries_are_negative():
     tanslo = fields.tanslo_fortran.to_numpy()
     cvlimit = fields.cvlimit_temp.to_numpy()
     rholimit = fields.rholimit_temp.to_numpy()
-    assert np.isclose(tanslo[1, 1], 0.0)
+    # All eight neighbors exist and sit uphill, so maxval(tanslodir) is the
+    # least-negative diagonal gradient.  dfs.F90 still stores that negative
+    # `tanslo` before `cvlimit=0; cycle`, and must not rewrite rholimit.
+    assert tanslo[1, 1] < 0.0
+    assert np.isclose(tanslo[1, 1], -1.0 / (10.0 * np.sqrt(2.0)))
     assert np.isclose(cvlimit[1, 1], 0.0)
     assert np.isclose(rholimit[1, 1], 1234.0)
 

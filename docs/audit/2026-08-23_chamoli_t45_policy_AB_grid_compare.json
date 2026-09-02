@@ -1,0 +1,171 @@
+{
+  "all_taichi_txt_identical": true,
+  "family_count": 16,
+  "provider_dir_A": true,
+  "provider_dir_B": false,
+  "A_elapsed_s": 1036.9815709590912,
+  "B_elapsed_s": 194.9594371318817,
+  "provider_wall_saved_s": 842.0221338272095,
+  "families": [
+    {
+      "family": "DFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Deposit_depth_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Erosion_depth_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "FFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Flow_depth_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Flow_velocity_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "LS_ScarTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "MaxDFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "MaxFFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "MaxSFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Max_flow_depth_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Max_flow_velocity_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "SFdepthTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Total_depth_Taichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "Volumetric_sediment_conceTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    },
+    {
+      "family": "faildphTaichi_45.0.txt",
+      "a_exists": true,
+      "b_exists": true,
+      "status": "identical",
+      "max_abs": 0.0,
+      "n_diff": 0,
+      "n_cells": 534820,
+      "header_equal": true
+    }
+  ]
+}

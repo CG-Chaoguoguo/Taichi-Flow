@@ -1,0 +1,98 @@
+{
+  "chamoli": {
+    "project_id": "tf-3d454baec1ef4abc95d09b712fcf1849",
+    "scenario_id": "scn-d63fa88e3ad6402ba0d1c9e56b0a09c9",
+    "name": "policy_accept_chamoli_20260823",
+    "root": "C:\\Users\\Administrator\\Desktop\\Taichi-Flow\\artifacts\\policy_acceptance_20260823\\chamoli_isolated",
+    "resolution": {
+      "source": "auto",
+      "requested": "auto",
+      "detected": {
+        "simulate_shallow_landslide": false,
+        "dfs_failure_source_variant": null,
+        "evidence": []
+      },
+      "effective": {
+        "mode": "disabled",
+        "simulate_shallow_landslide": false,
+        "configured_variant": null,
+        "active_variant": null
+      },
+      "numeric_variants": {
+        "hydrology.dfs_face_flux_variant": {
+          "source": "case_baseline",
+          "value": "both_thin_weighted"
+        },
+        "hydrology.dfs_manningbar_variant": {
+          "source": "case_baseline",
+          "value": "debrisflowmanning_cvtol"
+        },
+        "hydrology.dfs_dry_face_velocity_variant": {
+          "source": "case_baseline",
+          "value": "keep_velocity_bj"
+        },
+        "hydrology.dfs_artivis_variant": {
+          "source": "case_baseline",
+          "value": "depth_ratio_bj"
+        },
+        "hydrology.dfs_absubar_variant": {
+          "source": "case_baseline",
+          "value": "max_component_bj"
+        }
+      },
+      "warnings": []
+    },
+    "fssimul": null,
+    "variant": null,
+    "policy": null
+  },
+  "bj": {
+    "project_id": "tf-ef980137c6664fc48961341115465804",
+    "scenario_id": "scn-9c307c0ff5f74eeeae425b87d04dbece",
+    "name": "policy_accept_bj_20260823",
+    "root": "C:\\Users\\Administrator\\Desktop\\Taichi-Flow\\artifacts\\policy_acceptance_20260823\\bj_isolated",
+    "resolution": {
+      "source": "auto",
+      "requested": "auto",
+      "detected": {
+        "simulate_shallow_landslide": true,
+        "dfs_failure_source_variant": null,
+        "evidence": []
+      },
+      "effective": {
+        "mode": "live",
+        "simulate_shallow_landslide": true,
+        "configured_variant": null,
+        "active_variant": "live_doublelayer_in_dfs"
+      },
+      "numeric_variants": {
+        "hydrology.dfs_face_flux_variant": {
+          "source": "case_baseline",
+          "value": "both_thin_weighted"
+        },
+        "hydrology.dfs_manningbar_variant": {
+          "source": "case_baseline",
+          "value": "exponential_cv"
+        },
+        "hydrology.dfs_dry_face_velocity_variant": {
+          "source": "case_baseline",
+          "value": "keep_velocity_bj"
+        },
+        "hydrology.dfs_artivis_variant": {
+          "source": "case_baseline",
+          "value": "depth_ratio_bj"
+        },
+        "hydrology.dfs_absubar_variant": {
+          "source": "case_baseline",
+          "value": "max_component_bj"
+        }
+      },
+      "warnings": [
+        "simulate_shallow_landslide=true but bundled failure-source topology evidence is missing or conflicting."
+      ]
+    },
+    "fssimul": null,
+    "variant": null,
+    "policy": null
+  }
+}

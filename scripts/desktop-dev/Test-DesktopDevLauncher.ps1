@@ -43,8 +43,8 @@ try {
 }
 Assert-True $invalidModeRejected "Unsupported modes must be rejected"
 
-Assert-True (Test-MinimumNodeVersion -ActualVersion "20.19.0" -MinimumVersion "20.19.0") "Minimum Node version must pass"
-Assert-True (-not (Test-MinimumNodeVersion -ActualVersion "20.18.9" -MinimumVersion "20.19.0")) "Older Node version must fail"
+Assert-True (Test-MinimumNodeVersion -ActualVersion "22.12.0") "Electron 43.2.0 Node floor must pass"
+Assert-True (-not (Test-MinimumNodeVersion -ActualVersion "22.11.9")) "Node versions below the Electron floor must fail"
 
 $candidateEnvironment = @{
     TAICHI_FLOW_PYTHON = "C:\Python311\python.exe"
@@ -80,17 +80,35 @@ $ownedRecord = [pscustomobject]@{
     pid = 4242
     creation_time_utc = "2026-08-04T00:00:00.0000000Z"
     command_fingerprint = "abc123"
+    executable_path = "python.exe"
 }
 $matchingProcess = [pscustomobject]@{
     pid = 4242
     creation_time_utc = "2026-08-04T00:00:00.0000000Z"
     command_fingerprint = "abc123"
+    executable_path = "python.exe"
 }
 Assert-True (Test-TaichiFlowOwnedProcessIdentity -Record $ownedRecord -Actual $matchingProcess) "Owned process identity must match all immutable fields"
 
 $reusedRecord = $ownedRecord.PSObject.Copy()
 $reusedRecord.owned = $false
 Assert-True (-not (Test-TaichiFlowOwnedProcessIdentity -Record $reusedRecord -Actual $matchingProcess)) "Reused services must never be cleanup targets"
+Assert-True (Test-TaichiFlowProcessIdentityMatch -Record $ownedRecord -Actual $matchingProcess) "Service-session reuse must compare immutable process identity"
+$differentExecutable = $matchingProcess.PSObject.Copy()
+$differentExecutable.executable_path = "other.exe"
+Assert-True (-not (Test-TaichiFlowProcessIdentityMatch -Record $ownedRecord -Actual $differentExecutable)) "Service-session reuse must reject executable-path drift"
+$crossPrivilegeRecord = $ownedRecord.PSObject.Copy()
+$crossPrivilegeRecord | Add-Member -NotePropertyName identity_source -NotePropertyValue "process-api"
+$crossPrivilegeRecord.executable_path = "python"
+$crossPrivilegeRecord.command_fingerprint = Get-TaichiFlowHash "python"
+$crossPrivilegeActual = [pscustomobject]@{
+    pid = 4242
+    creation_time_utc = "2026-08-04T00:00:00.0000000Z"
+    command_fingerprint = Get-TaichiFlowHash '"C:\Python311\python.exe" -m uvicorn api.app:app'
+    executable_path = "C:\Python311\python.exe"
+    identity_source = "wmi"
+}
+Assert-True (Test-TaichiFlowProcessIdentityMatch -Record $crossPrivilegeRecord -Actual $crossPrivilegeActual) "Cross-privilege identity checks must remain safe and reusable"
 
 $replacementProcess = $matchingProcess.PSObject.Copy()
 $replacementProcess.creation_time_utc = "2026-08-04T00:01:00.0000000Z"
@@ -117,6 +135,12 @@ Assert-True ($null -eq (Get-TaichiFlowProcessIdentity -ProcessId $testWorker.Id)
 
 Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode $null -ExitReport ([pscustomobject]@{ success = $true; exitCode = 0 })) 0 "A signed desktop exit report must resolve a missing GUI process exit code"
 Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode $null -ExitReport ([pscustomobject]@{ success = $false; exitCode = 1 })) 1 "A failed desktop exit report must remain blocking"
-Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode $null -ExitReport $null) -1 "A missing process code and missing exit report must be indeterminate"
+Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode $null -ExitReport $null) 1 "A missing desktop exit report must fail closed"
+Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode 0 -ExitReport ([pscustomobject]@{ success = $true; exitCode = 0; mode = "dev"; runtimeErrors = @() }) -ExpectedMode "dev") 0 "A matching clean desktop exit report must pass"
+Assert-Equal (Resolve-TaichiFlowElectronExitCode -ProcessExitCode 0 -ExitReport ([pscustomobject]@{ success = $true; exitCode = 0; mode = "preview"; runtimeErrors = @() }) -ExpectedMode "dev") 1 "A desktop exit report from the wrong mode must fail closed"
+
+$rootEntryPoint = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\start-dev.ps1") -Raw
+Assert-True $rootEntryPoint.Contains('"-Presentation", $presentation') "The root entry point must delegate presentation selection to the managed launcher"
+Assert-True (-not $rootEntryPoint.Contains('Start-Process $FrontendUrl')) "The root entry point must not open a browser implicitly"
 
 Write-Output "[SELFTEST] assertions=$script:Assertions status=passed"
