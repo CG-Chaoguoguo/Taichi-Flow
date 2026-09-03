@@ -175,10 +175,12 @@ directory when exercising tests that construct the FastAPI application:
 
 ~~~powershell
 $env:TAICHI_FLOW_STATE_DIR = "$PWD\.runtime\pytest-local"
+python -m pytest --collect-only -q
 python -m pytest tests\test_workbench_domain_api.py tests\test_workbench_scheduler.py tests\test_workbench_run_controls.py -q
 
 Push-Location frontend\taichi-flow
 npm test
+npm run test:desktop
 npm run build
 Pop-Location
 ~~~

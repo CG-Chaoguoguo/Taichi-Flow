@@ -1,4 +1,4 @@
-"""Frontend-safe parameter catalog for Taichi Flow."""
+"""Frontend-safe parameter catalog for Taichi-Flow."""
 from __future__ import annotations
 
 from dataclasses import asdict

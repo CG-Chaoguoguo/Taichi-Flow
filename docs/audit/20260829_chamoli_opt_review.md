@@ -1,9 +1,15 @@
 # Chamoli 优化科学性与可靠度审阅
 
+> 历史审计记录（2026-08-29）。本文件中的一次性 helper、原始案例和
+> `artifacts/` 结果均是本地证据，不要求在新 clone 中存在；失效运行器名称
+> 和审阅调度标识仅用于解释当时的方法，不是当前可执行入口。
+
 - **日期**：2026-08-29
 - **对象**：相对 HEAD `aa34929` 的未提交求解器热路径 / 输出管线 / 运行时参数改动
 - **口径**：**不声称 CUDA–Fortran 数值对等。** 本报告审的是「优化是否改科学语义」以及「同代码开关回退下 GPU 占用是否上升」。
-- **子审阅**：Grok 4.6 xHigh 并行三路——[DFS 热路径](b340d756-4623-4b4c-81de-5efb8115f52e)、[异步输出](9d8f17a0-baff-4cae-8c65-e5c5fd52dafd)、[EDDA 方法学](1623073a-3362-473c-b888-7e215557e1ee)。主审阅交叉核验 Fortran 行号后写入下表。
+- **子审阅**：Grok 4.6 xHigh 并行审阅 DFS 热路径、异步输出和 EDDA
+  方法学；调度标识属于本地审计记录，未复制到发布文档。主审阅交叉核验
+  Fortran 行号后写入下表。
 
 ## 结论先行
 
@@ -18,12 +24,12 @@
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `C:\Users\Administrator\Desktop\Taichi-Flow` |
+| 仓库 | Taichi-Flow 本地 checkout（路径不随报告分发） |
 | Python | 3.11.9（`Python311\python.exe`） |
 | GPU | NVIDIA GeForce RTX 3080 Ti，12 GB |
 | Fortran 参照 | `...\Chamoli-EDDA file\dfs.F90`、`edda main program.F90` |
 | 核心 diff | `dfs_dynamic_wave.py` +227、`edda_solver.py` +387、`async_result_writer.py` 新增、`result_exporter.py`、`sim_config.py` |
-| A/B 窗口 | `t_end=180`、`tout=45`、4 帧、**fp64**（与 `_run_chamoli_window.py` 相同；UI 生产 t=900 为 fp32） |
+| A/B 窗口 | `t_end=180`、`tout=45`、4 帧、**fp64**（与本地一次性窗口运行器相同；UI 生产 t=900 为 fp32） |
 | 不做 | 14400 s 全长；不改求解器功能 |
 
 OPT：`async_output=on`、`stride=20`、depo-velocity / legacy 方向速度同步关闭。  
@@ -84,7 +90,7 @@ HEAD 求解器 diff **没有改写**上述变体算术。既有 quirk（侵蚀�
 
 ## 5. GPU 利用率 A/B（同代码开关）
 
-脚本：`docs/audit/_run_chamoli_perf_ab.py`（1 s `nvidia-smi`）。产物：
+本地一次性性能审阅运行器（1 s `nvidia-smi`；未随 clean checkout 分发）。产物：
 
 - OPT：`artifacts/chamoli_ab_opt_t180/`
 - BASELINE：`artifacts/chamoli_ab_baseline_t180/`
@@ -109,7 +115,7 @@ HEAD 求解器 diff **没有改写**上述变体算术。既有 quirk（侵蚀�
 
 ## 6. 数值等价取证
 
-`docs/audit/_diff_chamoli_ab_grids.py` 对 t=45/90/135/180 × 16 族逐格比较：
+本地一次性逐格比较器（未随 clean checkout 分发）对 t=45/90/135/180 × 16 族逐格比较：
 
 | 项 | 结果 |
 |---|---|

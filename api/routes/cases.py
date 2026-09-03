@@ -1,4 +1,4 @@
-"""Case configuration endpoints for Taichi Flow."""
+"""Case configuration endpoints for Taichi-Flow."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request

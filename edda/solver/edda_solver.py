@@ -2166,7 +2166,7 @@ class EDDASolver:
             raise RuntimeError("Solver not initialized. Call initialize() first.")
 
         logger.info("=" * 60)
-        logger.info("Starting EDDA simulation")
+        logger.info("Starting Taichi-Flow simulation")
         logger.info("=" * 60)
 
         self._last_output_time_written = None
@@ -2942,7 +2942,7 @@ class EDDASolver:
             )
             exporter.to_geotiff(str(self.output_dir / "final_erosion.tif"))
 
-            # Match the EDDA-Taichi CUDA `Deposit_depth` output family.
+            # Match the original EDDA-compatible `Deposit_depth` output family.
             deposition_export = final_state['deposition_depth'].T.copy()
             deposition_export[nodata_mask == 1] = nodata_value
             exporter = ResultExporter(

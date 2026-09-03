@@ -17,14 +17,14 @@
 ## Scientific boundary
 
 The existing alignment and input-chain documents remain research notes. The
-frontend/domain cutover does not modify `edda/` formulas, source timing,
-dry/wet gates, direction order, timestep semantics, or output meaning. No
-Fortran parity claim is made by the UI verification.
+frontend/domain cutover itself does not modify `edda/` formulas, source timing,
+dry/wet gates, direction order, timestep semantics, or output meaning. Later
+solver repairs are documented separately; no Fortran parity claim is made by
+the UI verification.
 
 ## Evidence
 
-Migration, OpenAPI inventory, browser screenshots, and test logs live under
-`artifacts/agent_runs/2026-08-02_taichi_flow_full_ui_cutover/`. The root
-`agentlog.md` is append-only and records command, artifact, compared case,
-metric/diff evidence, production decision, cleanup, and next action for each
-phase.
+Migration, OpenAPI inventory, browser screenshots, and test logs may live under
+the local-only `artifacts/` directory. A clean clone is not expected to contain
+those raw files; tracked audit Markdown/JSON is the durable summary. The root
+`agentlog.md` is also local-only and is not a documentation entry point.

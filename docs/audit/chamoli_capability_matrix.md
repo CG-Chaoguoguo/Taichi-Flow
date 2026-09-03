@@ -1,5 +1,8 @@
 # Chamoli EDDA vs Taichi-Flow capability matrix
 
+> 历史能力矩阵。下列运行器、绝对路径和 `artifacts/` 目录是本地审计
+> 证据；原始脚本与大体量结果不随 clean checkout 分发。
+
 Generated from live parser + `EDDA_SWITCH_REGISTRY` 1.0.0. Machine-readable copy: `chamoli_capability_matrix.json`.
 
 Oracle policy: rerun the matching 2021-03-01 `edda.exe` with a real console (Intel Fortran redirected I/O fails at `edda_in.txt` line 101 on `results\`). Do not use `Debug\EDDA.exe` (2026-07-10) or stdout-redirected launches. Do not treat the 00:56 init-only log as a numerical oracle.
@@ -138,7 +141,12 @@ t=900 Flow_depth improved 51.05/3.06 → 37.21/0.889; SF 68.02 → 43.21; MaxFF 
 
 ## CUDA t=900 full-family vs live Fortran oracle (`artifacts/chamoli_cuda_t900_zones/`)
 
-Production window: `docs/audit/_run_chamoli_window.py` CUDA `t_end=900` (20 frames at `tout=45`). Elapsed **2057.5 s**. All 16 families present every frame (`missing_count=0`). **Do not claim numerical parity.** Summary JSON: `artifacts/chamoli_cuda_t900_zones/frame_diff_summary.json`. BJ short guard: `artifacts/bj_cpu_t2_faceflux_guard/` status=complete, 14.1 s, `both_thin_weighted` / `exponential_cv`.
+Production window: local one-off CUDA window runner (not distributed with a
+clean checkout), `t_end=900` (20 frames at `tout=45`). Elapsed **2057.5 s**.
+All 16 families present every frame (`missing_count=0`). **Do not claim
+numerical parity.** Summary JSON: `artifacts/chamoli_cuda_t900_zones/frame_diff_summary.json`.
+BJ short guard: `artifacts/bj_cpu_t2_faceflux_guard/` status=complete, 14.1 s,
+`both_thin_weighted` / `exponential_cv`.
 
 t=45 / t=90 Flow_depth and MaxFF match the prior face-flux window exactly (28.817 / 8.813 and 0.051 / 0.173). The zone/`ltstar` NODATA=0 change did not move those early frames.
 
@@ -184,7 +192,11 @@ Peak Flow_depth max-abs in this window is **85.87 m at t=315 s**. MaxFF stays su
 
 ## CUDA face-flux variant vs live Fortran oracle (`artifacts/chamoli_cuda_t90_faceflux/`)
 
-Production window: `docs/audit/_run_chamoli_window.py` CUDA `t_end=90` (~1276 s) with auto-detected `arithmetic_mean_chamoli`. Diffs at **45 s and 90 s**. **Do not claim numerical parity.** BJ short guard: `artifacts/bj_cpu_t2_faceflux_guard/` keeps `both_thin_weighted` / `exponential_cv`.
+Production window: local one-off CUDA window runner (not distributed with a
+clean checkout), `t_end=90` (~1276 s) with auto-detected
+`arithmetic_mean_chamoli`. Diffs at **45 s and 90 s**. **Do not claim numerical
+parity.** BJ short guard: `artifacts/bj_cpu_t2_faceflux_guard/` keeps
+`both_thin_weighted` / `exponential_cv`.
 
 ### t=45 s (face-flux) vs prior fix (`chamoli_cuda_t90_fix`)
 
@@ -214,7 +226,10 @@ Evidence: `artifacts/chamoli_cuda_t90_fix/wavefront_diag.json`.
 
 ## Pre-fix CUDA t=45s baseline (kept for comparison)
 
-Production window runner: `docs/audit/_run_chamoli_window.py` → `artifacts/chamoli_cuda_t45/`. Elapsed 1082 s. All **16** writer families present. MaxFFdepth max abs was **180.9**. CPU对照 (`artifacts/chamoli_cpu_t45/`) matched CUDA within ~0.010 m Flow_depth.
+Production window runner: local one-off CUDA window runner (not distributed with
+a clean checkout) → `artifacts/chamoli_cuda_t45/`. Elapsed 1082 s. All **16**
+writer families present. MaxFFdepth max abs was **180.9**. CPU对照
+(`artifacts/chamoli_cpu_t45/`) matched CUDA within ~0.010 m Flow_depth.
 
 ## Absubar velocity-modulus variant (2026-08-22)
 
@@ -322,3 +337,7 @@ not parallelized or moved into CUDA.
 - Chamoli CUDA/Fortran residual remains. After `signed_mean_chamoli`, early erosion matches Fortran (~1.00 at t=45) but over-erodes later (1.72 at t=900). Flow_depth peak lag at t=315 dropped 86 m → 20 m. Inflow hydrograph remains `partial`.
 - `buildingsimul` ARF/WRF runtime (`dfs.F90:58`).
 - WFS and UNSFIN **active** BJ production schedule remain fail-closed until a validated ledger exists (**BJ production schedule closure blocked**). Chamoli off-branch LS_Scar/faildph writers match zeros. Zone porosity stays unwired.
+# Chamoli capability matrix
+
+> 历史能力矩阵。下列运行器、绝对路径和 `artifacts/` 目录是本地审计
+> 证据；原始脚本与大体量结果不随 clean checkout 分发。

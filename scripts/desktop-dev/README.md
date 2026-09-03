@@ -5,7 +5,7 @@
 ## 使用
 
 - 在仓库根目录执行 `scripts\start-dev.ps1`：默认启动 Electron 开发窗口和 Vite HMR，不会打开外部浏览器。
-- 需要旧的浏览器 presentation 时执行 `scripts\start-dev.ps1 -Browser`；只启动服务执行 `-ServicesOnly`（`-NoBrowser` 仍兼容）。
+- 需要浏览器 presentation 时执行 `scripts\start-dev.ps1 -Browser`；只启动服务执行 `-ServicesOnly`（`-NoBrowser` 仍兼容）。
 - 双击 `Start-Taichi-Flow-Desktop-Dev.bat`：启动 `dev` 模式（FastAPI + Vite HMR + Electron）。
 - 命令行执行 `Start-Taichi-Flow-Desktop-Dev.bat preview`：先构建 `dist`，再通过 `app://taichi-flow` 加载编译产物，不启动 Vite。
 - 异常退出后执行 `Stop-DesktopDev.ps1`：只处理状态文件中标记为本次入口拥有、且 PID、创建时间与命令指纹仍全部匹配的进程。

@@ -1,5 +1,5 @@
 ﻿"""
-Core Taichi field definitions for EDDA simulation.
+Core Taichi field definitions for Taichi-Flow simulations.
 """
 import taichi as ti
 import numpy as np
@@ -23,7 +23,7 @@ def _ensure_taichi_initialized():
 @ti.data_oriented
 class EDDAFields:
     """
-    Taichi field container for EDDA simulation variables.
+    Taichi field container for Taichi-Flow simulation variables.
     All fields are stored on GPU/CPU depending on backend selection.
     """
 

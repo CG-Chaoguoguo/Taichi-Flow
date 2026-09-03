@@ -56,9 +56,9 @@ if (-not [string]::IsNullOrWhiteSpace($SmokeReportPath)) { $desktopArguments += 
 if (-not [string]::IsNullOrWhiteSpace($SmokeScreenshotPath)) { $desktopArguments += @("-SmokeScreenshotPath", $SmokeScreenshotPath) }
 
 switch ($presentation) {
-    "electron" { Write-Host "[Taichi Flow dev] Default presentation: Electron desktop (Vite HMR)" }
-    "browser" { Write-Host "[Taichi Flow dev] Explicit presentation: browser (Vite HMR)" }
-    "services" { Write-Host "[Taichi Flow dev] Explicit presentation: services only (no UI)" }
+    "electron" { Write-Host "[Taichi-Flow dev] Default presentation: Electron desktop (Vite HMR)" }
+    "browser" { Write-Host "[Taichi-Flow dev] Explicit presentation: browser (Vite HMR)" }
+    "services" { Write-Host "[Taichi-Flow dev] Explicit presentation: services only (no UI)" }
 }
 
 & powershell.exe @desktopArguments

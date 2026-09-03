@@ -1,4 +1,4 @@
-"""Typed runtime profiles for Taichi Flow service runs."""
+"""Typed runtime profiles for Taichi-Flow service runs."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -34,10 +34,10 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
         class_name="parity",
         default_backend="cuda",
         description=(
-            "EDDA-Taichi CUDA candidate parity profile. This mirrors the "
-            "environment gates used by tools/run_cuda_candidate_case.py so "
-            "frontend-driven Taichi Flow runs can be compared against the "
-            "EDDA-Taichi backend harness without changing solver equations."
+            "EDDA-compatible CUDA candidate parity profile. This mirrors the "
+            "environment gates used by the local candidate validation harness "
+            "so frontend-driven Taichi-Flow runs can be compared against the "
+            "original-EDDA compatibility path without changing solver equations."
         ),
         promoted_defaults=[
             "taichi_cuda_backend",
@@ -76,7 +76,7 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
         class_name="production",
         default_backend="cuda",
         description=(
-            "Default Taichi Flow runtime. CUDA is selected by default; only "
+            "Default Taichi-Flow runtime. CUDA is selected by default; only "
             "evidence-gated production behavior is enabled. Candidate and "
             "diagnostic mutation chains remain inactive."
         ),
@@ -167,7 +167,7 @@ def apply_profile_environment(
     """
     Apply profile environment values and return the previous values.
 
-    This intentionally sets only Taichi Flow profile variables and neutral
+    This intentionally sets only Taichi-Flow profile variables and neutral
     progress-bar behavior. It does not enable legacy experimental gates.
     """
     import os

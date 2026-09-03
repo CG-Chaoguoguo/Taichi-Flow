@@ -25,11 +25,7 @@ ALLOWED_STATUSES = frozenset(
     }
 )
 
-ORIGINAL_CASE = r"C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text"
-COMMON_AUDIT = (
-    "C:\\Users\\Administrator\\EDDA-Taichi\\artifacts\\agent_runs\\"
-    "2026-08-07_17-57-51_edda_switch_backend_parity"
-)
+COMMON_AUDIT = "tests/test_edda_switch_registry.py"
 
 
 @dataclass(frozen=True)

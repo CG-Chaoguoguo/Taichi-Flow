@@ -1,5 +1,5 @@
 """
-Adaptive time stepping for EDDA simulation.
+Adaptive time stepping for Taichi-Flow simulations.
 Uses CFL condition to ensure numerical stability.
 """
 import taichi as ti

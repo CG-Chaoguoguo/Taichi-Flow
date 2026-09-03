@@ -29,7 +29,7 @@ Import-Module $modulePath -Force
 
 function Write-Step {
     param([Parameter(Mandatory = $true)][string]$Message)
-    Write-Host "[Taichi Flow stop] $Message"
+    Write-Host "[Taichi-Flow stop] $Message"
 }
 
 function Stop-UnsafeProcessTree {

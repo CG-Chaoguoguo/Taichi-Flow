@@ -51,7 +51,7 @@ structure and `data-qoder-*` attributes. API calls live in
 `src/stores/taichiFlowStore.ts`. Components must render loading, empty, error,
 and disconnected states from real responses rather than mock records.
 Project-scoped navigation must remain natively disabled until an active project
-exists, and every project route must also be wrapped by `ProjectRouteGuard`.
+exists, and every project route must also be wrapped by `EditorRouteGuard`.
 Desktop-only directory access is exposed through
 `taichi-flow:select-directory`; renderer code receives only the typed preload
 bridge and never Electron or Node primitives.
@@ -67,5 +67,7 @@ npm run test:desktop
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\desktop-dev\\Test-DesktopDevLauncher.ps1
 ```
 
-Append each result to `agentlog.md` with command, artifact path, compared case,
-metric/diff evidence, production decision, cleanup status, and next action.
+The historical `agentlog.md` is local-only and is intentionally not part of a
+clean checkout. Publish durable evidence as a tracked Markdown/JSON report
+under `docs/` or a deliberately retained audit asset; keep large logs and raw
+artifacts under the ignored local evidence directories.

@@ -1,4 +1,4 @@
-"""Runtime session lifecycle for Taichi Flow service jobs."""
+"""Runtime session lifecycle for Taichi-Flow service jobs."""
 from __future__ import annotations
 
 from copy import deepcopy

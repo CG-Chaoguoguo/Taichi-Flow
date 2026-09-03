@@ -1,5 +1,9 @@
 # Chamoli 性能优化与 t=900 s 闭合测试报告
 
+> 历史审计记录（2026-08-28）。本文件保留当时的本地案例路径、脚本名和
+> 指标口径；原始案例、HTML 报告、运行日志及 `artifacts/` 均为本地证据，
+> 不属于 clean checkout 的发布输入。
+
 - **日期**：2026-08-28
 - **范围**：仅 `t_end=900 s`、`tout=45 s`（20 帧）。完整 `simul=14400 s` 未跑，另行安排。
 - **结论先行**：UI 生产路径 CUDA 跑完 900 s，体积守恒通过（相对误差 \(8.92\times10^{-7}\)）。**不声称 CUDA–Fortran 数值对等。** 墙钟约 1607 s，相对历史 CUDA t=900（2057.5 s）缩短约 22%。GPU 采样占用仍低（中位 7%）。侵蚀深度场相对 Fortran 体积比 1.27（历史窗口曾为 1.72）。
@@ -13,7 +17,7 @@
 | 主机 | Windows 10，Python 3.11.9（`Python311\python.exe`） |
 | GPU | NVIDIA GeForce RTX 3080 Ti，12 GB |
 | 后端 | `cuda_production_default`，Taichi 1.7.4，**fp32**（`default_fp=f32`，`fallback_active=false`） |
-| 案例 | `C:\Users\Administrator\Desktop\EDDA_test_project\Chamoli-EDDA file\Chamoli-EDDA file\` |
+| 案例 | 本地 Chamoli 原始 EDDA 案例目录（未随 clean checkout 分发） |
 | UI 项目 | `artifacts\chamoli_opt_ui_case_20260828` |
 | 方案 / 模拟 | `Chamoli opt t900` / `sim-d74dcf626b4148ec9a3dee25925c1064` |
 | 网格 | 748 × 715，41069 活动单元 |
@@ -62,7 +66,10 @@
 
 热路径：短 kernel 合并、depo-velocity 捕获默认关闭、reject 诊断仅在拒步时展开。参数入口走现有 catalog + `ParameterModule`「运行时」分组。
 
-CLI 对照（优化后、双精度窗口脚本 `_run_chamoli_window.py`）：t=45 CUDA 墙钟 **194.5 s**，Flow_depth max_abs **0.075856** / RMSE 0.00188，与历史 A/B 基线 0.076 一致，**无回归**。该脚本显式 `use_double_precision=True`，与 UI 生产 fp32 路径不同。
+CLI 对照（优化后、本地一次性双精度窗口运行器；运行器未随 clean
+checkout 分发）：t=45 CUDA 墙钟 **194.5 s**，Flow_depth max_abs
+**0.075856** / RMSE 0.00188，与历史 A/B 基线 0.076 一致，**无回归**。
+该运行器显式 `use_double_precision=True`，与 UI 生产 fp32 路径不同。
 
 ---
 
@@ -198,7 +205,7 @@ ASC 深度积分（cell 30 m × 30 m，相对 Fortran `results\`）：
 | 产物 | 路径 |
 |---|---|
 | 本报告 Markdown | `docs/audit/20260828_chamoli_opt_t900_closure.md` |
-| 本报告 HTML | `docs/audit/20260828_chamoli_opt_t900_closure.html` |
+| 本报告 HTML | 本地生成文件（未随 clean checkout 分发） |
 | 诊断 JSON | `…/outputs/sim-d74dcf626b4148ec9a3dee25925c1064/numerical_diagnostics.json` |
 | 帧残差 | `artifacts/chamoli_opt_ui_t900_grid_diff.json` |
 | GPU/磁盘采样 | `artifacts/chamoli_opt_ui_perf_monitor.csv` |

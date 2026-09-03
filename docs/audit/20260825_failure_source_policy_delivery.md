@@ -1,5 +1,9 @@
 # Failure-source policy production-chain delivery log
 
+> 历史交付记录（2026-08-25）。案例路径、运行日志、截图和
+> `artifacts/` 目录是本地证据；本文保留结论摘要，但这些原始文件不要求
+> 在 clean checkout 中存在。
+
 Date: 2026-08-25 (Asia/Shanghai)
 
 ## Delivered
@@ -20,8 +24,15 @@ Date: 2026-08-25 (Asia/Shanghai)
 - TypeScript build: `tsc -b` passed.
 - Focused Vitest: 2 files / 3 tests passed.
 - Production Vite build passed (one existing large-chunk warning).
-- Browser evidence is timestamped under `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\audit\20260825-*` for Settings (dark/light/high-contrast, 1366/768), Chamoli disabled resolution, complete BJ precomputed resolution, and path-free BJ Auto blocked resolution. The browser was left on the final Settings route after restoring the original Settings values.
-- The current API summary is recorded in `C:\Users\Administrator\Desktop\Taichi-Flow\artifacts\audit\20260825-policy-resolution-api-summary.json`: Chamoli `resolved/disabled`, BJ_HXL `resolved/precomputed`, and the path-free BJ fixture `blocked/failure_source_topology_unknown` without a live fallback.
+- Browser evidence was captured in the local-only `artifacts/audit/20260825-*`
+  snapshots for Settings (dark/light/high-contrast, 1366/768), Chamoli
+  disabled resolution, complete BJ precomputed resolution, and path-free BJ
+  Auto blocked resolution. The browser was left on the final Settings route
+  after restoring the original Settings values.
+- The local-only API summary `artifacts/audit/20260825-policy-resolution-api-summary.json`
+  records Chamoli `resolved/disabled`, BJ_HXL `resolved/precomputed`, and the
+  path-free BJ fixture `blocked/failure_source_topology_unknown` without a live
+  fallback.
 
 ## Scientific boundary
 

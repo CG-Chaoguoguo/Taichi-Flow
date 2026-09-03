@@ -15,16 +15,19 @@
    parameters; completed or archived scenarios must be duplicated first.
 5. Add the scenario to the queue. The queue is FIFO within a project and may
    run two different projects concurrently by default.
-6. Follow terminal snapshots in the calculation page. If the WebSocket drops,
-   the client falls back to REST polling. Stop, cancel, or retry actions are
-   explicit and remain visible after a service restart.
+6. Follow terminal snapshots in the calculation page. The current client uses
+   REST polling; the backend also exposes WebSocket snapshot routes for a
+   future realtime client. Stop, cancel, or retry actions are explicit and
+   remain visible after a service restart.
 7. Browse result families and download a single file or a project-root-safe
    ZIP. Create an export to receive effective parameters plus a checksummed
    manifest.
 
-The settings page changes only local theme/accessibility preferences and shows
-read-only server metrics. It does not pretend to save server configuration that
-the API does not expose.
+The settings page changes local theme/accessibility preferences and exposes the
+global compute-gate defaults through `GET/PUT /api/settings/compute-gates`.
+These gates control which evidence-backed runtime options are available to new
+runs; they are not a replacement for scenario parameters. Server metrics remain
+read-only.
 
 Before a project is active, **方案、计算、队列、导出** are disabled and omitted
 from keyboard focus; their tooltip explains that a project must be created or

@@ -1,6 +1,4 @@
-"""
-Configuration management for EDDA simulation.
-"""
+"""Configuration management for Taichi-Flow simulations."""
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -456,14 +454,20 @@ class SimulationConfig(BaseModel):
     @classmethod
     def from_yaml(cls, yaml_file: str) -> "SimulationConfig":
         """Load configuration from YAML file."""
-        with open(yaml_file, 'r') as f:
+        with open(yaml_file, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
         return cls(**data)
 
     def to_yaml(self, yaml_file: str):
         """Save configuration to YAML file."""
-        with open(yaml_file, 'w') as f:
-            yaml.dump(self.model_dump(), f, default_flow_style=False)
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(
+                self.model_dump(),
+                f,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False,
+            )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SimulationConfig":
@@ -479,8 +483,8 @@ class SimulationConfig(BaseModel):
 def create_example_config(output_file: str = "config_example.yaml"):
     """Create an example configuration file."""
     config = SimulationConfig(
-        dem_file="examples/data/dem.tif",
-        rainfall_file="examples/data/rainfall.csv",
+        dem_file="examples/data/dev_tiny_dem.asc",
+        rainfall_file="examples/data/dev_rainfall.csv",
         output_dir="./output",
     )
     config.to_yaml(output_file)

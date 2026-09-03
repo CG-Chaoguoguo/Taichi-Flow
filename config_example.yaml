@@ -1,14 +1,18 @@
-# Example EDDA Simulation Configuration
+# Example Taichi-Flow Simulation Configuration
 
 # Input files
-dem_file: "examples/data/dem.tif"
-rainfall_file: "examples/data/rainfall.csv"
+dem_file: "examples/data/dev_tiny_dem.asc"
+rainfall_file: "examples/data/dev_rainfall.csv"
 soil_zones_file: null
 
 # Output settings
 output_dir: "./output"
 output_format: "geotiff"  # Options: geotiff, netcdf, ascii
 save_intermediate: true
+
+rainfall:
+  mode: "single_file"
+  file: "examples/data/dev_rainfall.csv"
 
 # Hydrology parameters (Green-Ampt infiltration model)
 hydrology:
