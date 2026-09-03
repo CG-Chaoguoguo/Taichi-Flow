@@ -1,7 +1,7 @@
 import math
 
-import tools.diagnostics.native_unsfin_analytic_cell as analytic
-from tools.diagnostics.native_unsfin_analytic_cell import (
+from edda.solver.native_unsfin import analytic_cell as analytic
+from edda.solver.native_unsfin.analytic_cell import (
     ActiveContext,
     CellFieldPack,
     Coefficients,

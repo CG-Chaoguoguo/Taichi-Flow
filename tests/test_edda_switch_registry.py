@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from api.services.edda_input_mapper import build_reference_runtime_metadata
 from api.services.edda_switch_registry import (
     ALLOWED_STATUSES,
@@ -17,6 +19,11 @@ from api.services.parameter_templates import (
 
 CASE_DIR = Path(
     r"C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text"
+)
+
+_requires_bj_hxl = pytest.mark.skipif(
+    not (CASE_DIR / "edda_in.txt").exists(),
+    reason="BJ_HXL reference case is not on disk",
 )
 
 
@@ -69,6 +76,7 @@ EXPECTED_SWITCH_KEYS = [
 ]
 
 
+@_requires_bj_hxl
 def test_bj_hxl_parser_exposes_exact_versioned_45_switch_snapshot_in_source_order():
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")
 
@@ -86,6 +94,7 @@ def test_bj_hxl_parser_exposes_exact_versioned_45_switch_snapshot_in_source_orde
     assert snapshot["values"]["simulate_barrier"] is False
 
 
+@_requires_bj_hxl
 def test_reference_runtime_config_carries_the_same_snapshot_in_deep_edda_controls(tmp_path):
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")
 
@@ -133,6 +142,7 @@ def test_registry_has_complete_nine_part_trace_and_acyclic_dependency_contract()
         )
 
 
+@_requires_bj_hxl
 def test_output_truth_uses_one_scalar_flow_velocity_family_and_tracks_max_solid():
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")
 
@@ -169,6 +179,7 @@ def test_repaired_dfs_controls_and_output_families_report_current_consumption_tr
     assert EDDA_SWITCH_BY_KEY["simulate_debris_flow"].status == "partial"
 
 
+@_requires_bj_hxl
 def test_path_free_import_preserves_all_edda_controls_for_strict_runtime_gate():
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")
 
@@ -183,6 +194,7 @@ def test_path_free_import_preserves_all_edda_controls_for_strict_runtime_gate():
     assert imported == parsed.switch_snapshot.to_dict()["values"]
 
 
+@_requires_bj_hxl
 def test_current_bj_hxl_template_freezes_exact_controls_without_rewriting_v2():
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")
     template = builtin_bj_hxl_template()

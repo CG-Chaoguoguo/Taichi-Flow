@@ -24,6 +24,14 @@ CASE_DIR = Path(
     r"C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text"
 )
 
+# The strict-control assertions below intentionally exercise the original
+# BJ_HXL reference case.  That case is local evidence and is not distributed
+# in a clean repository archive, so make the boundary an explicit skip.
+pytestmark = pytest.mark.skipif(
+    not (CASE_DIR / "edda_in.txt").exists(),
+    reason="BJ_HXL reference case is not on disk",
+)
+
 
 def test_reference_controls_are_frozen_while_control_free_direct_api_is_compatible(tmp_path):
     parsed = parse_reference_config_file(CASE_DIR / "edda_in.txt")

@@ -1,12 +1,12 @@
 import numpy as np
 
-from tools.run_cuda_candidate_case import fortran_ssvgrd_g12p4_numeric
+from edda.io.fortran_text_format import fortran_ssvgrd_g12p4_numeric_candidate
 
 
 def test_fortran_ssvgrd_g12p4_uses_fixed_branch_after_rounding_to_point_one() -> None:
     values = np.asarray([[0.0, 0.09996865235553248, 0.0123456, 1.23456]], dtype=np.float64)
 
-    formatted = fortran_ssvgrd_g12p4_numeric(values)
+    formatted = fortran_ssvgrd_g12p4_numeric_candidate(values)
 
     np.testing.assert_allclose(
         formatted,

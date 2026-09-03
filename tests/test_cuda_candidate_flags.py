@@ -1,4 +1,7 @@
-from tools.run_cuda_candidate_case import DEFAULT_CUDA_FLAGS
+from api.services.runtime_profile import RUNTIME_PROFILES
+
+
+DEFAULT_CUDA_FLAGS = RUNTIME_PROFILES["edda_taichi_cuda_candidate"].environment
 
 
 def test_cuda_candidate_keeps_precomputed_unsfin_reference_grid_guard_by_default():

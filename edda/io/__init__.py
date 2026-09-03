@@ -1,5 +1,16 @@
-"""I/O utilities for EDDA-Taichi."""
+"""I/O utilities for Taichi-Flow."""
 
+from .fortran_text_format import (
+    fortran_ssvgrd_g12p4_numeric,
+    fortran_ssvgrd_g12p4_numeric_candidate,
+)
+from .output_fields import (
+    FLOW_VELOCITY_OUTPUT_STATE_FIELDS,
+    add_velocity_state_diagnostics,
+    apply_flow_velocity_output_state,
+    scalar_fields,
+    velocity_fields,
+)
 from .dem_reader import DEMReader, read_ascii_grid
 from .nodata_handler import NoDataHandler, detect_nodata_value, fill_nodata_auto
 from .result_exporter import ResultExporter, export_results
@@ -44,4 +55,11 @@ __all__ = [
     'load_stormdrain_topology',
     'run_stormdrain_runtime_consumer',
     'stormdrain_runtime_enabled',
+    'fortran_ssvgrd_g12p4_numeric',
+    'fortran_ssvgrd_g12p4_numeric_candidate',
+    'FLOW_VELOCITY_OUTPUT_STATE_FIELDS',
+    'add_velocity_state_diagnostics',
+    'apply_flow_velocity_output_state',
+    'scalar_fields',
+    'velocity_fields',
 ]

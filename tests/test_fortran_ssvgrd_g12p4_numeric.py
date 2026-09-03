@@ -1,10 +1,7 @@
 import numpy as np
 import pytest
 
-try:
-    from tools.fortran_ssvgrd_format import fortran_ssvgrd_g12p4_numeric
-except ModuleNotFoundError:
-    from fortran_ssvgrd_format import fortran_ssvgrd_g12p4_numeric  # type: ignore[no-redef]
+from edda.io.fortran_text_format import fortran_ssvgrd_g12p4_numeric
 
 
 def test_g12p4_fixed_branch_uses_four_significant_digits() -> None:

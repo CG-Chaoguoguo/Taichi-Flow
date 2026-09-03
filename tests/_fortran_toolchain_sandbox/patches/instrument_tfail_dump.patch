@@ -1,0 +1,54 @@
+diff --git a/edda main program.F90 b/edda main program.F90
+--- a/edda main program.F90
++++ b/edda main program.F90
+@@
+-if (fssimul) call unsfin(imx1,u(19),u(2),profil)
++if (fssimul) call unsfin(imx1,u(19),u(2),profil)
++if (fssimul) call dump_unsfin_schedule_artifacts(imx1)
+diff --git a/tfail_dump.F90 b/tfail_dump.F90
+new file mode 100644
+--- /dev/null
++++ b/tfail_dump.F90
+@@
++subroutine dump_unsfin_schedule_artifacts(imx1)
++    use model_vars
++    use grids
++    implicit none
++    integer, intent(in) :: imx1
++    integer :: i
++
++    open(991,file='precomputed_unsfin_gindx.txt',status='replace')
++    do i=1,imx1
++        write(991,*) gindx(i)
++    end do
++    close(991)
++
++    open(992,file='precomputed_unsfin_tfail.txt',status='replace')
++    do i=1,imx1
++        write(992,'(ES24.16)') dble(tfail(i))
++    end do
++    close(992)
++
++    open(993,file='precomputed_unsfin_fdepth.txt',status='replace')
++    do i=1,imx1
++        write(993,'(ES24.16)') fdepth(i)
++    end do
++    close(993)
++
++    open(994,file='precomputed_unsfin_meta.json',status='replace')
++    write(994,'(A)') '{'
++    write(994,'(A,I0,A)') '  "imx1": ', imx1, ','
++    write(994,'(A)') '  "shape_kind": "active_cell_vector",'
++    write(994,'(A)') '  "provider": "original_instrumented_unsfin",'
++    write(994,'(A)') '  "dump_point": "after unsfin returns and before dfs enters",'
++    write(994,'(A)') '  "notes": "Vector order follows original EDDA active DEM point order; current loader maps through DEM valid-cell order."'
++    write(994,'(A)') '}'
++    close(994)
++end subroutine dump_unsfin_schedule_artifacts
+diff --git a/EDDA.vfproj b/EDDA.vfproj
+--- a/EDDA.vfproj
++++ b/EDDA.vfproj
+@@
+-		<File RelativePath=".\unsfin.F90"/>
++		<File RelativePath=".\unsfin.F90"/>
++		<File RelativePath=".\tfail_dump.F90"/>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tests.comparison.run_paired_erosion_gate_diagnostic import _write_kero_zone_unit_decomposition_artifacts
+from tests.support.erosion_decomposition import _write_kero_zone_unit_decomposition_artifacts
 from tests.test_erosion_rate_fortran_formula import build_two_cell_erosion_solver
 
 

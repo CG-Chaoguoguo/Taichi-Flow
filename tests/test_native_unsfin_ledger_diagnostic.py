@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 
-from tools.diagnostics.native_unsfin_ledger_diagnostic import (
+from edda.solver.native_unsfin.ledger import (
     NATIVE_PROVENANCE,
     build_native_blocked_ledger,
     compare_ledgers,
