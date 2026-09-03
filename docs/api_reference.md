@@ -82,7 +82,7 @@ they remain mounted and are not the primary project-scoped workflow.
 ```text
 GET    /api/projects/{project_id}/results/{simulation_id}
 GET    /api/projects/{project_id}/results/{simulation_id}/metadata
-GET    /api/projects/{project_id}/results/{simulation_id}/files/{filename}
+GET    /api/projects/{project_id}/results/{simulation_id}/files/{filename:path}
 GET    /api/projects/{project_id}/results/{simulation_id}/download.zip
 DELETE /api/projects/{project_id}/results/{simulation_id}
 GET    /api/projects/{project_id}/exports

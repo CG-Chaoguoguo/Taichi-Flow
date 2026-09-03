@@ -7,6 +7,10 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+coverage/
+coverage.xml
+coverage.json
+.coverage.*
 .venv/
 venv/
 env/
@@ -25,6 +29,15 @@ ENV/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db-wal
+*.db-shm
+*.db-journal
 *.log
 *.pid
 .env
@@ -35,17 +48,44 @@ ENV/
 outputs/
 uploads/
 artifacts/
+/output/
+/output_example/
+/build/
+/.eggs/
 *.npz
 *.npy
 
 # Test-only toolchain sandbox and generated intermediates
-tests/_fortran_toolchain_sandbox/
+tests/_fortran_toolchain_sandbox/*
 tests/**/__pycache__/
 tests/**/generated/
 tests/**/work/
 tests/**/logs/
 tests/**/scripts/
 tests/**/patches/
+
+# The sandbox contract keeps only its small, repeatable source skeleton in Git.
+!tests/_fortran_toolchain_sandbox/README.md
+!tests/_fortran_toolchain_sandbox/.gitignore
+!tests/_fortran_toolchain_sandbox/scripts/
+!tests/_fortran_toolchain_sandbox/scripts/**
+!tests/_fortran_toolchain_sandbox/patches/
+tests/_fortran_toolchain_sandbox/patches/*
+!tests/_fortran_toolchain_sandbox/patches/instrument_tfail_dump.patch
+!tests/_fortran_toolchain_sandbox/fixtures/
+!tests/_fortran_toolchain_sandbox/fixtures/README.md
+!tests/_fortran_toolchain_sandbox/generated/
+tests/_fortran_toolchain_sandbox/generated/*
+!tests/_fortran_toolchain_sandbox/generated/.gitkeep
+!tests/_fortran_toolchain_sandbox/logs/
+tests/_fortran_toolchain_sandbox/logs/*
+!tests/_fortran_toolchain_sandbox/logs/.gitkeep
+!tests/_fortran_toolchain_sandbox/toolchain/
+tests/_fortran_toolchain_sandbox/toolchain/*
+!tests/_fortran_toolchain_sandbox/toolchain/.gitkeep
+!tests/_fortran_toolchain_sandbox/work/
+tests/_fortran_toolchain_sandbox/work/*
+!tests/_fortran_toolchain_sandbox/work/.gitkeep
 
 # Test comparison and diagnostic intermediate scripts
 tests/comparison/
