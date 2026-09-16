@@ -22,6 +22,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .ledger import LedgerArrays, load_original_oracle
+from .input_grid import load_aligned_active_inputs, read_ascii_active_values
 
 
 TARGET_CELLS = (90008, 90001, 51509, 21846)
@@ -883,52 +884,23 @@ def parse_edda_in(case_dir: Path) -> dict[str, Any]:
     }
 
 
-def read_ascii_active_values(path: Path, *, integer: bool = False) -> tuple[list[float], list[tuple[int, int]], dict[str, Any]]:
-    text = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    header_lines = text[:6]
-    header: dict[str, Any] = {}
-    for line in header_lines:
-        parts = line.split()
-        if len(parts) >= 2:
-            key = parts[0].lower()
-            value: float | str
-            try:
-                value = float(parts[1])
-            except ValueError:
-                value = parts[1]
-            header[key] = value
-    nodata = float(header.get("nodata_value", -9999.0))
-    active: list[float] = []
-    mapping: list[tuple[int, int]] = []
-    for row_index, line in enumerate(text[6:], start=1):
-        if not line.strip():
-            continue
-        for col_index, raw in enumerate(line.split(), start=1):
-            value = float(raw)
-            if value == nodata:
-                continue
-            active.append(float(int(value)) if integer else value)
-            mapping.append((row_index, col_index))
-    return active, mapping, header
-
-
 def build_cell_field_packs(
     case_dir: Path,
     original_rows: dict[str, list[dict[str, Any]]],
 ) -> tuple[dict[int, CellFieldPack], dict[str, Any]]:
     config = parse_edda_in(case_dir)
-    paths = config["paths"]
-    slope_values, active_mapping, slope_header = read_ascii_active_values(case_dir / paths["slope"])
-    zone_values, zone_mapping, _zone_header = read_ascii_active_values(case_dir / paths["zone"], integer=True)
-    ltstar_values, ltstar_mapping, _lt_header = read_ascii_active_values(case_dir / paths["ltstar"])
+    grids = load_aligned_active_inputs(case_dir, config["paths"])
+    slope_values, active_mapping, slope_header = grids["slope"]
+    zone_values, zone_mapping, _zone_header = grids["zone"]
+    ltstar_values, ltstar_mapping, _lt_header = grids["ltstar"]
     packs: dict[int, CellFieldPack] = {}
     diagnostics: dict[str, Any] = {
         "source_provenance": SOURCE_PROVENANCE,
         "runtime_provider_enabled": False,
         "output_inferred": False,
         "active_cells_from_slope": len(slope_values),
-        "active_mapping_matches_zone": len(active_mapping) == len(zone_mapping),
-        "active_mapping_matches_ltstar": len(active_mapping) == len(ltstar_mapping),
+        "active_mapping_matches_zone": active_mapping == zone_mapping,
+        "active_mapping_matches_ltstar": active_mapping == ltstar_mapping,
         "shape": [int(slope_header.get("nrows", 0)), int(slope_header.get("ncols", 0))],
         "field_classification": {
             "slo": "AVAILABLE_MATCHED",
@@ -982,12 +954,10 @@ def build_cell_field_packs(
 
 def build_active_context(case_dir: Path) -> ActiveContext:
     config = parse_edda_in(case_dir)
-    paths = config["paths"]
-    slope_values, active_mapping, slope_header = read_ascii_active_values(case_dir / paths["slope"])
-    zone_values, zone_mapping, _zone_header = read_ascii_active_values(case_dir / paths["zone"], integer=True)
-    ltstar_values, ltstar_mapping, _lt_header = read_ascii_active_values(case_dir / paths["ltstar"])
-    if len(active_mapping) != len(zone_mapping) or len(active_mapping) != len(ltstar_mapping):
-        raise ValueError("active-cell mapping mismatch across slope/zone/ltstar grids")
+    grids = load_aligned_active_inputs(case_dir, config["paths"])
+    slope_values, active_mapping, slope_header = grids["slope"]
+    zone_values, zone_mapping, _zone_header = grids["zone"]
+    ltstar_values, ltstar_mapping, _lt_header = grids["ltstar"]
     return ActiveContext(
         config=config,
         slope_values_deg=slope_values,

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 
 
-def test_directory_picker_lists_local_directories_without_files(tmp_path: Path) -> None:
+def test_directory_picker_separates_typed_directories_and_files(tmp_path: Path) -> None:
     root = tmp_path / "drive-c"
     child = root / "project-parent"
     child.mkdir(parents=True)
@@ -22,7 +22,7 @@ def test_directory_picker_lists_local_directories_without_files(tmp_path: Path) 
         roots = client.get("/api/system/directories")
         assert roots.status_code == 200
         assert roots.json()["roots"] == [
-            {"name": "drive-c", "path": str(root.resolve()), "writable": True}
+            {"name": "drive-c", "path": str(root.resolve()), "writable": True, "kind": "directory", "size": None}
         ]
 
         listing = client.get("/api/system/directories", params={"path": str(root)})
@@ -32,9 +32,13 @@ def test_directory_picker_lists_local_directories_without_files(tmp_path: Path) 
         assert payload["parent_path"] is None
         assert payload["can_select"] is True
         assert payload["directories"] == [
-            {"name": "project-parent", "path": str(child.resolve()), "writable": True}
+            {"name": "project-parent", "path": str(child.resolve()), "writable": True, "kind": "directory", "size": None}
         ]
-        assert "not-a-directory.txt" not in str(payload)
+        assert payload["files"] == [{
+            "name": "not-a-directory.txt",
+            "path": str((root / "not-a-directory.txt").resolve()),
+            "writable": True, "kind": "file", "size": len("not exposed".encode("utf-8")),
+        }]
 
 
 def test_directory_picker_rejects_non_local_and_invalid_paths(tmp_path: Path, monkeypatch) -> None:
@@ -55,7 +59,7 @@ def test_directory_picker_rejects_non_local_and_invalid_paths(tmp_path: Path, mo
 
         missing = client.get("/api/system/directories", params={"path": str(root / "missing")})
         assert missing.status_code == 404
-        assert missing.json()["code"] == "directory_not_found"
+        assert missing.json()["code"] == "path_not_found"
 
         not_directory = client.get("/api/system/directories", params={"path": str(file_path)})
         assert not_directory.status_code == 409
@@ -91,7 +95,7 @@ def test_directory_picker_has_a_typed_openapi_contract_without_legacy_routes(tmp
     directory_schema = schema["paths"]["/api/system/directories"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert directory_schema["$ref"].endswith("/DirectoryListingResponse")
     properties = schema["components"]["schemas"]["DirectoryListingResponse"]["properties"]
-    assert set(properties) == {"current_path", "parent_path", "roots", "directories", "can_select"}
+    assert set(properties) == {"current_path", "parent_path", "roots", "directories", "files", "can_select"}
 
     for legacy_path in {
         "/api/projects/list",

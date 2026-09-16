@@ -154,6 +154,8 @@ class TestParameterMapping:
             0: ZoneParams(
                 zone_id=0,
                 K_sat=1e-5,
+                ctao=1.25,
+                cvero=0.42,
                 theta_s=0.45,
                 theta_i=0.20,
                 psi_f=0.10,
@@ -170,7 +172,9 @@ class TestParameterMapping:
             ),
             1: ZoneParams(
                 zone_id=1,
-                K_sat=5e-6,  # Different K_sat
+                K_sat=5e-6,
+                ctao=2.5,
+                cvero=None,  # Different K_sat
                 theta_s=0.40,  # Different theta_s
                 theta_i=0.15,
                 psi_f=0.15,
@@ -195,7 +199,19 @@ class TestParameterMapping:
         )
 
         assert zone_mask.shape == (nx, ny)
-        assert zone_params.shape == (2, 26)  # 2 zones, 26 parameters
+        # Match the runtime mapping's column contract, including erosion controls.
+        columns = (
+            "K_sat", "theta_s", "theta_i", "psi_f", "c", "phi", "gamma_s", "gamma_w", "depth",
+            "n_manning", "alpha1", "beta1", "alpha2", "beta2", "alpha_top", "alpha_bottom",
+            "K_sat_top", "K_sat_bottom", "theta_sat_top", "theta_sat_bottom", "theta_res_top",
+            "theta_res_bottom", "phib", "kero", "ltstar", "lbstar", "ctao", "cvero",
+        )
+        assert zone_params.shape == (2, len(columns))
+        for row, zone_id in enumerate(sorted(zone_config)):
+            for col, name in enumerate(columns):
+                value = getattr(zone_config[zone_id], name)
+                expected = -1.0 if name == "cvero" and value is None else value
+                assert zone_params[row, col] == expected, (zone_id, name)
         assert zone_params.dtype == np.float64
 
         # Verify parameter values for zone 0

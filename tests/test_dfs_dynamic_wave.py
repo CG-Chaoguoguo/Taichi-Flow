@@ -2958,21 +2958,7 @@ def test_cvlimit_positive_slope_bj_clamps_cvstar_chamoli_keeps_unit_band():
 
 
 def test_sfdf_classify_cv_variant_prev_vs_predicted_commit_branch():
-    """B3: previous_committed_cv → FF; predicted_step_cv_chamoli → SF."""
-    import inspect
-
-    from edda.solver import dfs_dynamic_wave as dfs_mod
-
-    cls = next(
-        obj
-        for name, obj in vars(dfs_mod).items()
-        if isinstance(obj, type) and hasattr(obj, "_commit_step")
-    )
-    source = inspect.getsource(cls._commit_step)
-    assert "classify_cv = prev_cv" in source
-    assert "classify_cv = predicted_step_cv" in source
-    assert 'dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"' in source
-
+    """Classification is pre-outflow; committing must not overwrite its result."""
     rho_water = 1000.0
     rho_sediment = 2650.0
     density_span = rho_sediment - rho_water
@@ -3009,7 +2995,11 @@ def test_sfdf_classify_cv_variant_prev_vs_predicted_commit_branch():
             )
         )
         fields.tempele.from_numpy(fields.z_bed.to_numpy())
+        solver._classify_sfdf_pre_outflow(rho_water, rho_sediment)
+        before = [field.to_numpy().copy() for field in (fields.sfh, fields.dfh, fields.ffh)]
         solver._commit_step(0.1, 0.1, rho_water, rho_sediment, cfg.rheology.Cv_max)
+        for field, expected in zip((fields.sfh, fields.dfh, fields.ffh), before):
+            np.testing.assert_array_equal(field.to_numpy(), expected)
         return (
             fields.sfh.to_numpy()[0, 0],
             fields.dfh.to_numpy()[0, 0],

@@ -10,8 +10,12 @@ from tests.test_native_input_chain import _make_reference_case, _write_ascii_gri
 from tests.test_native_runtime_consumption import _initialize_real_solver
 
 
-def _make_precomputed_schedule_case(tmp_path, *, with_artifacts: bool = True):
-    edda_in = _make_reference_case(tmp_path)
+def _make_precomputed_schedule_case(tmp_path, *, with_artifacts: bool = True, cellsize: float = 30.0):
+    # This is a synthetic schedule/ledger test, not a historical reference run.
+    # At 1 m spacing its 1 s candidate violates the real CFL threshold (~0.303 s).
+    # A consistent 30 m grid lets both .5/.75 s source events be committed in
+    # one stable candidate WITHOUT changing solver thresholds or forcing accept.
+    edda_in = _make_reference_case(tmp_path, cellsize=cellsize)
     (edda_in.parent / "dfs.F90").write_text(
         "\n".join(
             [
@@ -33,9 +37,9 @@ def _make_precomputed_schedule_case(tmp_path, *, with_artifacts: bool = True):
         encoding="utf-8",
     )
     if with_artifacts:
-        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_gindx.txt", np.array([[1, 0], [0, 1]], dtype=np.float64))
-        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_tfail.txt", np.array([[0.5, 9999.0], [9999.0, 0.75]], dtype=np.float64))
-        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_fdepth.txt", np.array([[0.2, 0.0], [0.0, 0.4]], dtype=np.float64))
+        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_gindx.txt", np.array([[1, 0], [0, 1]], dtype=np.float64), cellsize=cellsize)
+        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_tfail.txt", np.array([[0.5, 9999.0], [9999.0, 0.75]], dtype=np.float64), cellsize=cellsize)
+        _write_ascii_grid(edda_in.parent / "precomputed_unsfin_fdepth.txt", np.array([[0.2, 0.0], [0.0, 0.4]], dtype=np.float64), cellsize=cellsize)
         (edda_in.parent / "precomputed_unsfin_meta.json").write_text(
             '{"shape_kind":"dem_yx_grid","provider":"original_instrumented_unsfin","dump_point":"after unsfin returns and before dfs enters"}\n',
             encoding="utf-8",
@@ -178,3 +182,42 @@ def test_production_native_unsfin_runtime_feed_is_feature_gated_and_consumed(tmp
     assert diagnostics["runtime_active"] is True
     assert diagnostics["consumed_count"] == 2
     assert diagnostics["committed_fired_count"] == 2
+
+
+def test_real_cfl_rejection_discards_sources_then_retries_commit_exactly_once(tmp_path):
+    import pytest
+
+    # Retain the original steep 1 m synthetic grid to exercise a REAL reject.
+    # The controlled retry uses a smaller candidate, not a larger CFL tolerance.
+    edda_in = _make_precomputed_schedule_case(tmp_path, cellsize=1.0)
+    solver, manifest, _, _ = _initialize_real_solver(edda_in, tmp_path / "out_real_retry")
+    solver.fields.erodible_thickness.from_numpy(np.full((solver.fields.nx, solver.fields.ny), 10.0, dtype=np.float64))
+    dfs = solver.dfs_dynamic_wave
+    dfs.set_current_time(0.0)
+    rejected = dfs.step(1.0)
+    assert not rejected["accepted"]
+    assert rejected["rejected_stage"] == "cfl"
+    diagnostics = collect_runtime_source_chain_diagnostics(solver, manifest)
+    assert diagnostics["committed_fired_count"] == 0
+    assert diagnostics["candidate_fired_count"] == 0
+    assert diagnostics["rejected_step_discard_count"] == 2
+    assert diagnostics["failure_source_flow_depth_sum"] == 0.0
+    t, dt = 0.0, 0.1
+    for _ in range(200):
+        if t >= 1.0 - 1.e-12:
+            break
+        dfs.set_current_time(t)
+        info = dfs.step(min(dt, 1.0 - t))
+        if info["accepted"]:
+            t += info["used_dt"]
+        else:
+            # Test driver only; time never advances for a rejected attempt.
+            dt = min(float(info["suggested_dt"]), dt / 2.0)
+    assert t == pytest.approx(1.0, rel=0.0, abs=1.e-12)
+    diagnostics = collect_runtime_source_chain_diagnostics(solver, manifest)
+    assert diagnostics["committed_fired_count"] == 2
+    assert diagnostics["candidate_fired_count"] == 0
+    assert diagnostics["duplicate_fire_count"] == 0
+    assert diagnostics["failure_source_flow_depth_sum"] == pytest.approx(0.6, rel=1.e-12)
+    rho = (solver.config.rheology.rho_sediment - solver.config.rheology.rho_water) * solver.config.rheology.Cv_max + solver.config.rheology.rho_water
+    assert diagnostics["failure_source_mass_sum"] == pytest.approx(0.6 * rho, rel=1.e-12)

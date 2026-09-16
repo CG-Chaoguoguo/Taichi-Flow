@@ -5002,8 +5002,10 @@ class DFSDynamicWaveSolver:
             self.qmassnet_diag_kernel[i, j] = 0.0
             self.qnet_qmassnet_diag_cell_mask[i, j] = 0
             if not self.fields.is_nodata[i, j] and self.fields.cell_id[i, j] > 0:
-                qnet = 0.0
-                qmassnet = 0.0
+                # Match _accumulate_and_check even when runtime default_fp is
+                # f32: declaring f64 fields does not type a local accumulator.
+                qnet = ti.cast(0.0, ti.f64)
+                qmassnet = ti.cast(0.0, ti.f64)
                 for d in ti.static(range(8)):
                     qnet -= self.fields.qq_fortran[i, j, d]
                     qmassnet -= self.fields.qqmass_fortran[i, j, d]
@@ -6611,7 +6613,16 @@ class DFSDynamicWaveSolver:
                     continue
                 if int(neighbor_id[i, j, direction]) <= 0:
                     continue
-                if int(cell_id[ni, nj]) < source_cell_id:
+                # Match the strict kernel ownership predicate, including the
+                # opt-in reverse owner. Otherwise a real kernel assignment can
+                # have no host pair (or a self-edge can be invented).
+                target_cell_id = int(cell_id[ni, nj])
+                owns_face = (
+                    source_cell_id > target_cell_id
+                    if self.fortran_face_owner_max_cell_enabled
+                    else target_cell_id > source_cell_id
+                )
+                if not owns_face:
                     continue
                 source_i.append(i)
                 source_j.append(j)

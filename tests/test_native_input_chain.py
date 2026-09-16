@@ -16,33 +16,33 @@ from api.services.reference_config_parser import parse_reference_config_file
 from edda.io.rainfall_reader import RainfallReader
 
 
-def _write_ascii_grid(path: Path, values: np.ndarray, nodata: float = -9999.0) -> None:
+def _write_ascii_grid(path: Path, values: np.ndarray, nodata: float = -9999.0, *, cellsize: float = 1.0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(f"ncols {values.shape[1]}\n")
         handle.write(f"nrows {values.shape[0]}\n")
         handle.write("xllcorner 0\n")
         handle.write("yllcorner 0\n")
-        handle.write("cellsize 1\n")
+        handle.write(f"cellsize {cellsize}\n")
         handle.write(f"NODATA_value {nodata}\n")
         for row in values:
             handle.write(" ".join(str(v) for v in row) + "\n")
 
 
-def _make_reference_case(tmp_path: Path) -> Path:
+def _make_reference_case(tmp_path: Path, *, cellsize: float = 1.0) -> Path:
     case_dir = tmp_path / "case"
     tutorial_dir = case_dir / "Data" / "tutorial"
     topo_dir = case_dir / "Data" / "topo"
 
     grid = np.array([[10.0, 11.0], [12.0, 13.0]], dtype=np.float64)
-    _write_ascii_grid(tutorial_dir / "bcdem.asc", grid)
-    _write_ascii_grid(tutorial_dir / "bczone.asc", np.array([[1, 1], [1, 1]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "bcslope.asc", np.array([[20.0, 25.0], [30.0, 35.0]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "bcltstar.asc", np.array([[2.0, 2.5], [3.0, 3.5]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "manning.asc", np.array([[0.1, 0.11], [0.12, 0.13]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "directions.asc", np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "depthwt.asc", np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float64))
-    _write_ascii_grid(tutorial_dir / "rizero.asc", np.array([[1.0e-9, 1.0e-9], [1.0e-9, 1.0e-9]], dtype=np.float64))
+    _write_ascii_grid(tutorial_dir / "bcdem.asc", grid, cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "bczone.asc", np.array([[1, 1], [1, 1]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "bcslope.asc", np.array([[20.0, 25.0], [30.0, 35.0]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "bcltstar.asc", np.array([[2.0, 2.5], [3.0, 3.5]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "manning.asc", np.array([[0.1, 0.11], [0.12, 0.13]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "directions.asc", np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "depthwt.asc", np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float64), cellsize=cellsize)
+    _write_ascii_grid(tutorial_dir / "rizero.asc", np.array([[1.0e-9, 1.0e-9], [1.0e-9, 1.0e-9]], dtype=np.float64), cellsize=cellsize)
 
     for topo_name in (
         "TIdscelGrid_tutorial.txt",

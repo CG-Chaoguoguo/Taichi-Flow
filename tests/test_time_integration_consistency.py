@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from edda.solver.edda_solver import EDDASolver
+from edda.config.sim_config import SimulationConfig
 from edda.solver.time_stepper import TimeStepper
 
 
@@ -16,6 +17,9 @@ class _HarnessSolver(EDDASolver):
     """
 
     def __init__(self, scripted_steps, *, t_end: float, dt_initial: float, dt_output: float):
+        # A time-loop double still satisfies the real output lifecycle contract.
+        # No file is read: physics and output callbacks are the deliberate doubles.
+        super().__init__(SimulationConfig(dem_file="time-loop-test-double.asc", compute={"async_output": False}))
         self.fields = object()
         self.time_stepper = TimeStepper(
             t_start=0.0,
@@ -41,6 +45,11 @@ class _HarnessSolver(EDDASolver):
         self._scripted_steps = list(scripted_steps)
         self.physics_dts = []
         self.output_times = []
+
+    def write_erosion_probe_csv(self):
+        # This harness deliberately has no raster/output workspace. Keep the
+        # real run() finalization and completion checks, but double probe I/O.
+        return None
 
     def _use_fortran_dfs(self) -> bool:  # pragma: no cover - behavior tested through run()
         return True
