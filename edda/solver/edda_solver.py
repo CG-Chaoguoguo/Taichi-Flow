@@ -58,6 +58,9 @@ from edda.solver.native_unsfin_provider import (
 )
 from edda.solver.shallow_water import ShallowWaterSolver
 from edda.solver.time_stepper import TimeStepper
+from edda.solver.restart_metadata import (
+    export_dfs_host_state, validate_dfs_host_state, restore_dfs_host_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2047,9 +2050,7 @@ class EDDASolver:
         zone_config = self.config.spatial_zones
 
         if not zone_config.zone_file:
-            logger.warning("Spatial zones enabled but no zone file specified. Using uniform parameters.")
-            self._initialize_uniform_parameters()
-            return
+            raise ValueError("Spatial zones enabled but no zone file specified; refusing uniform fallback.")
 
         try:
             # Read zone raster file
@@ -2082,9 +2083,9 @@ class EDDASolver:
             logger.info("Spatial zone system initialized successfully")
 
         except Exception as e:
-            logger.error(f"Failed to initialize spatial zones: {e}")
-            logger.warning("Falling back to uniform parameters")
-            self._initialize_uniform_parameters()
+            # An enabled material map is part of the frozen scientific input.
+            # Substituting uniform material silently solves a different problem.
+            raise RuntimeError(f"Failed to initialize spatial zones: {e}") from e
 
     def _initialize_uniform_parameters(self):
         """
@@ -2185,11 +2186,13 @@ class EDDASolver:
         logger.info("=" * 60)
 
         self._last_output_time_written = None
-        dt_min = float(self.config.time.dt_min)
+        dt_min = float(self.time_stepper.dt_min)
         t_end = float(self.time_stepper.t_end)
         # edda main program.F90:517 `maxnts=2*simul/dtmin` (integer(8) truncation).
         self.fortran_maxnts = int(2.0 * t_end / dt_min) if dt_min > 0.0 else 0
-        self.fortran_nts = 0
+        # Attempt accounting survives a restart; TimeStepper persists both
+        # accepted and rejected attempts rather than resetting the run budget.
+        self.fortran_nts = int(self.time_stepper.total_steps + self.time_stepper.rejected_steps)
         self.stopped_for_maxnts = False
 
         # Create progress bar (can be disabled for batch/benchmark runs)
@@ -2402,6 +2405,18 @@ class EDDASolver:
         # Log statistics
         self.time_stepper.log_statistics()
         self.write_erosion_probe_csv()
+
+        if self.stopped_for_maxnts:
+            raise RuntimeError(
+                f"maxnts_exhausted: reached {self.fortran_maxnts} attempts at "
+                f"t={self.time_stepper.t_current:.9g}s before target "
+                f"t={self.time_stepper.t_end:.9g}s; partial outputs are not a completed run"
+            )
+        if not self.time_stepper.is_finished():
+            raise RuntimeError(
+                f"incomplete_simulation: stopped at t={self.time_stepper.t_current:.9g}s "
+                f"before target t={self.time_stepper.t_end:.9g}s"
+            )
 
         logger.info("=" * 60)
         logger.info("Simulation complete")
@@ -3238,6 +3253,8 @@ class EDDASolver:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         arrays = {}
+        if self.dfs_dynamic_wave is not None:
+            arrays.update(export_dfs_host_state(self.dfs_dynamic_wave))
         for name, field in self._iter_taichi_fields(self.fields):
             arrays[f"fields__{name}"] = field.to_numpy()
 
@@ -3313,6 +3330,9 @@ class EDDASolver:
             "flow_neighbor_j",
         }
         with np.load(input_path, allow_pickle=False) as checkpoint:
+            if self.dfs_dynamic_wave is not None:
+                host_state = validate_dfs_host_state(self.dfs_dynamic_wave, checkpoint)
+                restore_dfs_host_state(self.dfs_dynamic_wave, host_state)
             for key in checkpoint.files:
                 if key.startswith("fields__"):
                     name = key.split("__", 1)[1]
@@ -3381,6 +3401,9 @@ class EDDASolver:
             self.time_stepper.dt_output = float(override_dt_output)
             self.config.time.dt_output = float(override_dt_output)
 
+        self.dfs_accepted_step_id = int(self.time_stepper.total_steps)
+        self.dfs_candidate_step_id = int(self.time_stepper.total_steps + self.time_stepper.rejected_steps)
+        self.fortran_nts = self.dfs_candidate_step_id
         self.results = []
         logger.info(f"Loaded restart checkpoint: {input_path}")
 

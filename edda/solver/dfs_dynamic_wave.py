@@ -504,6 +504,12 @@ class DFSDynamicWaveSolver:
         # (not a host flag) keeps the marker inside restart checkpoints.
         self._persistent_source_state_seeded = False
         self.persistent_source_state_initialized = ti.field(dtype=ti.i32, shape=())
+        # dfs.F90 overwrites cv during source evaluation BEFORE the CFL and
+        # depth/volume retry jumps.  That value survives a rejected attempt.
+        # Keep it separate from accepted fields.Cv: accepted solution fields
+        # remain transactional, while this explicit Fortran carry is not.
+        self.source_cv_carry = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.source_cv_carry_valid = ti.field(dtype=ti.i32, shape=(fields.nx, fields.ny))
 
         self.reject_flag = ti.field(dtype=ti.i32, shape=())
         self.suggested_dt = ti.field(dtype=self.fp, shape=())
@@ -6891,38 +6897,29 @@ class DFSDynamicWaveSolver:
             cfl_stop_order=cfl_stop_order,
             assignment_order=assignment_order,
         )
-        if self.experimental_first_reject_short_circuit:
-            accepted_early, suggested_dt, max_wave_speed = self._read_step_result_pack()
-            if not accepted_early:
+        if int(self.reject_flag[None]) != 0:
+            # dfs.F90's CFL `goto 1000` precedes accumulation, drainage and
+            # SF/DF maxima.  Executing them on a rejected face state leaks
+            # persistent side effects even though h/rho are never committed.
+            experimental = bool(self.experimental_first_reject_short_circuit)
+            if experimental:
                 self.experimental_first_reject_early_return_count[None] = (
                     int(self.experimental_first_reject_early_return_count[None]) + 1
                 )
-                if momentum_probe_enabled:
-                    self._mark_momentum_faceflux_probe_rejected_status(1)
-                first_reject = self.get_first_reject_diagnostics()
-                self._gather_erosion_probe(
-                    dt_used=dt_used,
-                    accepted=False,
-                    reject_reason=str(first_reject.get("first_reject_reason_name") or "early_reject"),
-                )
-                if self.simulate_shallow_landslide and self.double_layer_model is not None:
-                    self.double_layer_model.restore_richards_committed_state()
-                self._ci_candidate = None
-                self._discard_precomputed_failure_candidate()
-                return {
-                    "accepted": False,
-                    "used_dt": dt_used,
-                    "suggested_dt": suggested_dt,
-                    "next_dt": suggested_dt,
-                    "max_wave_speed": max_wave_speed,
-                    "experimental_first_reject_short_circuit": True,
-                    "first_reject": first_reject,
-                }
+            return self._finish_rejected_candidate(
+                dt_used, momentum_probe_enabled, stage="cfl", experimental=experimental
+            )
         if momentum_probe_enabled and momentum_probe_lightweight:
             self._capture_momentum_faceflux_post_edge_lightweight(dt_used, self.limitfr)
         if self.capture_depo_velocity_snapshots:
             self._capture_depo_velocity_after_face_flux()
         self._accumulate_and_check(dt_used, self.rhow, self.toldh, self.toldhp)
+        if int(self.reject_flag[None]) != 0:
+            # The depth-change retry jump also precedes drainage/classification.
+            # Volume rejection is different: it occurs AFTER classification.
+            return self._finish_rejected_candidate(
+                dt_used, momentum_probe_enabled, stage="depth"
+            )
         self._run_qnet_qmassnet_kernel_diagnostic_if_enabled()
         self._run_qnet_qmassnet_mutation_if_enabled()
         self._run_predictor_diagnostic_if_enabled()
@@ -6938,37 +6935,13 @@ class DFSDynamicWaveSolver:
         self._apply_post_balance_outflow(self.rhow)
 
         accepted, suggested_dt, max_wave_speed = self._read_step_result_pack()
-        self._record_stage_trace(
-            "RETRY_CHECK",
-            dt_used,
-            event="RETRY_CHECK_ACCEPTED" if accepted else "RETRY_CHECK_REJECTED",
-        )
-        if momentum_probe_enabled:
-            self._mark_momentum_faceflux_probe_rejected_status(0 if accepted else 1)
         if not accepted:
-            first_reject = self.get_first_reject_diagnostics()
-            self._gather_erosion_probe(
-                dt_used=dt_used,
-                accepted=False,
-                reject_reason=str(first_reject.get("first_reject_reason_name") or "unknown"),
+            return self._finish_rejected_candidate(
+                dt_used, momentum_probe_enabled, stage="volume"
             )
-            if self.simulate_shallow_landslide and self.double_layer_model is not None:
-                # `dfs.F90` retries rejected dynamic-wave steps from the previously
-                # accepted Richards state. Only the temporary candidate arrays are
-                # advanced inside the rejected step; the committed `kkt/kkb`
-                # fields remain unchanged until acceptance.
-                self.double_layer_model.restore_richards_committed_state()
-            self._ci_candidate = None
-            self._discard_precomputed_failure_candidate()
-            return {
-                "accepted": False,
-                "used_dt": dt_used,
-                "suggested_dt": suggested_dt,
-                "next_dt": suggested_dt,
-                "max_wave_speed": max_wave_speed,
-                "experimental_first_reject_short_circuit": False,
-                "first_reject": first_reject,
-            }
+        self._record_stage_trace("RETRY_CHECK", dt_used, event="RETRY_CHECK_ACCEPTED")
+        if momentum_probe_enabled:
+            self._mark_momentum_faceflux_probe_rejected_status(0)
 
         dt_next = dt_used + self.dt_increase if self.dt_increase > 0.0 else dt_used
         if dt_next > self.dt_max:
@@ -7029,6 +7002,40 @@ class DFSDynamicWaveSolver:
             "max_wave_speed": max_wave_speed,
             "experimental_first_reject_short_circuit": False,
             "first_reject": {},
+        }
+
+    def _finish_rejected_candidate(
+        self, dt_used: float, momentum_probe_enabled: bool, *,
+        stage: str, experimental: bool = False,
+    ) -> dict:
+        """Discard transactional state without rolling back Fortran retry carry.
+
+        In particular, source cv, rhodepo, tempinierodithick and the serial
+        face-prefix cvbar retain their original-EDDA lifecycle.  Classification
+        maxima are reached on volume rejection, but NOT on CFL/depth rejection.
+        """
+        _, suggested_dt, max_wave_speed = self._read_step_result_pack()
+        self._record_stage_trace("RETRY_CHECK", dt_used, event="RETRY_CHECK_REJECTED")
+        if momentum_probe_enabled:
+            self._mark_momentum_faceflux_probe_rejected_status(1)
+        first_reject = self.get_first_reject_diagnostics()
+        self._gather_erosion_probe(
+            dt_used=dt_used, accepted=False,
+            reject_reason=str(first_reject.get("first_reject_reason_name") or stage),
+        )
+        if self.simulate_shallow_landslide and self.double_layer_model is not None:
+            self.double_layer_model.restore_richards_committed_state()
+        self._ci_candidate = None
+        self._discard_precomputed_failure_candidate()
+        return {
+            "accepted": False,
+            "used_dt": dt_used,
+            "suggested_dt": suggested_dt,
+            "next_dt": suggested_dt,
+            "max_wave_speed": max_wave_speed,
+            "experimental_first_reject_short_circuit": experimental,
+            "rejected_stage": stage,
+            "first_reject": first_reject,
         }
 
     def _read_step_result_pack(self) -> tuple[bool, float, float]:
@@ -7287,6 +7294,8 @@ class DFSDynamicWaveSolver:
         tempinflowh, tempinflowrho = self._build_inflow_stage_arrays(self.current_time, dt)
 
         cv = self.fields.Cv.to_numpy().astype(np.float64, copy=False).copy()
+        carry_valid = self.source_cv_carry_valid.to_numpy() != 0
+        cv[carry_valid] = self.source_cv_carry.to_numpy()[carry_valid]
         cv[nodata] = 0.0
 
         fhw = h * (1.0 - cv / cvstar) + tempri * dt + tempinflowh
@@ -7404,6 +7413,13 @@ class DFSDynamicWaveSolver:
         self.fields.frhopredi1.from_numpy(frhopredi1.astype(self.numpy_float_dtype, copy=False))
         self._ci_candidate = ci_next.astype(self.numpy_float_dtype, copy=False)
 
+    @ti.func
+    def _infiltration_cv(self, i, j):
+        cv = self.fields.Cv[i, j]
+        if self.source_cv_carry_valid[i, j] != 0:
+            cv = self.source_cv_carry[i, j]
+        return cv
+
     @ti.kernel
     def _stage_surface_forcing_direct_rain_plus_storage(
         self,
@@ -7434,7 +7450,7 @@ class DFSDynamicWaveSolver:
                 continue
 
             self.fields.tempri[i, j] = self.fields.rainfall[i, j]
-            cv = self.fields.Cv[i, j]
+            cv = self._infiltration_cv(i, j)
 
             fhw = self.fields.h[i, j] * (1.0 - cv / cvstar)
             self.fields.fhw[i, j] = fhw
@@ -7953,10 +7969,9 @@ class DFSDynamicWaveSolver:
 
             self.fields.tempri[i, j] = self.fields.rainfall[i, j]
 
-            # Match dfs.F90 literally: `fhw` is staged from the persisted `cv`
-            # array committed at the end of the previous accepted step, rather
-            # than re-deriving concentration from `rho/h` inside this step.
-            cv = self.fields.Cv[i, j]
+            # Source-stage cv survives a rejected attempt in dfs.F90.  On
+            # accepted/cold-start boundaries this falls back to fields.Cv.
+            cv = self._infiltration_cv(i, j)
 
             fhw = self.fields.h[i, j] * (1.0 - cv / cvstar) + self.fields.tempri[i, j] * dt + self.fields.tempinflowh[i, j]
             if fhw < TOL:
@@ -8128,6 +8143,11 @@ class DFSDynamicWaveSolver:
             # TOL-based double-dry face gate and must not be widened to TOL.
             if cv < EPS:
                 cv = 0.0
+            # The Fortran assignment belongs inside this controls gate, even
+            # when the computed erosion/deposition rates subsequently vanish.
+            if simulate_erosion != 0 or simulate_separate_deposition != 0:
+                self.source_cv_carry[i, j] = cv
+                self.source_cv_carry_valid[i, j] = 1
 
             fv0 = self.fields.fv_fortran[i, j, 0]
             fv1 = self.fields.fv_fortran[i, j, 1]
@@ -9585,6 +9605,7 @@ class DFSDynamicWaveSolver:
             # `_apply_post_balance_outflow`, so do not add an extra rho/Cv
             # reset here that the original production path does not have.
             self.fields.Cv[i, j] = (self.fields.rho[i, j] - rho_water) / (rho_sediment - rho_water)
+            self.source_cv_carry_valid[i, j] = 0
             if ti.static(self.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"):
                 # Chamoli dfs.F90:1285 `where (cv<eps) cv=0.` (absent in BJ).
                 if self.fields.Cv[i, j] < EPS:
