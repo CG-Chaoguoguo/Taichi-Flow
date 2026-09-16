@@ -43,9 +43,16 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       TAICHI_FLOW_STATE_DIR: ${{ github.workspace }}/.runtime/ci-audit
+      CI_SHARD: ${{ matrix.shard }}
+      TI_CPU_MAX_NUM_THREADS: '2'
+      TQDM_DISABLE: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,12 +67,27 @@ jobs:
       - name: Collect test contracts
         run: python -m pytest --collect-only -q
       - name: Run backend and domain regression tests
-        run: python -m pytest -q --maxfail=10 --junitxml=backend-tests.xml
+        shell: bash
+        run: |
+          python - <<'PYTEST'
+          import os, pathlib, subprocess, sys
+          files = sorted(str(p) for p in pathlib.Path('tests').rglob('test_*.py'))
+          selected = files[int(os.environ['CI_SHARD'])::4]
+          if not selected:
+              raise SystemExit('Empty CI shard: refusing a vacuous pass')
+          pathlib.Path('backend-test-selection.txt').write_text('\n'.join(selected) + '\n')
+          raise SystemExit(subprocess.run([
+              sys.executable, '-m', 'pytest', '-q', '--maxfail=10',
+              '--junitxml=backend-tests.xml', *selected,
+          ]).returncode)
+          PYTEST
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: edda-audit-backend-${{ github.run_id }}
-          path: backend-tests.xml
+          name: edda-audit-backend-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            backend-tests.xml
+            backend-test-selection.txt
           if-no-files-found: warn
           retention-days: 14
 
@@ -84,7 +106,19 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/taichi-flow/package-lock.json
+      - name: Pin validated npm dependency resolver
+        run: npm install --global npm@11.19.1
       - run: npm ci
       - run: npm test
       - run: npm run test:desktop
       - run: npm run build
+      - name: Audit dependency lockfile
+        run: npm audit --json > npm-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edda-audit-frontend-${{ github.run_id }}
+          path: |
+            frontend/taichi-flow/dist/
+            frontend/taichi-flow/npm-audit.json
+          retention-days: 14
