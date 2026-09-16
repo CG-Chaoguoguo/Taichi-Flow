@@ -7,7 +7,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-coverage/
+/coverage/
 coverage.xml
 coverage.json
 .coverage.*
@@ -22,6 +22,11 @@ ENV/
 **/dist/
 **/.vite/
 *.tsbuildinfo
+/electron-test/
+/.electron_smoke_test/
+/.electron-test-delete-pending/
+/.portable_electron_test/
+/.portable_electron_test2/
 
 # Local runtime state and process logs
 .runtime/
@@ -57,12 +62,6 @@ artifacts/
 
 # Test-only toolchain sandbox and generated intermediates
 tests/_fortran_toolchain_sandbox/*
-tests/**/__pycache__/
-tests/**/generated/
-tests/**/work/
-tests/**/logs/
-tests/**/scripts/
-tests/**/patches/
 
 # The sandbox contract keeps only its small, repeatable source skeleton in Git.
 !tests/_fortran_toolchain_sandbox/README.md
@@ -91,7 +90,16 @@ tests/_fortran_toolchain_sandbox/work/*
 tests/comparison/
 tests/benchmark.py
 tests/run_all_tests.py
-tools/
+# Keep local tools private except the reviewed FIX3 dependency closure.
+/tools/*
+!/tools/__init__.py
+!/tools/fix3/
+/tools/fix3/*
+!/tools/fix3/__init__.py
+!/tools/fix3/README.md
+!/tools/fix3/grid_compare.py
+!/tools/fix3/acceptance.py
+!/tools/fix3/replay_source_operator.py
 
 # Local agent evidence, generated design previews, and retired handoff material
 agentlog.md
@@ -114,7 +122,11 @@ tests/data/
 tests/test_2h_rainfall.py
 tests/test_physics.py
 
-# Local audit intermediates; publish durable reports as Markdown/JSON instead
-docs/audit/_*.py
-docs/audit/*.txt
-docs/audit/*.html
+# Local audit evidence and one-off recovery/probe artifacts (keep on disk).
+/docs/audit/
+/.tmp_audit_recover/
+/.tmp_bj_chamoli_dfs.diff
+/.tmp_chamoli_test31_dfs.diff
+/_tmp_edda_asc_probe.py
+/fortran_literal_probe_*.obj
+/fortran_literal_probe_*.pdb

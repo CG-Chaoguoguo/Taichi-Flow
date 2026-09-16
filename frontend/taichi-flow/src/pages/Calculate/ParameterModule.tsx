@@ -3,10 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parameterApi } from "../../api/taichiFlowAdapter";
 import { Button } from "../../components/Button";
 import { EffectiveParameterField } from "../../components/EffectiveParameterField";
-import { EddaComputeControlsSection } from "../../components/EddaComputeControlsSection";
 import { ManningModeEditor } from "../../components/ManningModeEditor";
 import { ZoneSoilSummaryCard, ZONE_TAKEN_OVER_KEYS, countSpatialZones } from "../../components/ZoneSoilEditor";
 import { ParameterGroupSection } from "../../components/ParameterGroupSection";
+import { NumericVariantSummary } from "../../components/NumericVariantSummary";
 import { isGateParameterKey } from "../../constants/computeGates";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import type { InputBinding, ParameterCatalogEntry, ParameterImportPreview, Scenario, ValidationIssue, ValidationState } from "../../types";
@@ -54,10 +54,8 @@ export function ParameterModule({
   readOnly = false,
   draftPatch,
   draftBindings = [],
-  draftControls = {},
   onDraftChange,
   onBindingsChange = () => undefined,
-  onControlsChange = () => undefined,
   validation,
   onOpenZoneSoil,
 }: {
@@ -82,6 +80,7 @@ export function ParameterModule({
   const fetchParameterTemplates = useTaichiFlowStore((state) => state.fetchParameterTemplates);
   const fetchScenarios = useTaichiFlowStore((state) => state.fetchScenarios);
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
+  const configuration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const addToast = useTaichiFlowStore((state) => state.addToast);
   const [search, setSearch] = useState("");
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -93,6 +92,10 @@ export function ParameterModule({
   useEffect(() => {
     if (!catalog) void fetchParameterCatalog();
   }, [catalog, fetchParameterCatalog]);
+
+  useEffect(() => {
+    if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
+  }, [fetchScenarioConfiguration, readOnly, scenario.scenario_id, scenario.version]);
 
   const rainfallEnabled = (
     scenario.effective_parameters?.["edda.run_controls.simulate_rainfall"]
@@ -119,10 +122,6 @@ export function ParameterModule({
       : draftPatch["spatial_zones.zones"],
   );
   const multiZone = zoneCount > 1;
-  const eddaEntries = useMemo(
-    () => (catalog?.parameters || []).filter((entry) => entry.control_family === "edda"),
-    [catalog],
-  );
   const groups = useMemo(() => {
     const grouped = new Map<string, ParameterCatalogEntry[]>();
     for (const entry of entries) {
@@ -193,6 +192,10 @@ export function ParameterModule({
       </div>
       <Button variant="ghost" size="small" icon={<RotateCcw size={14} />} disabled={!canEdit} onClick={() => onDraftChange({})}>重置全部覆盖</Button>
       {!canEdit ? <div className="tf-caption tf-text-tertiary">当前方案不可变；请复制为新方案后再修改。</div> : null}
+      <NumericVariantSummary
+        resolution={configuration?.compute_policy_resolution}
+        catalogEntries={catalog?.parameters}
+      />
 
       {importPreview ? (
         <section className="tf-import-preview">
@@ -228,20 +231,6 @@ export function ParameterModule({
           ? "zfil → glacier.asc 已作为 thickness.primary 绑定；ltstar=-1 按原始案例语义由栅格厚度链路处理，未把它误当成可编辑标量。"
           : undefined}
       />
-      {scenario.configuration_ownership === "reference_case" && catalog?.control_registry && eddaEntries.length ? (
-        <EddaComputeControlsSection
-          entries={eddaEntries}
-          controlRegistry={catalog.control_registry}
-          baseline={scenario.parameter_baseline || {}}
-          draftPatch={draftControls}
-          canEdit={canEdit}
-          onDraftChange={onControlsChange}
-          title="计算控制"
-          subtitle="原始 edda_in 快照归当前方案所有；全局设置不会覆盖这些值"
-          overrideChipLabel="方案覆盖"
-          baselineChipLabel="模板默认"
-        />
-      ) : null}
       {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0] ? (
         <div className="tf-caption tf-text-danger" role="status">
           {validationIssues.filter((issue) => issue.parameter_key === "spatial_zones.zones")[0].message}

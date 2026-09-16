@@ -740,8 +740,6 @@ def _base_meta(request: NativeUnsfinDryRunRequest) -> dict[str, Any]:
         "git_head": _git_head(),
         "legacy_parity_flags": {
             "EDDA_LEGACY_PARITY_MODE": os.environ.get("EDDA_LEGACY_PARITY_MODE"),
-            "EDDA_LEGACY_CVBAR_EROSION_PARITY": os.environ.get("EDDA_LEGACY_CVBAR_EROSION_PARITY"),
-            "EDDA_EXPERIMENT_CVBAR_EROSION_PARITY": os.environ.get("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY"),
             "EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT": os.environ.get("EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT"),
         },
     }

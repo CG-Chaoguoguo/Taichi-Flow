@@ -1,4 +1,4 @@
-﻿"""
+"""
 Core Taichi field definitions for Taichi-Flow simulations.
 """
 import taichi as ti
@@ -95,7 +95,11 @@ class EDDAFields:
         self.absubar_velocity_state_scale_temp = ti.field(dtype=self.fp, shape=(nx, ny))  # Diagnostics: fv scale used in source branch
         self.absubar_selected_is_vorth_temp = ti.field(dtype=ti.i32, shape=(nx, ny))  # Diagnostics: 1 when vorth selected
         self.absubar_fv_used_temp = ti.field(dtype=self.fp, shape=(nx, ny, 8))  # Diagnostics: fv components used for branch absubar
-        self.rhodepo_temp = ti.field(dtype=self.fp, shape=(nx, ny))  # Deposition bulk density
+        # Deposition bulk density `rhodepo(i)`.  dfs.F90:113 initialises it once
+        # before the main loop and only the deposition clamps (:473/:489)
+        # ever rewrite it, so the array is persistent solver state, not a
+        # per-step temporary.  It also survives rejected retry attempts.
+        self.rhodepo = ti.field(dtype=self.fp, shape=(nx, ny))
         self.erorate_raw_temp = ti.field(dtype=self.fp, shape=(nx, ny))  # Erosion rate before clamp diagnostics
         self.erorate_rholimit_clamped_temp = ti.field(dtype=self.fp, shape=(nx, ny))  # After density-limit clamp
         self.erorate_clamped_temp = ti.field(dtype=self.fp, shape=(nx, ny))  # Erosion rate after clamp diagnostics
@@ -109,6 +113,10 @@ class EDDAFields:
         self.deposition_gate_temp = ti.field(dtype=ti.i32, shape=(nx, ny))  # 1 when the deposition gate is open
         self.rholimit_clamp_temp = ti.field(dtype=ti.i32, shape=(nx, ny))  # 1 when density-limit clamp changes erorate
         self.erodible_clamp_temp = ti.field(dtype=ti.i32, shape=(nx, ny))  # 1 when erodible-thickness clamp changes erorate
+        # Diagnostics-only friction sub-terms for the optional erosion probe.
+        self.sfy_temp = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.sfmanning_temp = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.sfmiu_temp = ti.field(dtype=self.fp, shape=(nx, ny))
 
         # Rheology variables
         self.rho = ti.field(dtype=self.fp, shape=(nx, ny))  # Mixture density (kg/m³)
@@ -181,8 +189,19 @@ class EDDAFields:
         self.maxsfh = ti.field(dtype=self.fp, shape=(nx, ny))
         self.maxdfh = ti.field(dtype=self.fp, shape=(nx, ny))
         self.maxffh = ti.field(dtype=self.fp, shape=(nx, ny))
+        # `tempinierodithick(i)`: dfs.F90:128 copies `inierodithick` once before
+        # the main loop; afterwards only the erosion branch (:450-455) writes
+        # it and the accepted commit reads it (:1281).  Cells that skip the
+        # erosion branch therefore carry a stale value, so this is persistent
+        # solver state and must not be re-seeded per step.
         self.temp_erodible_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
         self.temp_depo_thickness = ti.field(dtype=self.fp, shape=(nx, ny))
+        # Barrier grids (`rigid`, `flexible`) and the persistent `barrier(i)`
+        # array written inside the dfs.F90 face loop (:866-869).  All zero
+        # unless `barriersimul` supplies grids.
+        self.rigid = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.flexible = ti.field(dtype=self.fp, shape=(nx, ny))
+        self.barrier = ti.field(dtype=self.fp, shape=(nx, ny))
 
         # Double-layer soil model fields
         # Top layer sublayer fields (nx, ny, NZST+1)
@@ -360,7 +379,7 @@ class EDDAFields:
             self.absubar_vcomp_temp[i, j] = 0.0
             self.absubar_velocity_state_scale_temp[i, j] = 0.0
             self.absubar_selected_is_vorth_temp[i, j] = 0
-            self.rhodepo_temp[i, j] = 0.0
+            self.rhodepo[i, j] = 0.0
             self.erorate_raw_temp[i, j] = 0.0
             self.erorate_rholimit_clamped_temp[i, j] = 0.0
             self.erorate_clamped_temp[i, j] = 0.0
@@ -374,6 +393,9 @@ class EDDAFields:
             self.deposition_gate_temp[i, j] = 0
             self.rholimit_clamp_temp[i, j] = 0
             self.erodible_clamp_temp[i, j] = 0
+            self.sfy_temp[i, j] = 0.0
+            self.sfmanning_temp[i, j] = 0.0
+            self.sfmiu_temp[i, j] = 0.0
             for d in ti.static(range(8)):
                 self.absubar_fv_used_temp[i, j, d] = 0.0
 
@@ -413,6 +435,9 @@ class EDDAFields:
             self.maxffh[i, j] = 0.0
             self.temp_erodible_thickness[i, j] = 0.0
             self.temp_depo_thickness[i, j] = 0.0
+            self.rigid[i, j] = 0.0
+            self.flexible[i, j] = 0.0
+            self.barrier[i, j] = 0.0
 
         for i, j, d in self.flow_neighbor_id:
             self.flow_neighbor_id[i, j, d] = 0
@@ -711,7 +736,14 @@ class EDDAFields:
             ('absubar_velocity_state_scale_temp', 'absubar_velocity_state_scale_temp'),
             ('absubar_selected_is_vorth_temp', 'absubar_selected_is_vorth_temp'),
             ('absubar_fv_used_temp', 'absubar_fv_used_temp'),
-            ('rhodepo_temp', 'rhodepo_temp'),
+            ('rhodepo', 'rhodepo'),
+            # Legacy diagnostic key retained for older probes/tests.
+            ('rhodepo_temp', 'rhodepo'),
+            ('erodible_thickness', 'erodible_thickness'),
+            ('temp_erodible_thickness', 'temp_erodible_thickness'),
+            ('rigid', 'rigid'),
+            ('flexible', 'flexible'),
+            ('barrier', 'barrier'),
             ('erorate_raw_temp', 'erorate_raw_temp'),
             ('erorate_rholimit_clamped_temp', 'erorate_rholimit_clamped_temp'),
             ('erorate_clamped_temp', 'erorate_clamped_temp'),

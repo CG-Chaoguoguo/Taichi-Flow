@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -26,7 +27,13 @@ def _create_ready_scenario(client: TestClient, project: dict, name: str) -> dict
     assert gates.status_code == 200
     dem = client.post(
         f"/api/projects/{project['project_id']}/uploads/dem",
-        files={"file": (f"{name}.asc", b"ncols 1\nnrows 1\ncellsize 1\n1\n", "text/plain")},
+        files={
+            "file": (
+                f"{name}.asc",
+                b"ncols 1\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1\n",
+                "text/plain",
+            )
+        },
     )
     assert dem.status_code == 201
     revision = client.post(
@@ -241,6 +248,173 @@ def test_queue_freezes_policy_and_retry_reuses_original_snapshot(tmp_path: Path)
         retried = client.post(f"{queue_url}/{original['queue_item_id']}/retry")
         assert retried.status_code == 201
         assert retried.json()["compute_policy_resolution"]["effective"]["mode"] == original_mode
+
+
+def test_queue_rejects_invalid_erosion_probe_payload_and_freezes_valid_options(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "probe-project")
+        scenario = _create_ready_scenario(client, project, "Probe validation")
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+
+        malformed = client.post(
+            queue_url,
+            json={
+                "scenario_id": scenario["scenario_id"],
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[0, 0, 1]]}},
+            },
+        )
+        assert malformed.status_code == 422
+        assert malformed.json()["code"] == "erosion_probe_invalid"
+
+        duplicate = client.post(
+            queue_url,
+            json={
+                "scenario_id": scenario["scenario_id"],
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[0, 0], [0, 0]]}},
+            },
+        )
+        assert duplicate.status_code == 422
+        assert duplicate.json()["code"] == "erosion_probe_invalid"
+
+        outside = client.post(
+            queue_url,
+            json={
+                "scenario_id": scenario["scenario_id"],
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[1, 0]]}},
+            },
+        )
+        assert outside.status_code == 422
+        assert outside.json()["code"] == "erosion_probe_invalid"
+
+        queued = client.post(
+            queue_url,
+            json={
+                "scenario_id": scenario["scenario_id"],
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[0, 0]]}},
+            },
+        )
+        assert queued.status_code == 201
+        assert queued.json()["run_options"] == {
+            "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[0, 0]]}}
+        }
+
+        cancelled = client.delete(f"{queue_url}/{queued.json()['queue_item_id']}")
+        assert cancelled.status_code == 200
+        retried = client.post(f"{queue_url}/{queued.json()['queue_item_id']}/retry")
+        assert retried.status_code == 201
+        assert retried.json()["run_options"] == queued.json()["run_options"]
+
+
+def test_probe_suggestions_use_latest_manifested_same_writer_result(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "probe-suggestions-project")
+        scenario = _create_ready_scenario(client, project, "Probe suggestion source")
+        writer_settings = client.put("/api/settings/compute-gates", json={"values": {
+            "hydrology.dfs_erosion_depth_writer_variant": "net_bed_change_bj",
+            "edda.run_controls.simulate_rainfall": False,
+        }})
+        assert writer_settings.status_code == 200
+        endpoint = (
+            f"/api/projects/{project['project_id']}/scenarios/"
+            f"{scenario['scenario_id']}/diagnostics/probe-suggestions"
+        )
+        unavailable = client.get(endpoint)
+        assert unavailable.status_code == 404
+        assert unavailable.json()["code"] == "probe_suggestions_unavailable"
+
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+        queued = client.post(queue_url, json={"scenario_id": scenario["scenario_id"]})
+        assert queued.status_code == 201
+        store = client.app.state.workbench
+        context = store.claim_queue_item(project["project_id"], queued.json()["queue_item_id"])
+        output_dir = Path(context["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        grid = "ncols 1\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n0.8\n"
+        (output_dir / "Erosion_depth_EDDA_45.0.txt").write_text(grid, encoding="utf-8")
+        (output_dir / "Erosion_depth_EDDA_90.0.txt").write_text(grid, encoding="utf-8")
+        # A newer lookalike must not make Top-N cross writer contracts.
+        (output_dir / "Erosion_depth_EDDA_900.0.txt").write_text(grid, encoding="utf-8")
+        (output_dir / "output_manifest.json").write_text(
+            json.dumps(
+                {
+                    "result_files": [
+                        {
+                            "family": "Erosion_depth",
+                            "relative_path": "Erosion_depth_EDDA_45.0.txt",
+                            "writer": "taichi_edda_text",
+                        },
+                        {
+                            "family": "Erosion_depth",
+                            "relative_path": "Erosion_depth_EDDA_90.0.txt",
+                            "writer": "taichi_edda_text",
+                        },
+                        {
+                            "family": "Erosion_depth",
+                            "relative_path": "Erosion_depth_EDDA_900.0.txt",
+                            "writer": "foreign_writer",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        store.finish_run(project["project_id"], context["simulation_id"], {"status": "completed"})
+
+        # Historical filename-only evidence cannot supply an exact output event.
+        assert client.get(endpoint).status_code == 404
+        from hashlib import sha256
+        manifest_path = output_dir / "output_manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        events = []
+        for index, entry in enumerate(manifest["result_files"]):
+            # Deliberately use a non-rounded physical time different from the filename.
+            physical_time = ["45", "89.99999999999999", "900"][index]
+            entry.update(frame_time_s=physical_time, frame_event_writer=entry["writer"],
+                         sha256=sha256((output_dir / entry["relative_path"]).read_bytes()).hexdigest())
+            events.append({"time_s": physical_time, "writer": entry["writer"],
+                           "relative_paths": [entry["relative_path"]]})
+        manifest_path.write_text(json.dumps(manifest))
+        (output_dir / "output_frame_events.json").write_text(json.dumps(
+            {"schema_version": "fix3-output-frame-events-v1", "events": events}))
+
+        response = client.get(endpoint, params={"top": 5})
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["simulation_id"] == context["simulation_id"]
+        assert payload["input_revision_id"] == scenario["input_revision_id"]
+        assert payload["source_file"] == "Erosion_depth_EDDA_90.0.txt"
+        assert payload["source_frame_s"] == 89.99999999999999
+        assert payload["writer"] == "taichi_edda_text"
+        assert payload["probe_cells"] == [[0, 0]]
+
+        copied = client.post(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}/duplicate"
+        )
+        assert copied.status_code == 201
+        copied_endpoint = endpoint.replace(scenario["scenario_id"], copied.json()["scenario_id"])
+        compatible = client.get(copied_endpoint)
+        assert compatible.status_code == 200
+        assert compatible.json()["simulation_id"] == context["simulation_id"]
+        # Compatibility uses frozen output semantics, not only file extensions.
+        database = store.project_database(project["project_id"])
+        with database.connect() as connection:
+            saved = connection.execute("SELECT effective_config_json FROM simulation_runs WHERE simulation_id=?",
+                                       (context["simulation_id"],)).fetchone()[0]
+            changed = json.loads(saved)
+            changed["hydrology.dfs_erosion_depth_writer_variant"] = "incompatible_test_semantics"
+            connection.execute("UPDATE simulation_runs SET effective_config_json=? WHERE simulation_id=?",
+                               (json.dumps(changed), context["simulation_id"]))
+        assert client.get(copied_endpoint).status_code == 404
+        with database.connect() as connection:
+            connection.execute("UPDATE simulation_runs SET effective_config_json=? WHERE simulation_id=?",
+                               (saved, context["simulation_id"]))
+
+        selected = output_dir / "Erosion_depth_EDDA_90.0.txt"
+        selected.write_text(grid.replace("0.8", "9.8"), encoding="utf-8")
+        # An unchanged manifest cannot authorize bytes modified after indexing.
+        corrupted = client.get(endpoint)
+        assert corrupted.status_code == 404
+        assert corrupted.json()["code"] == "probe_suggestions_unavailable"
 
 
 def test_claim_copies_queue_policy_into_simulation_and_runtime_payload(tmp_path: Path) -> None:

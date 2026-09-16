@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
-import { Outlet, useNavigate } from "react-router-dom";
-import { AlertCircle, CheckCircle2, Moon, Monitor, Settings, Sun, X } from "lucide-react";
+import { Outlet } from "react-router-dom";
+import { AlertCircle, CheckCircle2, Moon, Sun, X } from "lucide-react";
 import { useTaichiFlowStore } from "../stores/taichiFlowStore";
 import { IconButton } from "../components/IconButton";
 
 export function LauncherShell() {
-  const navigate = useNavigate();
   const serviceOnline = useTaichiFlowStore((state) => state.serviceOnline);
   const theme = useTaichiFlowStore((state) => state.theme);
   const setTheme = useTaichiFlowStore((state) => state.setTheme);
@@ -40,14 +39,6 @@ export function LauncherShell() {
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
             size="small"
           />
-          <IconButton
-            icon={<Monitor size={16} />}
-            label="高对比度"
-            active={theme === "high-contrast"}
-            onClick={() => setTheme(theme === "high-contrast" ? "light" : "high-contrast")}
-            size="small"
-          />
-          <IconButton icon={<Settings size={16} />} label="设置" onClick={() => navigate("/settings")} size="small" />
           <span className="tf-caption tf-topbar-time">
             {currentTime.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>

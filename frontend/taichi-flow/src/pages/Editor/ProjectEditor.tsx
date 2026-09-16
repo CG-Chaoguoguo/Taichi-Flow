@@ -20,6 +20,7 @@ import type { WorkspaceModule } from "../Calculate/CalculateWorkspace";
 import { ScenarioOutliner } from "./ScenarioOutliner";
 import { InspectorPanel } from "./InspectorPanel";
 import { BottomDock } from "./BottomDock";
+import { UnsavedChangesGuard } from "../../components/UnsavedChangesGuard";
 
 function selectionToModule(kind: string | undefined): WorkspaceModule {
   if (kind === "input") return "input";
@@ -255,6 +256,7 @@ export function ProjectEditor() {
 
   return (
     <RasterViewportProvider>
+      <UnsavedChangesGuard dirty={dirty} save={saveScenario} />
       <ResizablePaneGroup
         id="editor-shell"
         orientation="vertical"

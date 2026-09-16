@@ -43,6 +43,114 @@ const catalog: ParameterCatalog = {
       allowed_values: ["both_thin_weighted"],
     },
     {
+      key: "hydrology.dfs_dry_face_velocity_variant",
+      label: "DFS dry-face velocity variant",
+      label_zh: "干面速度清零变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["keep_velocity_bj"],
+    },
+    {
+      key: "hydrology.dfs_artivis_variant",
+      label: "DFS artificial-viscosity variant",
+      label_zh: "人工黏性权重变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["depth_ratio_bj"],
+    },
+    {
+      key: "hydrology.dfs_absubar_variant",
+      label: "DFS erosion velocity-magnitude variant",
+      label_zh: "侵蚀速度模变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["max_component_bj", "signed_mean_chamoli", "weighted_signed_test31"],
+    },
+    {
+      key: "hydrology.dfs_flow_velocity_writer_variant",
+      label: "DFS flow-velocity writer variant",
+      label_zh: "流速写出口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["half_sum_abs_fv_bj", "absubar_chamoli"],
+    },
+    {
+      key: "hydrology.dfs_erosion_depth_writer_variant",
+      label: "DFS erosion-depth writer variant",
+      label_zh: "侵蚀深度写出口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["net_bed_change_bj", "cumulative_erodph_chamoli"],
+    },
+    {
+      key: "hydrology.dfs_sfdf_classify_cv_variant",
+      label: "DFS SF/DF/FF classify-cv variant",
+      label_zh: "SF-DF-FF分箱浓度时相",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["previous_committed_cv", "predicted_step_cv_chamoli"],
+    },
+    {
+      key: "hydrology.dfs_cvlimit_variant",
+      label: "DFS cvlimit clamp variant",
+      label_zh: "cvlimit钳制变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["tanslo_cycle_cvstar_clamp_bj", "tan_slo_unit_clamp_chamoli"],
+    },
+    {
+      key: "hydrology.dfs_erodph_dt_variant",
+      label: "DFS cumulative erodph timestep variant",
+      label_zh: "累计侵蚀erodph时步口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["accepted_dt_bj", "post_dti_dt_chamoli"],
+    },
+    {
+      key: "hydrology.dfs_barrier_flux_variant",
+      label: "DFS barrier / scour face-flux kill variant",
+      label_zh: "挡墙/冲刷面通量清零口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["bj_barrier_branch", "chamoli_scour_kill_or"],
+      allowed_value_labels_zh: {
+        bj_barrier_branch: "BJ挡墙三分支",
+        chamoli_scour_kill_or: "Chamoli负向面·低于原地面清零",
+      },
+    },
+    {
+      key: "hydrology.dfs_commit_cv_eps_variant",
+      label: "DFS committed cv eps clamp variant",
+      label_zh: "提交步cv<eps归零口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["no_clamp_bj", "eps_clamp_chamoli"],
+      allowed_value_labels_zh: {
+        no_clamp_bj: "不按eps归零",
+        eps_clamp_chamoli: "cv<eps归零",
+      },
+    },
+    {
       key: "time.dt_max",
       label: "Max dt",
       label_zh: "最大时间步",
@@ -99,10 +207,40 @@ describe("ParameterModule compute controls integration", () => {
       parameterCatalog: catalog,
       inputFiles: [],
       activeProject: null,
+      scenarioConfigurations: {
+        "scenario-controls": {
+          scenario_id: "scenario-controls",
+          baseline: {},
+          overrides: {},
+          effective: {},
+          bindings: [],
+          validation: { valid: true, errors: [], warnings: [] },
+          version: 1,
+          compute_policy_resolution: {
+            status: "resolved",
+            source: "auto",
+            requested: "auto",
+            detected: {
+              simulate_shallow_landslide: false,
+              dfs_failure_source_variant: null,
+              evidence: [],
+            },
+            effective: { mode: "disabled", simulate_shallow_landslide: false, active_variant: null },
+            numeric_variants: {
+              "hydrology.dfs_barrier_flux_variant": { source: "case_baseline", value: "chamoli_scour_kill_or" },
+              "hydrology.dfs_commit_cv_eps_variant": { source: "case_baseline", value: "eps_clamp_chamoli" },
+            },
+            settings_snapshot: {},
+            warnings: [],
+            resolution_id: "cpr-test",
+            resolution_hash: "test",
+          },
+        },
+      },
     });
   });
 
-  it("keeps scientific parameters and hides compute gates and rainfall summary", () => {
+  it("keeps scientific parameters, hides editable compute gates, and shows the variant summary", () => {
     const onDraftChange = vi.fn();
     const { container } = render(
       <ParameterModule
@@ -115,10 +253,14 @@ describe("ParameterModule compute controls integration", () => {
 
     expect(screen.queryByTestId("edda-compute-controls")).toBeNull();
     expect(container.querySelector(".tf-rainfall-summary-card")).toBeNull();
-    expect(screen.queryByText("面通量平均变种")).toBeNull();
-    expect(screen.queryByText("干面速度清零变种")).toBeNull();
-    expect(screen.queryByText("人工黏性权重变种")).toBeNull();
-    expect(screen.queryByText("侵蚀速度模变种")).toBeNull();
+    expect(container.querySelector('[data-parameter-key="hydrology.dfs_barrier_flux_variant"]')).toBeNull();
+    expect(container.querySelector('[data-parameter-key="hydrology.dfs_commit_cv_eps_variant"]')).toBeNull();
+    expect(container.querySelector('[data-parameter-key="hydrology.dfs_face_flux_variant"]')).toBeNull();
+    expect(screen.getByTestId("numeric-variant-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("numeric-variant-row-hydrology.dfs_barrier_flux_variant")).toHaveTextContent(
+      "Chamoli负向面·低于原地面清零",
+    );
+    expect(screen.getByTestId("numeric-variant-row-hydrology.dfs_commit_cv_eps_variant")).toHaveTextContent("cv<eps归零");
     expect(screen.getByText("最大时间步")).toBeInTheDocument();
   });
 

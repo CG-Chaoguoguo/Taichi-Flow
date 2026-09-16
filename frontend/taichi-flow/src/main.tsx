@@ -7,6 +7,10 @@ import "./index.css";
 function ThemeInitializer({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     applyTheme(readStoredTheme(localStorage));
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => applyTheme(readStoredTheme(localStorage));
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
   }, []);
   return <>{children}</>;
 }

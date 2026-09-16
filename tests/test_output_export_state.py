@@ -1,3 +1,5 @@
+import csv
+import json
 import numpy as np
 from pathlib import Path
 
@@ -58,11 +60,13 @@ class _RecordingFields:
         self.include_fields = tuple(include_fields) if include_fields is not None else None
         self.exclude_fields = tuple(exclude_fields or ())
         assert "pt" in self.exclude_fields
+        fv = np.zeros((1, 2, 8), dtype=np.float64)
         return {
             "h": np.array([[1.0, 0.0]], dtype=np.float64),
             "u": np.array([[0.25, 0.0]], dtype=np.float64),
             "v": np.array([[0.0, 0.0]], dtype=np.float64),
             "Cv": np.array([[0.1, 0.0]], dtype=np.float64),
+            "fv_fortran": fv,
             "z_bed": np.array([[9.9, 10.0]], dtype=np.float64),
             "z_original": np.array([[10.0, 10.0]], dtype=np.float64),
             "deposition_depth": np.array([[0.03, 0.0]], dtype=np.float64),
@@ -102,6 +106,14 @@ class _TimeStepper:
 
 class _Config:
     save_intermediate = False
+    hydrology = type(
+        "_Hydrology",
+        (),
+        {
+            "dfs_erosion_depth_writer_variant": "net_bed_change_bj",
+            "dfs_flow_velocity_writer_variant": "half_sum_abs_fv_bj",
+        },
+    )()
 
 
 def _strict_output_solver(
@@ -160,6 +172,73 @@ def _strict_output_solver(
     return solver
 
 
+def test_real_initialized_solver_can_export_without_native_budget_attachment(tmp_path):
+    """The optional FIX3 attachment cannot break the normal initialized writer."""
+    solver = _strict_output_solver(tmp_path)
+    solver.fields = _RecordingFieldsWithDirectionalVelocity()
+    solver.time_stepper = _TimeStepper()
+
+    EDDASolver._output_results(solver)
+
+    assert solver.native_volume_budget_records == []
+    assert not (tmp_path / "diagnostics" / "native_volume_budget.csv").exists()
+
+
+def test_output_frame_records_actual_writer_event_time_not_filename_only(tmp_path):
+    solver = _strict_output_solver(tmp_path, save_flow_depth=True)
+    solver.fields = _RecordingFieldsWithDirectionalVelocity()
+    solver.time_stepper = _TimeStepper()
+
+    EDDASolver._output_results(solver)
+
+    payload = json.loads((tmp_path / "output_frame_events.json").read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "fix3-output-frame-events-v1"
+    assert payload["events"] == [
+        {
+            "event_index": 0,
+            "time_s": "10",
+            "writer": "taichi_edda_text",
+            "relative_paths": ["Flow_depth_Taichi_10.0.txt"],
+        }
+    ]
+    assert (tmp_path / "Flow_depth_Taichi_10.0.txt").is_file()
+
+
+def test_output_frame_writes_accepted_native_budget_attachment(tmp_path):
+    class _BudgetDFS:
+        precomputed_failure_gindx = None
+
+        @staticmethod
+        def get_volume_balance_snapshot():
+            return {
+                "rainfall_m3": 10.0,
+                "inflow_m3": 2.0,
+                "erosion_m3": 3.0,
+                "failure_source_m3": 4.0,
+                "infiltration_m3": 1.0,
+                "outflow_m3": 2.0,
+                "flow_storage_m3": 3.0,
+                "deposit_storage_m3": 4.0,
+                "residual_m3": 9.0,
+            }
+
+    solver = _strict_output_solver(tmp_path)
+    solver.fields = _RecordingFieldsWithDirectionalVelocity()
+    solver.time_stepper = _TimeStepper()
+    solver.dfs_dynamic_wave = _BudgetDFS()
+
+    EDDASolver._output_results(solver)
+
+    budget_path = tmp_path / "diagnostics" / "native_volume_budget.csv"
+    with budget_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["t_output_s"] == "10.0"
+    assert rows[0]["accepted_stage"] == "True"
+    assert rows[0]["rainfall_m3"] == "10.0"
+    assert rows[0]["residual_m3"] == "9.0"
+
+
 def _strict_output_state():
     fv = np.zeros((2, 1, 8), dtype=np.float64)
     return {
@@ -174,6 +253,7 @@ def _strict_output_state():
         "max_flow_velocity": np.array([[4.0], [5.0]], dtype=np.float64),
         "max_solid_depth": np.array([[0.005], [0.006]], dtype=np.float64),
         "fdepth": np.array([[0.0], [2.0]], dtype=np.float64),
+        "depo_thickness": np.array([[0.4], [-0.1]], dtype=np.float64),
     }
 
 
@@ -248,10 +328,11 @@ def test_chamoli_regime_depths_write_under_flowdepthsave(tmp_path):
 
 
 def test_chamoli_sf_df_ff_classify_uses_previous_cv_semantics():
-    """Document Chamoli dfs.F90:1115-1133: class depths use PREVIOUS cv vs NEW h.
+    """Document SF/DF/FF classify-cv staging: prev_cv vs predicted_step_cv.
 
-    Cell with incoming shallow clear water (prev_cv < 0.2) must land in FF even
-    when the accepted step later raises Cv via mixing/erosion.
+    Classification happens in `_classify_sfdf_pre_outflow` from this-step cv
+    and un-cleared `fhpredi2`, before outflow zeroing and before the volume
+    reject. `_commit_step` no longer classifies.
     """
     import inspect
 
@@ -260,19 +341,25 @@ def test_chamoli_sf_df_ff_classify_uses_previous_cv_semantics():
     cls = next(
         obj
         for name, obj in vars(dfs_mod).items()
-        if isinstance(obj, type) and hasattr(obj, "_commit_step")
+        if isinstance(obj, type) and hasattr(obj, "_classify_sfdf_pre_outflow")
     )
-    source = inspect.getsource(cls._commit_step)
-    assert "prev_cv = self.fields.Cv[i, j]" in source
-    assert "prev_cv >= 0.5" in source
-    assert "prev_cv >= 0.2" in source
-    assert "self.fields.ffh[i, j] = local_h" in source
-    # Classification must capture previous cv before the accepted rho overwrite.
-    prev_idx = source.index("prev_cv = self.fields.Cv[i, j]")
-    cv_update_idx = source.index("self.fields.Cv[i, j] = (self.fields.rho[i, j] - rho_water)")
-    assert prev_idx < cv_update_idx
-    # Sticky maxima use the same previous-cv branch.
-    assert "self.fields.maxffh[i, j] = ti.max(self.fields.maxffh[i, j], local_h)" in source
+    classify_source = inspect.getsource(cls._classify_sfdf_pre_outflow)
+    assert 'self.dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"' in classify_source
+    assert "predicted_step_cv = (self.fields.frhopredi1[i, j] - rho_water)" in classify_source or (
+        "classify_cv = (self.fields.frhopredi1[i, j] - rho_water)" in classify_source
+    )
+    assert "classify_cv >= 0.5" in classify_source
+    assert "classify_cv >= 0.2" in classify_source
+    assert "self.fields.ffh[i, j] = local_h" in classify_source
+    assert "self.fields.maxffh[i, j] = ti.max(self.fields.maxffh[i, j], local_h)" in classify_source
+    assert "self.fields.fhpredi2[i, j]" in classify_source
+
+    step_source = inspect.getsource(cls.step)
+    assert step_source.index("self._classify_sfdf_pre_outflow") < step_source.index(
+        "self._capture_outflow_candidate_before_clear"
+    )
+    commit_source = inspect.getsource(cls._commit_step)
+    assert "self.fields.sfh[i, j]" not in commit_source
 
 
 def test_strict_edda_text_writer_uses_bed_delta_and_accepted_maxima(tmp_path):
@@ -292,6 +379,48 @@ def test_strict_edda_text_writer_uses_bed_delta_and_accepted_maxima(tmp_path):
     np.testing.assert_allclose(written["Max_flow_depth_EDDA"], np.array([[2.0, 3.0]]))
     np.testing.assert_allclose(written["Max_flow_velocity_EDDA"], np.array([[4.0, 5.0]]))
     np.testing.assert_allclose(written["MaxsoliddepthEDDA"], np.array([[0.0, 0.006]]))
+
+
+def test_chamoli_text_writer_uses_depo_thickness_and_skips_cv_shallow_mask(tmp_path):
+    solver = _strict_output_solver(
+        tmp_path,
+        hydrology={
+            "dfs_erosion_depth_writer_variant": "cumulative_erodph_chamoli",
+            "dfs_flow_velocity_writer_variant": "absubar_chamoli",
+        },
+        save_deposition_depth=True,
+        save_total_depth=True,
+        save_volumetric_sediment_concentration=True,
+    )
+    state = _strict_output_state()
+    state["h"] = np.array([[0.001], [1.0]], dtype=np.float64)
+    state["Cv"] = np.array([[0.4], [0.4]], dtype=np.float64)
+    written = _record_strict_text_families(solver, state)
+    np.testing.assert_allclose(written["Deposit_depth_EDDA"], np.array([[0.4, 0.0]]))
+    np.testing.assert_allclose(written["Total_depth_EDDA"], np.array([[0.401, 0.9]]))
+    np.testing.assert_allclose(
+        solver._build_fortran_volumetric_sediment_output(state),
+        np.array([[0.4], [0.4]]),
+    )
+
+
+def test_bj_cv_writer_masks_cells_shallower_than_0_005(tmp_path):
+    solver = _strict_output_solver(tmp_path)
+    state = _strict_output_state()
+    state["h"] = np.array([[0.001], [1.0]], dtype=np.float64)
+    state["Cv"] = np.array([[0.4], [0.4]], dtype=np.float64)
+    np.testing.assert_allclose(
+        solver._build_fortran_volumetric_sediment_output(state),
+        np.array([[0.0], [0.4]]),
+    )
+
+def test_edda_run_loop_counts_attempts_against_fortran_maxnts():
+    import inspect
+
+    source = inspect.getsource(EDDASolver.run)
+    assert "self.fortran_maxnts = int(2.0 * t_end / dt_min)" in source
+    assert "self.fortran_nts > self.fortran_maxnts" in source
+    assert "self.stopped_for_maxnts = True" in source
 
 
 def test_control_free_direct_output_retains_checkpoint_max_cache_compatibility(tmp_path):
@@ -470,7 +599,11 @@ def test_output_results_exports_fortran_flow_velocity_from_directional_state(mon
     solver = object.__new__(EDDASolver)
     solver.fields = _RecordingFieldsWithDirectionalVelocity()
     solver.time_stepper = _TimeStepper()
-    solver.config = type("_Config", (), {"save_intermediate": True})()
+    solver.config = type(
+        "_Config",
+        (),
+        {"save_intermediate": True, "hydrology": _Config.hydrology},
+    )()
     solver.results = []
     solver.output_dir = tmp_path
     solver.export_metadata = {"nodata_value": -9999.0}
@@ -501,6 +634,7 @@ def test_export_final_results_excludes_pt_from_geotiff_state(monkeypatch, tmp_pa
     solver.export_metadata = {"nodata_value": -9999.0}
     solver.dfs_dynamic_wave = None
     solver.results = []
+    solver.config = _Config()
 
     EDDASolver.export_final_results(solver, format="geotiff")
 
@@ -540,6 +674,7 @@ def test_export_final_results_uses_deposition_depth_field(monkeypatch, tmp_path)
     solver.output_dir = tmp_path
     solver.export_metadata = {"nodata_value": -9999.0}
     solver.dfs_dynamic_wave = None
+    solver.config = _Config()
 
     EDDASolver.export_final_results(solver, format="geotiff")
 

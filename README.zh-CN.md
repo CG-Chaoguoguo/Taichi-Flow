@@ -51,8 +51,8 @@ Chamoli 工作流是案例专属的兼容路径，并不承诺每个历史 EDDA 
 网格变换会被保留，但在将该回退视为权威地理配准前，用户必须提供经过验证的 CRS
 元数据。
 
-请参阅受版本控制的 [Chamoli 能力矩阵](docs/audit/chamoli_capability_matrix.md)，
-了解从原始输入到运行时的覆盖范围和已知边界。
+`docs/audit/` 中的 Chamoli 能力矩阵属于本地审计证据，不随仓库分发。
+请参阅[后端验收标准](docs/backend_acceptance_criteria.md)，了解证明原始输入到运行时覆盖所需的证据。
 
 ## 参考算例数据流
 
@@ -169,9 +169,8 @@ npm run build
 Pop-Location
 ~~~
 
-进行 Chamoli 专项分析时，请先阅读
-[能力矩阵](docs/audit/chamoli_capability_matrix.md)，再通过导入、预检、队列和结果
-工作流验证同一算例。
+进行 Chamoli 专项分析时，可先阅读本地能力矩阵（若有），再通过导入、预检、队列和结果
+工作流验证同一算例。纯净检出不包含历史算例证据。
 
 ## 文档
 
@@ -180,7 +179,7 @@ Pop-Location
 - [安装指南](INSTALL.md)
 - [架构说明](docs/architecture.md)
 - [API 参考](docs/api_reference.md)
-- [Chamoli 能力矩阵](docs/audit/chamoli_capability_matrix.md)
+- [后端验收标准](docs/backend_acceptance_criteria.md)
 
 ## 科学边界
 

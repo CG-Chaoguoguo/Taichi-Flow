@@ -108,7 +108,73 @@ class HydrologyParams(BaseModel):
             "Native-input DFS erosion/deposition velocity-magnitude (`absubar`) variant. "
             "`max_component_bj` takes `max(vorth,vcomp)` from half-velocity `fvpredi2` (BJ). "
             "`signed_mean_chamoli` reconstructs a signed Cartesian speed from raw `fv` "
-            "with literal `0.707` diagonals (Chamoli `dfs.F90:209-212`)."
+            "with literal `0.707` diagonals (Chamoli `dfs.F90:209-212`). "
+            "`weighted_signed_test31` preserves Test31's separate raw-`fv` signed expression "
+            "and its default-REAL `0.4142`, `0.707`, and `0.2929` weights."
+        ),
+    )
+    dfs_flow_velocity_writer_variant: str = Field(
+        "half_sum_abs_fv_bj",
+        description=(
+            "Native-input DFS Flow_velocity frame-writer variant. "
+            "`half_sum_abs_fv_bj` writes `0.5*Σ|fv1..4|` (BJ). "
+            "`absubar_chamoli` writes start-of-step `absubar` (Chamoli `dfs.F90:1408-1414`)."
+        ),
+    )
+    dfs_erosion_depth_writer_variant: str = Field(
+        "net_bed_change_bj",
+        description=(
+            "Native-input DFS Erosion_depth frame-writer variant. "
+            "`net_bed_change_bj` writes `max(eleori-ele,0)` (BJ). "
+            "`cumulative_erodph_chamoli` writes cumulative `erodph` "
+            "(Chamoli `dfs.F90:1427-1436`)."
+        ),
+    )
+    dfs_sfdf_classify_cv_variant: str = Field(
+        "previous_committed_cv",
+        description=(
+            "Native-input DFS SF/DF/FF classification Cv time-level variant. "
+            "`previous_committed_cv` uses previously accepted Cv (legacy Taichi/BJ-absent). "
+            "`predicted_step_cv_chamoli` uses this-step frhopredi1-derived cv "
+            "(Chamoli `dfs.F90:357` → `:1120-1133`)."
+        ),
+    )
+    dfs_cvlimit_variant: str = Field(
+        "tanslo_cycle_cvstar_clamp_bj",
+        description=(
+            "Native-input DFS cvlimit/rholimit update variant. "
+            "`tanslo_cycle_cvstar_clamp_bj` keeps BJ negative-tanslo cycle and "
+            "`cvlimit>cvstar` clamp. `tan_slo_unit_clamp_chamoli` recomputes from "
+            "`tan(slo)` each step and clamps `cvlimit>1` to `cvstar` "
+            "(Chamoli `dfs.F90:358-371`)."
+        ),
+    )
+    dfs_erodph_dt_variant: str = Field(
+        "accepted_dt_bj",
+        description=(
+            "Native-input DFS cumulative-erodph timestep variant. "
+            "`accepted_dt_bj` accumulates with the accepted step `dt`. "
+            "`post_dti_dt_chamoli` accumulates with the post-`dti` `dt_next` "
+            "(Chamoli `dfs.F90:1264-1272`)."
+        ),
+    )
+    dfs_barrier_flux_variant: str = Field(
+        "bj_barrier_branch",
+        description=(
+            "Native-input DFS barrier face-flux variant applied after `qq/qqmass` "
+            "are formed. `bj_barrier_branch` keeps the BJ `flexible/rigid/else` "
+            "branch (plain flux untouched without barrier grids). "
+            "`chamoli_scour_kill_or` reproduces Chamoli `dfs.F90:909-921`, where "
+            "`elseif(fvpredi(i,ii)<0 .or. rigid(nq)>0)` zeroes every negative-velocity "
+            "face whenever `fhpredi(nq)+ele(nq) < rigid(nq)+eleori(nq)`."
+        ),
+    )
+    dfs_commit_cv_eps_variant: str = Field(
+        "no_clamp_bj",
+        description=(
+            "Native-input DFS committed-cv variant. `no_clamp_bj` commits "
+            "`cv=(frho-rhow)/(rhos-rhow)` as is. `eps_clamp_chamoli` additionally "
+            "applies `where(cv<eps) cv=0.` (Chamoli `dfs.F90:1284-1285`)."
         ),
     )
     use_fortran_absubar_velocity_state: bool = Field(

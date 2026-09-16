@@ -19,7 +19,7 @@ export function summarizeFailureSourcePolicy(resolution?: ComputePolicyResolutio
   if (resolution.effective.mode === "precomputed" && resolution.detected.simulate_shallow_landslide === false) {
     return `反事实覆盖 → ${mode}`;
   }
-  return `全局设置覆盖 → ${mode}`;
+  return `${resolution.source === "scenario_override" ? "当前方案覆盖" : "历史默认覆盖"} → ${mode}`;
 }
 
 export function FailureSourcePolicySummary({ resolution }: { resolution?: ComputePolicyResolution }) {
@@ -35,7 +35,9 @@ export function FailureSourcePolicySummary({ resolution }: { resolution?: Comput
         ? "历史未记录"
         : resolution.effective.mode === "live"
           ? "实验模式"
-          : resolution.source === "global_override"
+          : resolution.source === "scenario_override"
+            ? "当前方案覆盖"
+            : resolution.source === "global_override"
             ? "全局设置覆盖"
             : "自动识别";
   return (

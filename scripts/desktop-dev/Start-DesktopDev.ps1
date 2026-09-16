@@ -17,6 +17,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# The historical developer entry point remains valid for source checkouts.
+# When the same script is opened from a portable bundle, hand off before any
+# Node/Python discovery so a double-click never accidentally selects a system
+# interpreter or starts Vite in the bundle.
+$portableRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+$portableManifest = Join-Path $portableRoot "portable-manifest.json"
+if (Test-Path -LiteralPath $portableManifest -PathType Leaf) {
+    $portableLauncher = Join-Path $portableRoot "scripts\portable\Start-Taichi-Flow-Portable.ps1"
+    if (-not (Test-Path -LiteralPath $portableLauncher -PathType Leaf)) {
+        throw "Portable manifest found, but portable launcher is missing: $portableLauncher"
+    }
+    $portableArguments = @(
+        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $portableLauncher,
+        "-Root", $portableRoot, "-TimeoutSeconds", [string]$TimeoutSeconds
+    )
+    if ($Smoke.IsPresent) { $portableArguments += "-Smoke" }
+    & powershell.exe @portableArguments
+    exit $LASTEXITCODE
+}
+
 $modulePath = Join-Path $PSScriptRoot "TaichiFlow.DesktopDev.psm1"
 Import-Module $modulePath -Force
 
@@ -52,6 +72,17 @@ function Write-LauncherLog {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $Message
     Write-Host $line
     Add-Content -LiteralPath $launcherLogPath -Value $line -Encoding UTF8
+}
+
+function Get-ProbePropertyText {
+    param(
+        [AllowNull()]$Probe,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($null -eq $Probe) { return "" }
+    $property = $Probe.PSObject.Properties[$Name]
+    if ($null -eq $property) { return "" }
+    return [string]$property.Value
 }
 
 function Save-LauncherState {
@@ -265,7 +296,7 @@ try {
         if (-not (Test-TaichiFlowPortFree -Port $FrontendPort)) {
             $viteSelection = Test-TaichiFlowViteService -Port $FrontendPort -FrontendRoot $frontendRoot
             if ($null -ne $viteSelection -and -not $viteSelection.Reusable) {
-                Write-LauncherLog "Vite reuse rejected: source=$([bool]($null -ne $viteSelection.Owner)) proxy=$([bool]$viteSelection.ProxyMatches) error=$([string]$viteSelection.Error)"
+                Write-LauncherLog "Vite reuse rejected: source=$([bool]($null -ne $viteSelection.Owner)) proxy=$([bool]$viteSelection.ProxyMatches) reason=$(Get-ProbePropertyText $viteSelection 'Reason') error=$(Get-ProbePropertyText $viteSelection 'Error')"
             }
         }
         if ($null -eq $viteSelection -or -not $viteSelection.Reusable) {
@@ -278,7 +309,7 @@ try {
     if (-not (Test-TaichiFlowPortFree -Port $ApiPort)) {
         $apiSelection = Test-TaichiFlowApiService -Port $ApiPort -RepositoryRoot $repositoryRoot -RendererOrigin $rendererOrigin
         if ($null -ne $apiSelection -and -not $apiSelection.Reusable) {
-            Write-LauncherLog "API reuse rejected: source=$([bool]($null -ne $apiSelection.Owner)) cors=$([bool]$apiSelection.CorsMatches) error=$([string]$apiSelection.Error)"
+            Write-LauncherLog "API reuse rejected: source=$([bool]($null -ne $apiSelection.Owner)) cors=$([bool]$apiSelection.CorsMatches) reason=$(Get-ProbePropertyText $apiSelection 'Reason') error=$(Get-ProbePropertyText $apiSelection 'Error')"
         }
     }
     $apiProcess = $null

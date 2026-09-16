@@ -1,4 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { NUMERIC_VARIANT_HELP } from "../../constants/numericVariantHelp";
+import { VARIANT_GATE_KEYS } from "../../constants/computeGates";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import type { ParameterCatalog } from "../../types";
@@ -35,10 +38,11 @@ const catalog: ParameterCatalog = {
       runtime_status: "production_consumed",
       editable: true,
       value_type: "enum",
-      allowed_values: ["both_thin_weighted", "arithmetic_mean_chamoli"],
+      allowed_values: ["both_thin_weighted", "arithmetic_mean_chamoli", "asymmetric_head_guard"],
       allowed_value_labels_zh: {
         both_thin_weighted: "双薄层加权平均",
         arithmetic_mean_chamoli: "算术平均",
+        asymmetric_head_guard: "非对称水头保护",
       },
     },
     {
@@ -49,8 +53,8 @@ const catalog: ParameterCatalog = {
       runtime_status: "production_consumed",
       editable: true,
       value_type: "enum",
-      allowed_values: ["exponential_cv"],
-      allowed_value_labels_zh: { exponential_cv: "指数浓度加权" },
+      allowed_values: ["exponential_cv", "debrisflowmanning_cvtol"],
+      allowed_value_labels_zh: { exponential_cv: "指数浓度加权", debrisflowmanning_cvtol: "泥石流曼宁阈值" },
     },
     {
       key: "hydrology.dfs_dry_face_velocity_variant",
@@ -88,10 +92,109 @@ const catalog: ParameterCatalog = {
       runtime_status: "production_consumed",
       editable: true,
       value_type: "enum",
-      allowed_values: ["max_component_bj", "signed_mean_chamoli"],
+      allowed_values: ["max_component_bj", "signed_mean_chamoli", "weighted_signed_test31"],
       allowed_value_labels_zh: {
         max_component_bj: "分量最大模",
         signed_mean_chamoli: "有符号合成速度",
+        weighted_signed_test31: "Test31加权有符号速度",
+      },
+    },
+    {
+      key: "hydrology.dfs_flow_velocity_writer_variant",
+      label: "DFS flow-velocity writer variant",
+      label_zh: "流速写出口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["half_sum_abs_fv_bj", "absubar_chamoli"],
+      allowed_value_labels_zh: {
+        half_sum_abs_fv_bj: "半和四向绝对值",
+        absubar_chamoli: "Chamoli有向合成absubar",
+      },
+    },
+    {
+      key: "hydrology.dfs_erosion_depth_writer_variant",
+      label: "DFS erosion-depth writer variant",
+      label_zh: "侵蚀深度写出口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["net_bed_change_bj", "cumulative_erodph_chamoli"],
+      allowed_value_labels_zh: {
+        net_bed_change_bj: "净床面变化",
+        cumulative_erodph_chamoli: "累计侵蚀erodph",
+      },
+    },
+    {
+      key: "hydrology.dfs_sfdf_classify_cv_variant",
+      label: "DFS SF/DF/FF classify-cv variant",
+      label_zh: "SF-DF-FF分箱浓度时相",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["previous_committed_cv", "predicted_step_cv_chamoli"],
+      allowed_value_labels_zh: {
+        previous_committed_cv: "上步已提交Cv",
+        predicted_step_cv_chamoli: "本步预测cv",
+      },
+    },
+    {
+      key: "hydrology.dfs_cvlimit_variant",
+      label: "DFS cvlimit clamp variant",
+      label_zh: "cvlimit钳制变种",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["tanslo_cycle_cvstar_clamp_bj", "tan_slo_unit_clamp_chamoli"],
+      allowed_value_labels_zh: {
+        tanslo_cycle_cvstar_clamp_bj: "BJ负坡保持·cvstar上限",
+        tan_slo_unit_clamp_chamoli: "Chamoli每步重算·1.0上限",
+      },
+    },
+    {
+      key: "hydrology.dfs_erodph_dt_variant",
+      label: "DFS cumulative erodph timestep variant",
+      label_zh: "累计侵蚀erodph时步口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["accepted_dt_bj", "post_dti_dt_chamoli"],
+      allowed_value_labels_zh: {
+        accepted_dt_bj: "接受步dt",
+        post_dti_dt_chamoli: "dti后dt_next",
+      },
+    },
+    {
+      key: "hydrology.dfs_barrier_flux_variant",
+      label: "DFS barrier / scour face-flux kill variant",
+      label_zh: "挡墙/冲刷面通量清零口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["bj_barrier_branch", "chamoli_scour_kill_or"],
+      allowed_value_labels_zh: {
+        bj_barrier_branch: "BJ挡墙分支·无墙不清零",
+        chamoli_scour_kill_or: "Chamoli负向面·低于原地面清零",
+      },
+    },
+    {
+      key: "hydrology.dfs_commit_cv_eps_variant",
+      label: "DFS committed cv eps clamp variant",
+      label_zh: "提交步cv<eps归零口径",
+      group: "hydrology",
+      runtime_status: "production_consumed",
+      editable: true,
+      value_type: "enum",
+      allowed_values: ["no_clamp_bj", "eps_clamp_chamoli"],
+      allowed_value_labels_zh: {
+        no_clamp_bj: "不归零",
+        eps_clamp_chamoli: "cv<eps归零",
       },
     },
     {
@@ -181,23 +284,62 @@ describe("ComputeGateSettingsPanel", () => {
     });
   });
 
-  it("renders Chinese labels for compute gates, variants, and boundary types", () => {
-    render(<ComputeGateSettingsPanel />);
+  it.each(VARIANT_GATE_KEYS)("keeps %s in a local draft and resets without saving global defaults", (key) => {
+    function Harness() {
+      const [draft, setDraft] = useState<Record<string, unknown>>({});
+      return <ComputeGateSettingsPanel baseline={{}} effective={{}} draft={draft} onChange={setDraft} />;
+    }
+    render(<Harness />);
+    const entry = catalog.parameters.find((item) => item.key === key)!;
+    fireEvent.focus(screen.getByRole("button", { name: `${entry.label_zh}说明` }));
+    const select = screen.getByTestId(`enum-select-${key}`);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("自动（按当前方案识别）");
+    expect(Object.keys(NUMERIC_VARIANT_HELP[key].options).sort()).toEqual([...entry.allowed_values!].sort());
+    for (const value of entry.allowed_values!) {
+      fireEvent.change(select, { target: { value: String(value) } });
+      expect(screen.getByRole("tooltip")).toHaveTextContent(NUMERIC_VARIANT_HELP[key].options[String(value)].principle);
+      expect(screen.getByRole("tooltip")).toHaveTextContent(NUMERIC_VARIANT_HELP[key].options[String(value)].applicability);
+      expect(screen.getByRole("tooltip")).not.toHaveTextContent("当前方案解析：");
+    }
+    fireEvent.change(select, { target: { value: "" } });
+    expect(select).toHaveValue("");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("此处尚无可用的具体变体说明");
+    expect(useTaichiFlowStore.getState().saveComputeGateDefaults).not.toHaveBeenCalled();
+  });
 
-    expect(screen.getByTestId("compute-gate-settings")).toBeInTheDocument();
-    expect(screen.getByTestId("edda-compute-controls")).toBeInTheDocument();
-    expect(screen.getByTestId("variant-gate-settings")).toBeInTheDocument();
-    expect(screen.getByTestId("boundary-gate-settings")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "双薄层加权平均" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "干面上游清零" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "速度比权重" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "有符号合成速度" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "自动检测" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "出流" })).toBeInTheDocument();
-    expect(screen.getByTestId("failure-source-policy-settings")).toBeInTheDocument();
-    expect(screen.getAllByRole("option", { name: "自动（按方案识别）" }).length).toBeGreaterThan(0);
-    expect(screen.getByRole("option", { name: "自动（按 fssimul 与 Fortran 源码）" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "关闭浅层失稳台账（triggerslide 不受影响）" })).toBeInTheDocument();
-    expect(screen.getByTestId("live-policy-locked-hint")).toBeInTheDocument();
+  it("resets a saved override to the scenario baseline", () => {
+    function Harness() {
+      const [draft, setDraft] = useState<Record<string, unknown>>({ "hydrology.dfs_face_flux_variant": "arithmetic_mean_chamoli" });
+      return <ComputeGateSettingsPanel baseline={{}} effective={{ "hydrology.dfs_face_flux_variant": "both_thin_weighted" }} draft={draft} onChange={setDraft} />;
+    }
+    render(<Harness />);
+    fireEvent.focus(screen.getByRole("button", { name: "面通量平均变种说明" }));
+    fireEvent.change(screen.getByTestId("enum-select-hydrology.dfs_face_flux_variant"), { target: { value: "" } });
+    expect(screen.getByRole("tooltip")).toHaveTextContent(NUMERIC_VARIANT_HELP["hydrology.dfs_face_flux_variant"].options.both_thin_weighted.principle);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("自动（按当前方案识别）");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("当前方案解析：双薄层加权平均");
+  });
+
+  it("keeps help aligned when the parent restores or replaces the scenario draft", () => {
+    const key = "hydrology.dfs_face_flux_variant";
+    const props = { baseline: { [key]: "both_thin_weighted" }, effective: {}, onChange: vi.fn() };
+    const { rerender } = render(<ComputeGateSettingsPanel {...props} draft={{ [key]: "arithmetic_mean_chamoli" }} />);
+    fireEvent.focus(screen.getByRole("button", { name: "面通量平均变种说明" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("对应 Chamoli");
+    rerender(<ComputeGateSettingsPanel {...props} draft={{}} />);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("当前方案解析：双薄层加权平均");
+    rerender(<ComputeGateSettingsPanel {...props} draft={{ [key]: "future_variant" }} />);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("该选项暂无专属解释");
+    expect(screen.getByRole("tooltip")).not.toHaveTextContent("对应 Chamoli");
+  });
+
+  it("allows help inspection in a frozen scenario without changing controls", () => {
+    const key = "hydrology.dfs_face_flux_variant";
+    const onChange = vi.fn();
+    render(<ComputeGateSettingsPanel baseline={{ [key]: "both_thin_weighted" }} effective={{}} draft={{}} onChange={onChange} disabled />);
+    expect(screen.getByTestId(`enum-select-${key}`)).toBeDisabled();
+    fireEvent.focus(screen.getByRole("button", { name: "面通量平均变种说明" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("计算原理");
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

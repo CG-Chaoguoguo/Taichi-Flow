@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type ResultMetadata, type Scenario, type ScenarioConfiguration, type SimulationRun, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
+import { EMPTY_COMPUTE_POLICY_RESOLUTION, type AssetBatchDeleteResult, type AssetDeletePreview, type CaseConfigInterface, type ExportJob, type InputBinding, type InputFile, type InputRevision, type ParameterCatalog, type ParameterTemplate, type ProjectInfo, type QueueItem, type ResultFamily, type ResultMetadata, type Scenario, type ScenarioConfiguration, type SimulationRun, type SimulationRunOptions, type SystemMetrics, type Toast, type ComputeGateDefaults } from "../types";
 import { exportApi, inputApi, parameterApi, projectApi, queueApi, resultApi, scenarioApi, settingsApi, systemApi } from "../api/taichiFlowAdapter";
 import { DEFAULT_INPUT_FAMILY, type InputFamilyFilter } from "../constants/inputFamilies";
 import { isVisualizableInput } from "../constants/visualizableInputs";
-import { applyTheme, TAICHI_FLOW_PREFERENCES_STORAGE_KEY, type ThemeMode } from "../themePreference";
+import { applyTheme, normalizeTheme, TAICHI_FLOW_PREFERENCES_STORAGE_KEY, type ThemeMode } from "../themePreference";
+import type { ProjectDeleteMode, ProjectDeletePreview } from "../types";
 import {
   DEFAULT_EDITOR_LAYOUT,
   normalizeEditorLayoutPreferences,
@@ -97,6 +98,8 @@ interface TaichiFlowStore {
   setTheme: (theme: ThemeMode) => void;
   setActiveProject: (project: ProjectInfo | null, options?: { hydrate?: boolean }) => void;
   removeFromHistory: (projectId: string) => void;
+  previewProjectDelete: (projectId: string, mode: ProjectDeleteMode) => Promise<ProjectDeletePreview>;
+  deleteProject: (preview: ProjectDeletePreview, confirmedName: string) => Promise<void>;
   addToast: (toast: Omit<Toast, "id">) => void;
   removeToast: (id: string) => void;
   createProject: (name: string, rootPath: string, description?: string) => Promise<ProjectInfo>;
@@ -132,7 +135,11 @@ interface TaichiFlowStore {
   toggleLayerVisibility: (fileId: string) => void;
   createInputRevision: (uploadIds: string[], versionTag?: string) => Promise<InputRevision>;
   fetchQueue: () => Promise<void>;
-  enqueueScenario: (scenarioId: string, runtimeProfile?: string) => Promise<void>;
+  enqueueScenario: (
+    scenarioId: string,
+    runtimeProfile?: string,
+    diagnostics?: SimulationRunOptions["diagnostics"],
+  ) => Promise<void>;
   reorderQueue: (itemId: string, newPosition: number) => Promise<void>;
   cancelQueueItem: (itemId: string) => Promise<void>;
   stopRunningItem: (itemId: string) => Promise<void>;
@@ -227,6 +234,13 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
         projectHistory: state.projectHistory.filter((project) => project.project_id !== projectId),
         recentProjectIds: state.recentProjectIds.filter((id) => id !== projectId),
       })),
+      previewProjectDelete: (projectId, mode) => projectApi.previewDelete(projectId, mode),
+      deleteProject: async (preview, confirmedName) => {
+        await projectApi.delete(preview.project_id, { mode: preview.mode, confirmation_token: preview.confirmation_token, confirmed_name: confirmedName });
+        if (get().activeProjectId === preview.project_id) get().closeProject();
+        get().removeFromHistory(preview.project_id);
+        get().addToast({ type: "success", message: preview.mode === "permanent" ? "项目及本地目录已彻底删除" : "已从列表移除，本地文件仍保留" });
+      },
       addToast: (toast) => {
         const toastId = id();
         set((state) => ({ toasts: [...state.toasts, { ...toast, id: toastId }] }));
@@ -621,10 +635,10 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
           set((state) => ({ errors: { ...state.errors, queue: errorMessage(error) } }));
         }
       },
-      enqueueScenario: async (scenarioId, runtimeProfile) => {
+      enqueueScenario: async (scenarioId, runtimeProfile, diagnostics) => {
         const project = get().activeProject;
         if (!project) return;
-        await queueApi.enqueueScenario(project.project_id, scenarioId, runtimeProfile);
+        await queueApi.enqueueScenario(project.project_id, scenarioId, runtimeProfile, diagnostics);
         await get().fetchQueue();
         await get().fetchScenarios();
         set({ dockTab: "queue" });
@@ -844,7 +858,7 @@ export const useTaichiFlowStore = create<TaichiFlowStore>()(
         const previewMode = saved.canvasPreviewMode === "full" || saved.canvasPreviewMode === "downsample" ? saved.canvasPreviewMode : current.canvasPreviewMode;
         return {
           ...current,
-          theme: saved.theme || current.theme,
+          theme: normalizeTheme(saved.theme),
           activeProjectId: typeof saved.activeProjectId === "string" ? saved.activeProjectId : null,
           recentProjectIds: savedIds,
           projectHistory: [],

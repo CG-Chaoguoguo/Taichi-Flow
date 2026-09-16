@@ -51,13 +51,28 @@ def test_compute_gates_settings_round_trip_and_scenario_merge(tmp_path: Path) ->
             json={
                 "values": {
                     "hydrology.dfs_face_flux_variant": "arithmetic_mean_chamoli",
+                    "hydrology.dfs_flow_velocity_writer_variant": "absubar_chamoli",
+                    "hydrology.dfs_erosion_depth_writer_variant": "cumulative_erodph_chamoli",
+                    "hydrology.dfs_sfdf_classify_cv_variant": "predicted_step_cv_chamoli",
+                    "hydrology.dfs_cvlimit_variant": "tan_slo_unit_clamp_chamoli",
+                    "hydrology.dfs_erodph_dt_variant": "post_dti_dt_chamoli",
+                    "hydrology.dfs_barrier_flux_variant": "chamoli_scour_kill_or",
+                    "hydrology.dfs_commit_cv_eps_variant": "eps_clamp_chamoli",
                     "boundary_conditions.default_type": "wall",
                     "edda.run_controls.simulate_rainfall": False,
                 }
             },
         )
         assert written.status_code == 200
-        assert written.json()["values"]["hydrology.dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
+        written_values = written.json()["values"]
+        assert written_values["hydrology.dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
+        assert written_values["hydrology.dfs_flow_velocity_writer_variant"] == "absubar_chamoli"
+        assert written_values["hydrology.dfs_erosion_depth_writer_variant"] == "cumulative_erodph_chamoli"
+        assert written_values["hydrology.dfs_sfdf_classify_cv_variant"] == "predicted_step_cv_chamoli"
+        assert written_values["hydrology.dfs_cvlimit_variant"] == "tan_slo_unit_clamp_chamoli"
+        assert written_values["hydrology.dfs_erodph_dt_variant"] == "post_dti_dt_chamoli"
+        assert written_values["hydrology.dfs_barrier_flux_variant"] == "chamoli_scour_kill_or"
+        assert written_values["hydrology.dfs_commit_cv_eps_variant"] == "eps_clamp_chamoli"
         assert written.json()["effective"]["boundary_conditions.default_type"] == "wall"
 
         invalid = client.put(
@@ -65,6 +80,11 @@ def test_compute_gates_settings_round_trip_and_scenario_merge(tmp_path: Path) ->
             json={"values": {"hydrology.dfs_face_flux_variant": "not_a_real_variant"}},
         )
         assert invalid.status_code == 422
+        invalid_writer = client.put(
+            "/api/settings/compute-gates",
+            json={"values": {"hydrology.dfs_cvlimit_variant": "not_a_real_cvlimit"}},
+        )
+        assert invalid_writer.status_code == 422
 
         project = _create_project(client, project_root)
         scenario = client.post(
@@ -77,6 +97,13 @@ def test_compute_gates_settings_round_trip_and_scenario_merge(tmp_path: Path) ->
         assert created["parameter_patch"]["time.t_end"] == 12.0
         assert created["effective_parameters"]["edda.run_controls.simulate_rainfall"] is False
         assert created["effective_parameters"]["hydrology.dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_flow_velocity_writer_variant"] == "absubar_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_erosion_depth_writer_variant"] == "cumulative_erodph_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_sfdf_classify_cv_variant"] == "predicted_step_cv_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_cvlimit_variant"] == "tan_slo_unit_clamp_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_erodph_dt_variant"] == "post_dti_dt_chamoli"
+        assert created["effective_parameters"]["hydrology.dfs_barrier_flux_variant"] == "chamoli_scour_kill_or"
+        assert created["effective_parameters"]["hydrology.dfs_commit_cv_eps_variant"] == "eps_clamp_chamoli"
         configuration = client.get(
             f"/api/projects/{project['project_id']}/scenarios/{created['scenario_id']}/configuration"
         )

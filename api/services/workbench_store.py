@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterator, Mapping, Optional
 from uuid import uuid4
@@ -18,8 +19,10 @@ import re
 import sqlite3
 import shutil
 
+from api.services.result_files import classify_result_writer
 
-SCHEMA_VERSION = 10
+
+SCHEMA_VERSION = 11
 
 
 class WorkbenchError(Exception):
@@ -269,6 +272,7 @@ class ProjectDatabase:
                     elapsed_seconds REAL NOT NULL DEFAULT 0,
                     output_dir TEXT,
                     runtime_profile_json TEXT NOT NULL DEFAULT '{}',
+                    run_options_json TEXT NOT NULL DEFAULT '{}',
                     effective_config_json TEXT NOT NULL DEFAULT '{}',
                     compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}',
                     resource_summary_json TEXT NOT NULL DEFAULT '{}',
@@ -285,6 +289,7 @@ class ProjectDatabase:
                     simulation_id TEXT REFERENCES simulation_runs(simulation_id),
                     retry_of TEXT REFERENCES queue_items(queue_item_id),
                     runtime_profile TEXT NOT NULL DEFAULT 'cuda_production_default',
+                    run_options_json TEXT NOT NULL DEFAULT '{}',
                     effective_config_json TEXT NOT NULL DEFAULT '{}',
                     compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}',
                     enqueued_at TEXT NOT NULL,
@@ -759,6 +764,25 @@ class ProjectDatabase:
                 connection.execute(
                     "ALTER TABLE scenarios ADD COLUMN control_overrides_json TEXT NOT NULL DEFAULT '{}'"
                 )
+
+        if version < 11:
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "run_options_json" not in queue_columns:
+                connection.execute(
+                    "ALTER TABLE queue_items ADD COLUMN run_options_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            simulation_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+            }
+            if "run_options_json" not in simulation_columns:
+                connection.execute(
+                    "ALTER TABLE simulation_runs ADD COLUMN run_options_json TEXT NOT NULL DEFAULT '{}'"
+                )
+
         from api.services.parameter_templates import builtin_parameter_templates
 
         for template in builtin_parameter_templates():
@@ -819,6 +843,8 @@ class WorkbenchStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.catalog_path = self.state_dir / "catalog.sqlite3"
         self._initialize_catalog()
+        from api.services.project_lifecycle import ProjectLifecycle
+        self.project_lifecycle = ProjectLifecycle(self)
 
     @contextmanager
     def catalog(self) -> Iterator[sqlite3.Connection]:
@@ -974,7 +1000,12 @@ class WorkbenchStore:
     def list_projects(self) -> list[Dict[str, Any]]:
         with self.catalog() as connection:
             rows = connection.execute("SELECT * FROM projects ORDER BY created_at, project_id").fetchall()
-        return [self._project_info(row) for row in rows]
+        projects = [self._project_info(row) for row in rows]
+        for project in projects:
+            deletion = self.project_lifecycle.journal(project["project_id"])
+            if deletion:
+                project.update(available=False, deletion_status=deletion["status"], deletion_error=deletion["error"])
+        return projects
 
     def get_project(self, project_id: str) -> Dict[str, Any]:
         with self.catalog() as connection:
@@ -984,6 +1015,7 @@ class WorkbenchStore:
         return self._project_info(row)
 
     def project_database(self, project_id: str) -> ProjectDatabase:
+        self.project_lifecycle.assert_available(project_id)
         project = self.get_project(project_id)
         if not project["available"]:
             raise WorkbenchError(
@@ -998,6 +1030,12 @@ class WorkbenchStore:
 
     def create_or_open_project(self, *, name: str, root_path: str, description: str = "") -> Dict[str, Any]:
         root = Path(root_path).expanduser().resolve()
+        with self.catalog() as catalog:
+            pending = catalog.execute("SELECT root_path, staging_path FROM project_deletions").fetchall()
+        for record in pending:
+            for target in (Path(record["root_path"]), Path(record["staging_path"])):
+                if root == target or target in root.parents or root in target.parents:
+                    raise WorkbenchError("project_deleting", "目录存在未完成的删除，请先重试清理。", status_code=409)
         database = ProjectDatabase(root)
         existing_metadata = database.metadata()
         now = utc_now()
@@ -1229,6 +1267,13 @@ class WorkbenchStore:
                 "dry_face_velocity": parsed.dfs_dry_face_velocity_variant,
                 "artivis": parsed.dfs_artivis_variant,
                 "absubar": parsed.dfs_absubar_variant,
+                "flow_velocity_writer": parsed.dfs_flow_velocity_writer_variant,
+                "erosion_depth_writer": parsed.dfs_erosion_depth_writer_variant,
+                "sfdf_classify_cv": parsed.dfs_sfdf_classify_cv_variant,
+                "cvlimit": parsed.dfs_cvlimit_variant,
+                "erodph_dt": parsed.dfs_erodph_dt_variant,
+                "barrier_flux": parsed.dfs_barrier_flux_variant,
+                "commit_cv_eps": parsed.dfs_commit_cv_eps_variant,
                 "failure_source": parsed.dfs_failure_source_variant,
                 "failure_source_topology_status": parsed.dfs_failure_source_topology_status,
             },
@@ -3401,6 +3446,12 @@ class WorkbenchStore:
         scenario = self._public_scenario(project_id, scenario_row)
         database = self.project_database(project_id)
         manifest: list[Dict[str, Any]] = []
+        with database.connect() as connection:
+            defaults_row = {**dict(scenario_row), "control_overrides_json": "{}"}
+            control_defaults = self._scenario_compute_snapshot(connection, defaults_row).effective_parameters
+            has_history = connection.execute(
+                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0]
         revision_validation: Dict[str, Any] = {}
         draft_validation: Dict[str, Any] = json_loads(scenario_row["draft_validation_json"], {})
         if scenario.get("input_revision_id"):
@@ -3440,6 +3491,8 @@ class WorkbenchStore:
             "baseline": scenario.get("parameter_baseline") or {},
             "overrides": scenario.get("parameter_patch") or {},
             "control_overrides": scenario.get("control_overrides") or {},
+            "control_defaults": control_defaults,
+            "editable": bool(scenario.get("parameter_template_id")) and not has_history and scenario.get("status") in {"draft", "ready"},
             "configuration_ownership": scenario.get("configuration_ownership") or "global_defaults",
             "case_fingerprint": scenario.get("case_fingerprint"),
             "effective": scenario.get("effective_parameters") or {},
@@ -3930,6 +3983,7 @@ class WorkbenchStore:
             "cancel_reason": data.get("cancel_reason"),
             "retry_of": data.get("retry_of"),
             "runtime_profile": data.get("runtime_profile") or "cuda_production_default",
+            "run_options": json_loads(data.get("run_options_json"), {}),
             "effective_config": json_loads(data.get("effective_config_json"), {}),
             "compute_policy_resolution": json_loads(data.get("compute_policy_resolution_json"), {}),
             "enqueued_at": data["enqueued_at"],
@@ -3946,6 +4000,173 @@ class WorkbenchStore:
                 "SELECT * FROM queue_items ORDER BY position, enqueued_at, queue_item_id"
             ).fetchall()
         return [self._public_queue_item(project_id, row) for row in rows]
+
+
+    def _normalize_run_options(
+        self,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+        *,
+        frozen_manifest: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Freeze strictly validated, run-only diagnostics for one queue item.
+
+        Legacy `{}` values deliberately remain equivalent to diagnostics-off.
+        New probe requests are fail-closed: no numeric coercion, truncation, or
+        implicit deduplication is permitted before a queue item is created.
+        """
+        payload: Dict[str, Any] = {"diagnostics": {"erosion_probe": {"enabled": False, "probe_cells": []}}}
+        if diagnostics is None or diagnostics == {}:
+            return payload
+        if not isinstance(diagnostics, Mapping):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "运行诊断必须是对象。",
+                status_code=422,
+            )
+        erosion = diagnostics.get("erosion_probe")
+        if erosion is None:
+            return payload
+        if not isinstance(erosion, Mapping):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "侵蚀探针诊断必须是对象。",
+                status_code=422,
+            )
+        enabled_value = erosion.get("enabled", False)
+        if not isinstance(enabled_value, bool):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "侵蚀探针开关必须为布尔值。",
+                status_code=422,
+            )
+        raw_cells = erosion.get("probe_cells", [])
+        if not isinstance(raw_cells, list):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "探针格点必须是二维整数列表。",
+                status_code=422,
+            )
+        if len(raw_cells) > 32:
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "探针格点最多 32 个。",
+                status_code=422,
+                details={"max_probe_cells": 32},
+            )
+        cells: list[list[int]] = []
+        seen: set[tuple[int, int]] = set()
+        for index, cell in enumerate(raw_cells):
+            if not isinstance(cell, (list, tuple)) or len(cell) != 2:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针必须恰好为 [row, col]。",
+                    status_code=422,
+                )
+            row, col = cell
+            if isinstance(row, bool) or isinstance(col, bool) or not isinstance(row, int) or not isinstance(col, int):
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针的 row/col 必须为非负整数。",
+                    status_code=422,
+                )
+            if row < 0 or col < 0:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针的 row/col 必须为非负整数。",
+                    status_code=422,
+                )
+            coordinate = (row, col)
+            if coordinate in seen:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 重复。",
+                    status_code=422,
+                )
+            seen.add(coordinate)
+            cells.append([row, col])
+        if cells:
+            self._validate_erosion_probe_cells_against_frozen_dem(cells, frozen_manifest or [])
+        payload["diagnostics"]["erosion_probe"] = {
+            "enabled": enabled_value,
+            "probe_cells": cells,
+        }
+        return payload
+
+    @staticmethod
+    def _validate_erosion_probe_cells_against_frozen_dem(
+        cells: list[list[int]],
+        frozen_manifest: list[Dict[str, Any]],
+    ) -> None:
+        """Validate coordinates against the exact DEM carried by this run."""
+        import numpy as np
+
+        dem_entry = next(
+            (
+                item
+                for item in frozen_manifest
+                if bool(item.get("active", True))
+                and (
+                    str(item.get("binding_key") or "") == "dem.primary"
+                    or str(item.get("family") or "").lower() in {"dem", "demfil"}
+                )
+            ),
+            None,
+        )
+        if not dem_entry or not dem_entry.get("blob_path"):
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "无法用冻结 DEM 校验探针格点。",
+                status_code=422,
+            )
+        dem_path = Path(str(dem_entry["blob_path"]))
+        if not dem_path.is_file():
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "冻结 DEM 文件不可用，不能入队。",
+                status_code=422,
+            )
+        try:
+            source_suffix = Path(str(dem_entry.get("name") or dem_path.name)).suffix.lower()
+            if source_suffix in {".asc", ".txt"}:
+                from edda.io.dem_reader import read_ascii_grid
+
+                data, metadata = read_ascii_grid(str(dem_path))
+                height = int(metadata["height"])
+                width = int(metadata["width"])
+                nodata = metadata.get("nodata", metadata.get("nodata_value"))
+                array = np.asarray(data, dtype=np.float64).reshape((height, width))
+            elif source_suffix in {".tif", ".tiff"}:
+                import rasterio
+
+                with rasterio.open(dem_path) as source:
+                    array = np.asarray(source.read(1), dtype=np.float64)
+                    height, width = int(source.height), int(source.width)
+                    nodata = source.nodata
+            else:
+                raise ValueError(f"不支持的 DEM 格式：{source_suffix or dem_path.suffix}")
+        except Exception as exc:
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "冻结 DEM 无法读取，不能校验探针格点。",
+                status_code=422,
+                details={"dem": str(dem_path), "reason": str(exc)},
+            ) from exc
+        for row, col in cells:
+            if row >= height or col >= width:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 超出冻结 DEM 边界。",
+                    status_code=422,
+                    details={"height": height, "width": width, "cell": [row, col]},
+                )
+            value = float(array[row, col])
+            if not np.isfinite(value) or (nodata is not None and value == float(nodata)):
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 位于冻结 DEM 的 NoData 区域。",
+                    status_code=422,
+                    details={"cell": [row, col]},
+                )
 
     @staticmethod
     def _resolve_enqueue_runtime_profile(runtime_profile: Optional[str]) -> str:
@@ -4071,6 +4292,8 @@ class WorkbenchStore:
         frozen_effective_config: Optional[Mapping[str, Any]] = None,
         frozen_compute_policy_resolution: Optional[Mapping[str, Any]] = None,
         frozen_scenario_version: Optional[int] = None,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+        frozen_run_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Queue a draft and freeze its compute policy at enqueue time."""
         from api.services.structured_input_resolver import validate_scenario_configuration
@@ -4105,12 +4328,14 @@ class WorkbenchStore:
         if scenario["status"] == "archived":
             raise WorkbenchError("scenario_archived", "Archived scenarios cannot be queued.", status_code=409)
         frozen_revision_id = snapshot_revision_id
+        frozen_manifest: list[Dict[str, Any]] | None = None
         if frozen_revision_id is None and scenario.get("binding_state") == "runtime_snapshot":
             frozen_revision_id = scenario.get("input_revision_id")
         if frozen_revision_id:
             revision = self._revision_row(project_id, str(frozen_revision_id))
             if revision["status"] != "ready":
                 raise WorkbenchError("input_revision_invalid", "The frozen input snapshot is invalid.", status_code=409)
+            frozen_manifest = json_loads(revision["manifest_json"], [])
 
         queue_effective = dict(frozen_effective_config or scenario.get("effective_parameters") or {})
         queue_resolution = dict(
@@ -4141,7 +4366,7 @@ class WorkbenchStore:
                 details=queue_resolution,
             )
         if frozen_revision_id:
-            revision_manifest = json_loads(revision["manifest_json"], [])
+            revision_manifest = frozen_manifest or []
             validation = validate_scenario_configuration(queue_effective, revision_manifest)
             if not validation["valid"]:
                 raise WorkbenchError(
@@ -4193,18 +4418,24 @@ class WorkbenchStore:
                         "The input snapshot could not be frozen.",
                         status_code=409,
                     )
+                frozen_manifest = snapshot_manifest
             position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             profile_name = self._resolve_enqueue_runtime_profile(runtime_profile)
+            run_options = (
+                dict(frozen_run_options)
+                if isinstance(frozen_run_options, Mapping) and frozen_run_options
+                else self._normalize_run_options(diagnostics, frozen_manifest=frozen_manifest)
+            )
             connection.execute(
                 """
                 INSERT INTO queue_items(
                     queue_item_id, scenario_id, scenario_version, input_revision_id,
                     position, status, simulation_id, retry_of, runtime_profile,
-                    effective_config_json, compute_policy_resolution_json, enqueued_at,
+                    run_options_json, effective_config_json, compute_policy_resolution_json, enqueued_at,
                     started_at, finished_at, progress, summary, cancel_reason
-                ) VALUES(?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 'Draft input and compute policy preflight passed.', NULL)
+                ) VALUES(?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 'Draft input and compute policy preflight passed.', NULL)
                 """,
                 (
                     queue_item_id,
@@ -4214,6 +4445,7 @@ class WorkbenchStore:
                     position,
                     retry_of,
                     profile_name,
+                    json.dumps(run_options, ensure_ascii=False),
                     json.dumps(queue_effective, ensure_ascii=False),
                     json.dumps(queue_resolution, ensure_ascii=False),
                     now,
@@ -4317,6 +4549,9 @@ class WorkbenchStore:
                 if "scenario_version" in row.keys() and row["scenario_version"] is not None
                 else None
             ),
+            frozen_run_options=json_loads(row["run_options_json"], {})
+            if "run_options_json" in row.keys() and row["run_options_json"]
+            else None,
         )
 
     def recover_interrupted_runs(self) -> int:
@@ -4468,6 +4703,7 @@ class WorkbenchStore:
         stored_effective = json_loads(scenario_dict.get("effective_parameters_json"), {})
         frozen_effective = scenario_dict.pop("_frozen_effective_parameters", None)
         frozen_resolution = scenario_dict.pop("_frozen_compute_policy_resolution", None)
+        frozen_run_options = scenario_dict.pop("_frozen_run_options", None)
         if frozen_effective is None or frozen_resolution is None:
             queue_row = self._queue_row(project_id, queue_item_id)
             if "effective_config_json" in queue_row.keys() and queue_row["effective_config_json"]:
@@ -4496,6 +4732,15 @@ class WorkbenchStore:
             else {}
         )
         profile_name = str(runtime_profile or "cuda_production_default")
+        if isinstance(frozen_run_options, dict):
+            run_options = dict(frozen_run_options)
+        else:
+            queue_row_for_options = self._queue_row(project_id, queue_item_id)
+            run_options = (
+                json_loads(queue_row_for_options["run_options_json"], {})
+                if "run_options_json" in queue_row_for_options.keys()
+                else {}
+            )
         template_metadata: Dict[str, Any] = {}
         if scenario_dict.get("parameter_template_id"):
             database = self.project_database(project_id)
@@ -4551,6 +4796,7 @@ class WorkbenchStore:
                 "scenario_id": scenario_dict["scenario_id"],
                 "scenario_name": scenario_dict["name"],
                 "runtime_profile": profile_name,
+                "run_options": run_options,
                 "output_dir": output_dir,
                 "dem_file": str(dem["blob_path"]) if dem else None,
                 "rainfall_file": None,
@@ -4586,6 +4832,7 @@ class WorkbenchStore:
             "scenario_id": scenario_dict["scenario_id"],
             "scenario_name": scenario_dict["name"],
             "runtime_profile": profile_name,
+            "run_options": run_options,
             "output_dir": output_dir,
             "dem_file": str(dem["blob_path"]) if dem else None,
             "rainfall_file": str(rainfall["blob_path"]) if rainfall else None,
@@ -4703,6 +4950,175 @@ class WorkbenchStore:
                     ),
                 )
 
+    def erosion_probe_suggestions(
+        self,
+        project_id: str,
+        scenario_id: str,
+        *,
+        top: int = 10,
+    ) -> Dict[str, Any]:
+        """Suggest cells from a manifest-indexed, input-compatible run only."""
+        import numpy as np
+
+        if type(top) is not int or not 1 <= top <= 32:
+            raise WorkbenchError("probe_suggestions_invalid", "Top-N 必须为 1 至 32 的整数。", status_code=422)
+        top_n = top
+        scenario = self._scenario_row(project_id, scenario_id)
+        input_revision_id = scenario["input_revision_id"]
+        semantic_key = "hydrology.dfs_erosion_depth_writer_variant"
+        target_semantics = self._public_scenario(project_id, scenario).get("effective_parameters", {}).get(semantic_key)
+        if not target_semantics:
+            raise WorkbenchError("probe_suggestions_unavailable", "当前侵蚀输出语义未知，不能选择兼容结果。", status_code=404)
+        if not input_revision_id:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "当前方案没有冻结输入版本，不能跨版本填充探针。",
+                status_code=404,
+            )
+        database = self.project_database(project_id)
+        with database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT simulation_id, input_revision_id, output_dir, end_time_actual, created_at, effective_config_json
+                FROM simulation_runs
+                WHERE input_revision_id=? AND status='completed'
+                ORDER BY COALESCE(end_time_actual, created_at) DESC, simulation_id DESC
+                """,
+                (input_revision_id,),
+            ).fetchall()
+        if not rows:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "没有同一输入版本且已完成的模拟结果可用于填充侵蚀探针格点。",
+                status_code=404,
+            )
+
+        from api.services.runtime_audit import _load_output_frame_events
+
+        selected: tuple[Any, Path, Dict[str, Any], Decimal] | None = None
+        for row in rows:
+            if json_loads(row["effective_config_json"], {}).get(semantic_key) != target_semantics:
+                continue
+            if not row["output_dir"]:
+                continue
+            output_dir = Path(str(row["output_dir"])).resolve()
+            manifest_path = output_dir / "output_manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            entries = manifest.get("result_files") if isinstance(manifest, dict) else None
+            if not isinstance(entries, list):
+                continue
+            event_evidence, events = _load_output_frame_events(output_dir)
+            if event_evidence.get("status") != "present":
+                continue
+            candidates: list[tuple[Decimal, Path, Dict[str, Any]]] = []
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("family") != "Erosion_depth":
+                    continue
+                relative_path = entry.get("relative_path")
+                if not isinstance(relative_path, str) or not relative_path:
+                    continue
+                # The product's erosion-depth comparison/probe contract is the
+                # EDDA-compatible text writer. Do not substitute a similarly
+                # named GeoTIFF or a foreign writer merely because it is newer.
+                writer = str(entry.get("writer") or "")
+                if not writer:
+                    writer = classify_result_writer(relative_path)
+                if writer != "taichi_edda_text":
+                    continue
+                event = events.get(relative_path.replace("\\", "/"))
+                if not event or event.get("writer") != writer or entry.get("frame_event_writer") != writer:
+                    continue
+                try:
+                    frame_time = Decimal(str(entry.get("frame_time_s")))
+                except InvalidOperation:
+                    continue
+                if not frame_time.is_finite() or frame_time < 0 or frame_time != Decimal(event["time_s"]):
+                    continue
+                candidate = (output_dir / relative_path).resolve()
+                try:
+                    candidate.relative_to(output_dir)
+                except ValueError:
+                    continue
+                if not candidate.is_file() or candidate.suffix.lower() not in {".tif", ".tiff", ".asc", ".txt"}:
+                    continue
+                candidates.append((frame_time, candidate, entry))
+            if candidates:
+                frame_time, raster_path, entry = max(candidates, key=lambda item: (item[0], item[1].name))
+                selected = (row, raster_path, entry, frame_time)
+                break
+        if selected is None:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "没有可由输出清单索引的同版本 Erosion_depth 栅格。",
+                status_code=404,
+            )
+        row, raster_path, entry, frame_time = selected
+        if entry.get("sha256") != hashlib.sha256(raster_path.read_bytes()).hexdigest():
+            raise WorkbenchError("probe_suggestions_unavailable", "侵蚀栅格内容与冻结输出清单不一致。", status_code=404)
+        if raster_path.suffix.lower() in {".tif", ".tiff"}:
+            import rasterio
+
+            with rasterio.open(raster_path) as src:
+                data = np.asarray(src.read(1), dtype=np.float64)
+                nodata = src.nodata
+        else:
+            from edda.io.dem_reader import read_ascii_grid
+
+            data, meta = read_ascii_grid(str(raster_path))
+            data = np.asarray(data, dtype=np.float64)
+            nodata = meta.get("NODATA_value", meta.get("nodata_value", -9999.0))
+            expected_shape = (int(meta.get("height", 0)), int(meta.get("width", 0)))
+            expected_count = expected_shape[0] * expected_shape[1]
+            if not expected_count or data.size != expected_count:
+                raise WorkbenchError(
+                    "probe_suggestions_unavailable",
+                    "输出清单中的 Erosion_depth 栅格尺寸与其 ASCII 头信息不一致。",
+                    status_code=404,
+                )
+            # np.loadtxt collapses a legal 1×N/N×1/1×1 grid. Restore only the
+            # exact header-declared row-major shape; never transpose, crop, or
+            # pad a malformed candidate.
+            data = data.reshape(expected_shape)
+        masked = np.array(data, copy=True)
+        if nodata is not None:
+            masked[masked == float(nodata)] = np.nan
+        masked[~np.isfinite(masked)] = np.nan
+        flat = masked.ravel()
+        if not np.any(np.isfinite(flat)):
+            return {
+                "simulation_id": row["simulation_id"],
+                "input_revision_id": row["input_revision_id"],
+                "source_file": str(entry.get("relative_path")),
+                "source_frame_s": frame_time,
+                "writer": str(entry.get("writer") or "taichi_edda_text"),
+                "probe_cells": [],
+                "top": top_n,
+            }
+        order = np.argsort(np.nan_to_num(flat, nan=-np.inf))[::-1]
+        cells: list[list[int]] = []
+        for index in order:
+            if len(cells) >= top_n:
+                break
+            value = flat[index]
+            if not np.isfinite(value) or value <= 0.0:
+                continue
+            row_i, col_i = divmod(int(index), masked.shape[1])
+            cells.append([int(row_i), int(col_i)])
+        return {
+            "simulation_id": row["simulation_id"],
+            "input_revision_id": row["input_revision_id"],
+            "source_file": str(entry.get("relative_path")),
+            "source_frame_s": frame_time,
+            "writer": str(entry.get("writer") or "taichi_edda_text"),
+            "probe_cells": cells,
+            "top": top_n,
+        }
+
     def finish_run(self, project_id: str, simulation_id: str, result: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
         status = str(result.get("status") or "failed")
@@ -4782,6 +5198,7 @@ class WorkbenchStore:
             "error_details": json_loads(data.get("error_details_json"), {}),
             "elapsed_seconds": float(data["elapsed_seconds"]),
             "output_dir": data.get("output_dir"),
+            "run_options": json_loads(data.get("run_options_json"), {}),
             "effective_config": json_loads(data.get("effective_config_json"), {}),
             "compute_policy_resolution": resolution,
             "resource_summary": json_loads(data.get("resource_summary_json"), {}),
@@ -5022,10 +5439,10 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                     INSERT INTO simulation_runs(
                         simulation_id, scenario_id, input_revision_id, status, progress, current_time, end_time,
                         step_count, output_count, start_time, end_time_actual, error,
-                        elapsed_seconds, output_dir, runtime_profile_json,
+                        elapsed_seconds, output_dir, runtime_profile_json, run_options_json,
                         effective_config_json, compute_policy_resolution_json,
                         resource_summary_json, terminal_log_json, created_at
-                    ) VALUES(?, ?, ?, 'starting', 0, 0, 0, 0, 0, ?, NULL, NULL, 0, ?, ?, ?, ?, '{}', '[]', ?)
+                    ) VALUES(?, ?, ?, 'starting', 0, 0, 0, 0, 0, ?, NULL, NULL, 0, ?, ?, ?, ?, ?, '{}', '[]', ?)
                     """,
                     (
                         simulation_id,
@@ -5034,6 +5451,7 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                         now,
                         output_dir,
                         json.dumps({"name": profile_name}),
+                        item["run_options_json"] if "run_options_json" in item.keys() and item["run_options_json"] else "{}",
                         json.dumps(queue_effective, ensure_ascii=False),
                         json.dumps(queue_resolution, ensure_ascii=False),
                         now,
@@ -5061,6 +5479,9 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                 payload_scenario["_frozen_effective_parameters"] = queue_effective
                 payload_scenario["_frozen_compute_policy_resolution"] = queue_resolution
                 payload_scenario["_runtime_profile"] = profile_name
+                payload_scenario["_frozen_run_options"] = json_loads(
+                    item["run_options_json"], {}
+                ) if "run_options_json" in item.keys() and item["run_options_json"] else {}
         if failure is not None and item:
             connection.execute(
                 """

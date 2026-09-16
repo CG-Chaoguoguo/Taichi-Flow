@@ -7,6 +7,17 @@ export type ProjectInfo = {
   created_at: string;
   updated_at: string;
   available?: boolean;
+  deletion_status?: "deleting" | "failed";
+  deletion_error?: string;
+};
+
+export type ProjectDeleteMode = "unregister" | "permanent";
+export type ProjectDeletePreview = {
+  staging_path?: string | null;
+  last_error?: string | null;
+  project_id: string; name: string; root_path: string; mode: ProjectDeleteMode;
+  scenario_count: number; run_count: number; blocked_reasons: string[];
+  retry: boolean; confirmation_token: string; allowed: boolean;
 };
 
 export type InputRevision = {
@@ -237,6 +248,15 @@ export type Scenario = {
 };
 
 export type SimulationStatus = "pending" | "starting" | "running" | "stopping" | "completed" | "failed" | "stopped" | "interrupted";
+export type ErosionProbeRunOptions = {
+  enabled: boolean;
+  probe_cells: Array<[number, number]>;
+};
+export type SimulationRunOptions = {
+  diagnostics: {
+    erosion_probe: ErosionProbeRunOptions;
+  };
+};
 export type SimulationRun = {
   simulation_id: string;
   scenario_id: string;
@@ -254,6 +274,7 @@ export type SimulationRun = {
   elapsed_seconds: number;
   terminal_log?: string[];
   output_dir?: string;
+  run_options?: SimulationRunOptions | null;
   effective_config?: Record<string, unknown>;
   compute_policy_resolution: ComputePolicyResolution;
   resource_summary?: Record<string, unknown>;
@@ -273,6 +294,7 @@ export type QueueItem = {
   cancel_reason?: string | null;
   retry_of?: string | null;
   runtime_profile?: string | null;
+  run_options?: SimulationRunOptions | null;
   effective_config: Record<string, unknown>;
   compute_policy_resolution: ComputePolicyResolution;
   enqueued_at: string;
@@ -305,6 +327,15 @@ export type ResultFamily = {
 };
 
 export type NumericalDiagnostics = {
+  erosion_probe_diagnostics?: {
+    enabled?: boolean;
+    capture_active?: boolean;
+    diagnostics_incomplete?: boolean;
+    write_error?: string | null;
+    captured_record_count?: number;
+    written_record_count?: number;
+    buffered_record_count?: number;
+  };
   schema_version?: number;
   status?: string;
   simulation?: {
@@ -543,7 +574,10 @@ export type ComputePolicyResolutionCommon = {
   requested: "auto" | "disabled" | "precomputed" | "live" | string;
   detected: ComputePolicyDetected;
   effective: ComputePolicyEffective;
-  numeric_variants: Record<string, { source?: string; value?: unknown }>;
+  numeric_variants: Record<
+    string,
+    { source?: "case_baseline" | "global_override" | "missing" | string; value?: unknown }
+  >;
   settings_snapshot: Record<string, unknown>;
   warnings: string[];
   resolution_id: string;
@@ -577,6 +611,8 @@ export const EMPTY_COMPUTE_POLICY_RESOLUTION: ComputePolicyResolution = {
 };
 
 export type ScenarioConfiguration = {
+  control_defaults?: Record<string, unknown>;
+  editable?: boolean;
   scenario_id: string;
   parameter_template_id?: string | null;
   baseline: Record<string, unknown>;

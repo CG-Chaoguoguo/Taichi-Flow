@@ -24,6 +24,8 @@ const smokeMode = process.env.TAICHI_FLOW_DESKTOP_SMOKE === "1";
 const smokeReportPath = process.env.TAICHI_FLOW_DESKTOP_SMOKE_REPORT || path.join(rootDir, "artifacts", "desktop-smoke-report.json");
 const smokeScreenshotPath = process.env.TAICHI_FLOW_DESKTOP_SMOKE_SCREENSHOT || path.join(rootDir, "artifacts", "desktop-smoke.png");
 const desktopExitReportPath = process.env.TAICHI_FLOW_DESKTOP_EXIT_REPORT || "";
+const buildId = process.env.TAICHI_FLOW_BUILD_ID || "";
+const distributionMode = process.env.TAICHI_FLOW_DISTRIBUTION_MODE || "development";
 const runtimeErrors = [];
 
 let mainWindow = null;
@@ -213,6 +215,8 @@ async function runSmoke(window) {
       desktopRuntime: Boolean(window.taichiFlowDesktop),
       desktopMode: window.taichiFlowDesktop?.mode || null,
       desktopVersion: window.taichiFlowDesktop?.version || null,
+      buildId: window.taichiFlowDesktop?.buildId || null,
+      distributionMode: window.taichiFlowDesktop?.distributionMode || null,
       apiUrl: window.taichiFlowDesktop?.apiUrl || null,
       apiContractVersion: window.taichiFlowDesktop?.apiContractVersion || null,
       directoryPickerBridge: typeof window.taichiFlowDesktop?.selectDirectory === "function",
@@ -294,6 +298,8 @@ function createWindow() {
         `--taichi-flow-api-url=${apiUrl}`,
         `--taichi-flow-client-version=${packageMetadata.version}`,
         `--taichi-flow-api-contract=${contract.apiContractVersion}`,
+        `--taichi-flow-build-id=${buildId}`,
+        `--taichi-flow-distribution-mode=${distributionMode}`,
       ],
     },
   });

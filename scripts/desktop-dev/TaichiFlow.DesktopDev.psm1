@@ -101,10 +101,26 @@ function Get-TaichiFlowPythonCandidate {
         }
     }
     if ($null -eq $DiscoveredCommands) {
+        # `Get-Command <name>` returns only the first PATH hit.  On Windows it
+        # is common to have an unsupported Microsoft Store shim or Python 3.14
+        # before the real 3.11 installation.  Enumerate every executable and
+        # add well-known per-user/per-machine install roots as independent
+        # candidates; the import probe below decides which one is usable.
         $discovered = New-Object System.Collections.Generic.List[string]
-        foreach ($name in @("python", "python3")) {
-            $command = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($null -ne $command) { $discovered.Add($command.Source) }
+        foreach ($name in @("python", "python3", "python.exe", "python3.exe")) {
+            foreach ($command in @(Get-Command $name -All -ErrorAction SilentlyContinue)) {
+                $source = [string]$command.Source
+                if (-not [string]::IsNullOrWhiteSpace($source)) { $discovered.Add($source) }
+            }
+        }
+        foreach ($pattern in @(
+            (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\Python\Python*\python.exe"),
+            (Join-Path ([Environment]::GetFolderPath("ProgramFiles")) "Python*\python.exe"),
+            (Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Python*\python.exe")
+        )) {
+            foreach ($path in @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+                $discovered.Add([string]$path.FullName)
+            }
         }
         $DiscoveredCommands = $discovered.ToArray()
     }
@@ -121,7 +137,7 @@ function Get-TaichiFlowPythonCandidate {
     $pyPath = if ($null -ne $pyCommand) { $pyCommand.Source } else { "py.exe" }
     Add-TaichiFlowPythonCandidate $candidates $seen "py -3.11" $pyPath @("-3.11")
     foreach ($path in $DiscoveredCommands) {
-        Add-TaichiFlowPythonCandidate $candidates $seen "discovered interpreter" $path
+        Add-TaichiFlowPythonCandidate $candidates $seen "discovered interpreter" ([string]$path)
     }
     return $candidates.ToArray()
 }
@@ -407,7 +423,6 @@ function Test-TaichiFlowApiService {
         $health = $response.Content | ConvertFrom-Json
         $owner = Get-TaichiFlowPortOwner -Port $Port
         $ownerCommand = if ($null -ne $owner) { ([string]$owner.command_line).ToLowerInvariant() } else { "" }
-        $rootToken = [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd("\").ToLowerInvariant()
         $sourceMatches = $null -ne $owner -and $ownerCommand.Contains("uvicorn") -and $ownerCommand.Contains("api.app:app")
         if (-not $sourceMatches -and $null -ne $owner -and [string]$owner.identity_source -eq "process-api") {
             $sourceMatches = [System.IO.Path]::GetFileNameWithoutExtension([string]$owner.executable_path).ToLowerInvariant() -eq "python"
@@ -424,9 +439,28 @@ function Test-TaichiFlowApiService {
             [int]$health.api_contract_version -eq $script:RequiredApiContractVersion -and
             [string]$health.checkout_id -eq (Get-TaichiFlowCheckoutId -RepositoryRoot $RepositoryRoot)
         $corsMatches = Test-TaichiFlowCorsOrigin -Port $Port -Origin $RendererOrigin
-        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contractMatches -and $corsMatches); Health = $health; Owner = $owner; CorsMatches = $corsMatches }
+        $reason = if (-not $sourceMatches) { "source-mismatch" } elseif (-not $contractMatches) { "contract-or-checkout-mismatch" } elseif (-not $corsMatches) { "cors-mismatch" } else { "reusable" }
+        return [pscustomobject]@{
+            Reusable = [bool]($sourceMatches -and $contractMatches -and $corsMatches)
+            Health = $health
+            Owner = $owner
+            CorsMatches = $corsMatches
+            SourceMatches = $sourceMatches
+            ContractMatches = $contractMatches
+            Error = ""
+            Reason = $reason
+        }
     } catch {
-        return [pscustomobject]@{ Reusable = $false; Health = $null; Owner = (Get-TaichiFlowPortOwner -Port $Port); CorsMatches = $false; Error = $_.Exception.Message }
+        return [pscustomobject]@{
+            Reusable = $false
+            Health = $null
+            Owner = (Get-TaichiFlowPortOwner -Port $Port)
+            CorsMatches = $false
+            SourceMatches = $false
+            ContractMatches = $false
+            Error = $_.Exception.Message
+            Reason = "probe-error"
+        }
     }
 }
 
@@ -492,9 +526,26 @@ function Test-TaichiFlowViteService {
                 if ($expectedUri.Port -ne 8000) { $proxyMatches = $false }
             }
         }
-        return [pscustomobject]@{ Reusable = [bool]($sourceMatches -and $contentMatches -and $proxyMatches); Owner = $owner; ProxyMatches = $proxyMatches }
+        $reason = if (-not $sourceMatches) { "source-mismatch" } elseif (-not $contentMatches) { "content-mismatch" } elseif (-not $proxyMatches) { "proxy-mismatch" } else { "reusable" }
+        return [pscustomobject]@{
+            Reusable = [bool]($sourceMatches -and $contentMatches -and $proxyMatches)
+            Owner = $owner
+            ProxyMatches = $proxyMatches
+            ContentMatches = $contentMatches
+            SourceMatches = $sourceMatches
+            Error = ""
+            Reason = $reason
+        }
     } catch {
-        return [pscustomobject]@{ Reusable = $false; Owner = (Get-TaichiFlowPortOwner -Port $Port); ProxyMatches = $false; Error = $_.Exception.Message }
+        return [pscustomobject]@{
+            Reusable = $false
+            Owner = (Get-TaichiFlowPortOwner -Port $Port)
+            ProxyMatches = $false
+            ContentMatches = $false
+            SourceMatches = $false
+            Error = $_.Exception.Message
+            Reason = "probe-error"
+        }
     }
 }
 
@@ -594,7 +645,7 @@ function Write-TaichiFlowSessionState {
 function Read-TaichiFlowSessionState {
     param([Parameter(Mandatory = $true)][string]$StatePath)
     if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) { return $null }
-    try { return Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json } catch { return $null }
+    try { return Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
 }
 
 function Get-TaichiFlowDescendantProcessId {

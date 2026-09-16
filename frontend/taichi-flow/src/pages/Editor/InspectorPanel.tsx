@@ -1,6 +1,6 @@
 import { ArchiveRestore, Database, Play, Save, SlidersHorizontal } from "lucide-react";
 import { HelpTip } from "../../components/HelpTip";
-import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AssetBindingField } from "../../components/AssetBindingField";
 import { Button } from "../../components/Button";
 import { LegacyMigrationWizard } from "../../components/LegacyMigrationWizard";
@@ -157,7 +157,12 @@ export function InspectorPanel({
   const configurations = useTaichiFlowStore((state) => state.scenarioConfigurations);
   const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
   const addToast = useTaichiFlowStore((state) => state.addToast);
-  const [tab, setTab] = useState<InspectorTab>("bindings");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("inspector");
+  const tab: InspectorTab = requestedTab === "parameters" || requestedTab === "run" ? requestedTab : "bindings";
+  const setTab = (next: InspectorTab) => setSearchParams((current) => {
+    const updated = new URLSearchParams(current); updated.set("inspector", next); return updated;
+  }, { replace: true });
 
   const scenarioFromSelection = editorSelection?.kind === "scenario" || editorSelection?.kind === "result"
     ? scenarios.find((item) => item.scenario_id === editorSelection.scenarioId)
@@ -171,7 +176,9 @@ export function InspectorPanel({
   const selectedFamily = editorSelection?.kind === "input" ? editorSelection.family : DEFAULT_INPUT_FAMILY;
   const isLegacy = Boolean(scenario && !scenario.parameter_template_id);
   const canEdit = Boolean(scenario && !isLegacy && ["draft", "ready"].includes(scenario.status));
-  const canControlRun = Boolean(scenario && !isLegacy && ["draft", "ready", "failed", "stopped"].includes(scenario.status));
+  // Frozen parameters do not disable runtime inspection, stop, or log access.
+  // RunModule itself limits mutations to the corresponding runtime states.
+  const canControlRun = Boolean(scenario && !isLegacy);
   const configuration = scenario ? configurations[scenario.scenario_id] : null;
 
   const title = kind === "input"

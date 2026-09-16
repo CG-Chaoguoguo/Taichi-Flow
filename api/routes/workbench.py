@@ -87,6 +87,15 @@ class ScenarioCreate(BaseModel):
     control_overrides: Optional[Dict[str, Any]] = None
 
 
+class ProjectDeletePreviewRequest(BaseModel):
+    mode: Literal["unregister", "permanent"]
+
+
+class ProjectDeleteRequest(ProjectDeletePreviewRequest):
+    confirmation_token: str = Field(..., min_length=1)
+    confirmed_name: str = ""
+
+
 class ScenarioUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1)
     parameter_patch: Optional[Dict[str, Any]] = None
@@ -109,6 +118,7 @@ class LegacyMigrationCommitRequest(BaseModel):
 class QueueCreate(BaseModel):
     scenario_id: str = Field(..., min_length=1)
     runtime_profile: Optional[str] = None
+    diagnostics: Optional[Dict[str, Any]] = None
 
 
 class QueueReorder(BaseModel):
@@ -144,7 +154,20 @@ async def import_project(request: Request, payload: ProjectImport):
 
 @router.get("/projects/{project_id}")
 async def get_project(request: Request, project_id: str):
+    request.app.state.workbench.project_lifecycle.assert_available(project_id)
     return request.app.state.workbench.get_project(project_id)
+
+
+@router.post("/projects/{project_id}/delete-preview")
+async def preview_project_delete(request: Request, project_id: str, payload: ProjectDeletePreviewRequest):
+    return request.app.state.workbench.project_lifecycle.preview(project_id, payload.mode)
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project(request: Request, project_id: str, payload: ProjectDeleteRequest):
+    return request.app.state.workbench.project_lifecycle.execute(
+        project_id, payload.mode, payload.confirmation_token, payload.confirmed_name,
+    )
 
 
 @router.patch("/projects/{project_id}")
@@ -663,6 +686,7 @@ async def enqueue_scenario(request: Request, project_id: str, payload: QueueCrea
         project_id,
         payload.scenario_id,
         runtime_profile=payload.runtime_profile,
+        diagnostics=payload.diagnostics,
     )
 
 
@@ -684,6 +708,23 @@ async def cancel_queue_item(request: Request, project_id: str, queue_item_id: st
 @router.post("/projects/{project_id}/queue/{queue_item_id}/retry", status_code=status.HTTP_201_CREATED)
 async def retry_queue_item(request: Request, project_id: str, queue_item_id: str):
     return request.app.state.workbench.retry_queue_item(project_id, queue_item_id)
+
+
+
+@router.get("/projects/{project_id}/scenarios/{scenario_id}/diagnostics/probe-suggestions")
+async def erosion_probe_suggestions(
+    request: Request,
+    project_id: str,
+    scenario_id: str,
+    top: int = 10,
+):
+    # Raster decoding is CPU/file I/O and must not block the API event loop.
+    return await run_in_threadpool(
+        request.app.state.workbench.erosion_probe_suggestions,
+        project_id,
+        scenario_id,
+        top=top,
+    )
 
 
 @router.get("/projects/{project_id}/simulations")

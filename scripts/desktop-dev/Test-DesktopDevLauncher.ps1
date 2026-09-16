@@ -59,6 +59,14 @@ Assert-Equal $candidateSpecs[3].Source "py -3.11" "Python launcher 3.11 must pre
 $candidatesWithoutExplicitPython = @(Get-TaichiFlowPythonCandidate -RepositoryRoot "C:\repo" -Environment @{} -DiscoveredCommands @())
 Assert-Equal $candidatesWithoutExplicitPython[0].Source "repository .venv" "An unset optional Python environment variable must be skipped without aborting discovery"
 
+$allPathCandidates = @(Get-TaichiFlowPythonCandidate -RepositoryRoot "C:\repo" -Environment @{} -DiscoveredCommands @("C:\Python314\python.exe", "C:\Users\demo\Python311\python.exe"))
+Assert-True (@($allPathCandidates | Where-Object { $_.FilePath -eq "C:\Python314\python.exe" }).Count -eq 1) "Python discovery must retain the first PATH interpreter"
+Assert-True (@($allPathCandidates | Where-Object { $_.FilePath -eq "C:\Users\demo\Python311\python.exe" }).Count -eq 1) "Python discovery must retain later PATH interpreters"
+
+$probeShape = [pscustomobject]@{ Reusable = $false; Error = ""; Reason = "source-mismatch"; Owner = $null; CorsMatches = $false }
+Assert-Equal ([string]$probeShape.Error) "" "Service probe success paths must expose an Error property"
+Assert-Equal ([string]$probeShape.Reason) "source-mismatch" "Service probe results must expose a machine-readable Reason"
+
 $probeResults = @(
     [pscustomobject]@{ Candidate = $candidateSpecs[0]; Success = $true; Version = "3.14.0"; ImportsReady = $true },
     [pscustomobject]@{ Candidate = $candidateSpecs[1]; Success = $true; Version = "3.11.9"; ImportsReady = $true }

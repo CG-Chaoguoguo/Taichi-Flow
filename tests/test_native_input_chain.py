@@ -331,6 +331,11 @@ def test_reference_config_parser_detects_both_thin_weighted_face_flux_variant(tm
                 "        cvbar=(parai* cellareacal(i)+paran* cellareacal(nq)) / (fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))",
                 "        frhobar=(frhopredi(i)*fhpredi(i)* cellareacal(i)+frhopredi(nq)*fhpredi(nq)* cellareacal(nq))/ (fhpredi(i)*cellareacal(i)+fhpredi(nq)*cellareacal(nq))",
                 "        dv=(-grad-sf)*grav*dt+0.02*abs(fhpredi(i)-fhpredi(nq))/(fhpredi(i)+fhpredi(nq))*artivis",
+                "        if(flexible(i)>0. .or. flexible(nq) >0.) then",
+                "        elseif(rigid(i) >0. .or. rigid(nq)>0.) then",
+                "        else",
+                "        manningb=0.0538",
+                "        manningm=6.0896",
             ]
         )
         + "\n",
@@ -344,6 +349,15 @@ def test_reference_config_parser_detects_both_thin_weighted_face_flux_variant(tm
     assert parsed.dfs_dry_face_velocity_variant == "keep_velocity_bj"
     assert parsed.dfs_artivis_variant == "depth_ratio_bj"
     assert parsed.dfs_absubar_variant == "max_component_bj"
+    assert parsed.dfs_flow_velocity_writer_variant == "half_sum_abs_fv_bj"
+    assert parsed.dfs_erosion_depth_writer_variant == "net_bed_change_bj"
+    assert parsed.dfs_sfdf_classify_cv_variant == "previous_committed_cv"
+    assert parsed.dfs_cvlimit_variant == "tanslo_cycle_cvstar_clamp_bj"
+    assert parsed.dfs_erodph_dt_variant == "accepted_dt_bj"
+    assert parsed.dfs_barrier_flux_variant == "bj_barrier_branch"
+    assert parsed.dfs_commit_cv_eps_variant == "no_clamp_bj"
+    assert parsed.manningb == pytest.approx(0.0538)
+    assert parsed.manningm == pytest.approx(6.0896)
     assert parsed.dfs_face_flux_variant_source.endswith("dfs.F90")
     assert "cellareacal`-weighted" in (parsed.dfs_face_flux_variant_basis or "")
     assert effective_config["config"]["hydrology"]["dfs_face_flux_variant"] == "both_thin_weighted"
@@ -372,6 +386,24 @@ def test_reference_config_parser_detects_arithmetic_mean_chamoli_face_flux_varia
                 "        vx=(fv(i,5)-fv(i,1))*0.5+(fv(i,4)-fv(i,8))*0.5*0.707+(fv(i,6)-fv(i,2))*0.5*0.707",
                 "        vy=(fv(i,3)-fv(i,7))*0.5+(fv(i,4)-fv(i,8))*0.5*0.707-(fv(i,6)-fv(i,2))*0.5*0.707",
                 "        absubar(i)=(vx**2.+vy**2.)**0.5",
+                "        if (fvsave) then",
+                "        tfg=absubar",
+                "        end if",
+                "        if (erodepthsave) then",
+                "        tfg=erodph",
+                "        end if",
+                "        if (cv(i)>=0.5) then",
+                "        sfh(i)=fhpredi2(i)",
+                "        end if",
+                "        cvlimit(i)=rhow*tan(slo(i))/(rhos-rhow)/(tan(phi(i))-tan(slo(i)))",
+                "        if (cvlimit(i)<0. .or. cvlimit(i)>1.) cvlimit(i)=cvstar",
+                "        dt=dt+dti",
+                "        erodph=erorate*dt+erodph",
+                "            elseif(fvpredi(i,ii)<0 .or. rigid(nq)>0) then",
+                "        cv=(frho-rhow)/(rhos-rhow)",
+                "        where (cv<eps) cv=0.",
+                "        manningb=1",
+                "        manningm=0",
             ]
         )
         + "\n",
@@ -387,6 +419,15 @@ def test_reference_config_parser_detects_arithmetic_mean_chamoli_face_flux_varia
     assert parsed.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
     assert parsed.dfs_artivis_variant == "velocity_ratio_chamoli"
     assert parsed.dfs_absubar_variant == "signed_mean_chamoli"
+    assert parsed.dfs_flow_velocity_writer_variant == "absubar_chamoli"
+    assert parsed.dfs_erosion_depth_writer_variant == "cumulative_erodph_chamoli"
+    assert parsed.dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"
+    assert parsed.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"
+    assert parsed.dfs_erodph_dt_variant == "post_dti_dt_chamoli"
+    assert parsed.dfs_barrier_flux_variant == "chamoli_scour_kill_or"
+    assert parsed.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"
+    assert parsed.manningb == pytest.approx(1.0)
+    assert parsed.manningm == pytest.approx(0.0)
     assert parsed.dfs_face_flux_variant_source.endswith("dfs.F90")
     assert "area-mean `cvbar`" in (parsed.dfs_face_flux_variant_basis or "")
     assert effective_config["config"]["hydrology"]["dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
@@ -479,6 +520,9 @@ class _FakeFields:
         self.n_manning_field = _FakeBuffer()
         self.ltstar_field = _FakeBuffer()
         self.erodible_thickness = _FakeBuffer()
+        self.temp_erodible_thickness = _FakeBuffer()
+        self.rigid = _FakeBuffer()
+        self.flexible = _FakeBuffer()
 
 
 class _FakeRheology:

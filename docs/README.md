@@ -26,5 +26,8 @@ the UI verification.
 
 Migration, OpenAPI inventory, browser screenshots, and test logs may live under
 the local-only `artifacts/` directory. A clean clone is not expected to contain
-those raw files; tracked audit Markdown/JSON is the durable summary. The root
-`agentlog.md` is also local-only and is not a documentation entry point.
+those raw files. All of `docs/audit/`, including Markdown/JSON summaries and
+screenshots, is also local-only and is not distributed with a clean checkout.
+The root `agentlog.md` is local-only and is not a documentation entry point.
+Reusable comparison tools and their usage are documented in
+[`tools/fix3/README.md`](../tools/fix3/README.md); their generated evidence stays local.

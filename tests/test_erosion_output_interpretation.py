@@ -27,7 +27,10 @@ def test_erosion_output_interpretation_variants_are_available():
 
 def test_fortran_erosion_output_helper_uses_eleori_minus_ele_threshold_and_gindx_mask():
     solver = SimpleNamespace(
-        dfs_dynamic_wave=SimpleNamespace(precomputed_failure_gindx=np.array([[0, 1], [0, 0]], dtype=np.int32))
+        config=SimpleNamespace(
+            hydrology=SimpleNamespace(dfs_erosion_depth_writer_variant="net_bed_change_bj")
+        ),
+        dfs_dynamic_wave=SimpleNamespace(precomputed_failure_gindx=np.array([[0, 1], [0, 0]], dtype=np.int32)),
     )
     state = {
         "z_original": np.array([[10.0, 10.0], [10.0, 10.0]], dtype=np.float64),
@@ -37,3 +40,49 @@ def test_fortran_erosion_output_helper_uses_eleori_minus_ele_threshold_and_gindx
     output = EDDASolver._build_fortran_erosion_depth_output(solver, state)
 
     np.testing.assert_allclose(output, np.array([[0.1, 0.0], [0.0, 0.0]], dtype=np.float64))
+
+
+def test_fortran_erosion_output_helper_uses_cumulative_erodph_chamoli():
+    solver = SimpleNamespace(
+        config=SimpleNamespace(
+            hydrology=SimpleNamespace(dfs_erosion_depth_writer_variant="cumulative_erodph_chamoli")
+        ),
+        dfs_dynamic_wave=SimpleNamespace(precomputed_failure_gindx=np.array([[0, 1], [0, 0]], dtype=np.int32)),
+    )
+    state = {
+        "erosion_depth": np.array([[0.1, 0.05], [0.0005, 0.2]], dtype=np.float64),
+        "z_original": np.array([[10.0, 10.0], [10.0, 10.0]], dtype=np.float64),
+        "z_bed": np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64),
+    }
+
+    output = EDDASolver._build_fortran_erosion_depth_output(solver, state)
+
+    # Threshold <0.001 → 0, and gindx==1 clears the second column of row 0.
+    np.testing.assert_allclose(output, np.array([[0.1, 0.0], [0.0, 0.2]], dtype=np.float64))
+
+
+def test_fortran_flow_velocity_writer_variants_bj_half_sum_and_chamoli_absubar():
+    bj_solver = SimpleNamespace(
+        config=SimpleNamespace(
+            hydrology=SimpleNamespace(dfs_flow_velocity_writer_variant="half_sum_abs_fv_bj")
+        )
+    )
+    fv = np.zeros((2, 1, 8), dtype=np.float64)
+    fv[0, 0, 0] = 2.0
+    fv[0, 0, 1] = -4.0
+    fv[0, 0, 2] = 6.0
+    fv[0, 0, 3] = -8.0
+    fv[0, 0, 7] = 100.0
+    bj_out = EDDASolver._build_fortran_flow_velocity_output(bj_solver, {"fv_fortran": fv})
+    np.testing.assert_allclose(bj_out, np.array([[10.0, 0.0]], dtype=np.float64))
+
+    chamoli_solver = SimpleNamespace(
+        config=SimpleNamespace(
+            hydrology=SimpleNamespace(dfs_flow_velocity_writer_variant="absubar_chamoli")
+        )
+    )
+    absubar = np.array([[1.5], [3.0]], dtype=np.float64)
+    chamoli_out = EDDASolver._build_fortran_flow_velocity_output(
+        chamoli_solver, {"absubar_temp": absubar}
+    )
+    np.testing.assert_allclose(chamoli_out, np.array([[1.5, 3.0]], dtype=np.float64))

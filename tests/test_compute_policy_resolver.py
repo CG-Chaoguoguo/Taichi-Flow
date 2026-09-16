@@ -184,6 +184,27 @@ def test_numeric_variants_auto_vs_override() -> None:
     auto = resolve_compute_policy({"hydrology.dfs_face_flux_variant": "arithmetic_mean_chamoli"})
     assert auto.numeric_variants["hydrology.dfs_face_flux_variant"]["source"] == "case_baseline"
 
+    cvlimit_override = resolve_compute_policy(
+        {"hydrology.dfs_cvlimit_variant": "tan_slo_unit_clamp_chamoli"},
+        global_gates={"hydrology.dfs_cvlimit_variant": "tanslo_cycle_cvstar_clamp_bj"},
+    )
+    assert (
+        cvlimit_override.numeric_variants["hydrology.dfs_cvlimit_variant"]["source"]
+        == "global_override"
+    )
+    assert (
+        cvlimit_override.numeric_variants["hydrology.dfs_cvlimit_variant"]["value"]
+        == "tanslo_cycle_cvstar_clamp_bj"
+    )
+    cvlimit_auto = resolve_compute_policy(
+        {"hydrology.dfs_cvlimit_variant": "tan_slo_unit_clamp_chamoli"}
+    )
+    assert cvlimit_auto.numeric_variants["hydrology.dfs_cvlimit_variant"]["source"] == "case_baseline"
+    assert (
+        cvlimit_auto.numeric_variants["hydrology.dfs_cvlimit_variant"]["value"]
+        == "tan_slo_unit_clamp_chamoli"
+    )
+
 
 def test_disabled_registry_is_control_off_not_provider_failure() -> None:
     resolution = resolve_compute_policy({FSSIMUL_PATH: False, VARIANT_PATH: "precomputed_unsfin_schedule"})

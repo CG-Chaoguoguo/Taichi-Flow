@@ -89,6 +89,7 @@ class EDDASolver:
         "z_original",
         "is_nodata",
         "fv_fortran",
+        "absubar_temp",
         "erosion_depth",
         "deposition_depth",
         "max_flow_depth",
@@ -126,6 +127,13 @@ class EDDASolver:
         self.numerical_nonfinite_counts: Dict[str, int] = {}
         self._async_output_writer: Optional[AsyncResultWriter] = None
         self.numerical_observe_count = 0
+        # Output-frame snapshots of DFS's accepted native budget.  These are
+        # intentionally distinct from ASC erosion-depth integration: source,
+        # sink, and storage terms retain their native solver meaning.
+        self.native_volume_budget_records: list[Dict[str, Any]] = []
+        # Recorded at the point where the production writer is scheduled, not
+        # reconstructed from rounded filenames during later acceptance.
+        self._output_frame_events: list[Dict[str, Any]] = []
 
         # Physics modules
         self.hydrology = None
@@ -1507,6 +1515,12 @@ class EDDASolver:
                     nonfinite_counts[field_name] = -1
 
         global_relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+        probe_status: Dict[str, Any] | None = None
+        if self.dfs_dynamic_wave is not None and hasattr(self.dfs_dynamic_wave, "get_erosion_probe_diagnostics_status"):
+            try:
+                probe_status = self.dfs_dynamic_wave.get_erosion_probe_diagnostics_status()
+            except Exception as exc:
+                logger.debug("Unable to capture erosion probe integrity status: %s", exc)
         return {
             "schema_version": 1,
             "status": status or ("running" if time_stepper and not time_stepper.is_finished() else "completed"),
@@ -1552,6 +1566,7 @@ class EDDASolver:
                 "drainage_m3": 0.0,
                 "drainage_role": "no independent drainage volume counter is active in the current EDDA path",
             },
+            "erosion_probe_diagnostics": probe_status,
             "nonfinite_counts": nonfinite_counts,
             "classification": {
                 "functional_e2e": None,
@@ -2170,6 +2185,12 @@ class EDDASolver:
         logger.info("=" * 60)
 
         self._last_output_time_written = None
+        dt_min = float(self.config.time.dt_min)
+        t_end = float(self.time_stepper.t_end)
+        # edda main program.F90:517 `maxnts=2*simul/dtmin` (integer(8) truncation).
+        self.fortran_maxnts = int(2.0 * t_end / dt_min) if dt_min > 0.0 else 0
+        self.fortran_nts = 0
+        self.stopped_for_maxnts = False
 
         # Create progress bar (can be disabled for batch/benchmark runs)
         disable_tqdm = os.getenv("TQDM_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -2209,6 +2230,16 @@ class EDDASolver:
 
                 retry_attempt_id = 0
                 while True:
+                    self.fortran_nts += 1
+                    if self.fortran_maxnts > 0 and self.fortran_nts > self.fortran_maxnts:
+                        self.stopped_for_maxnts = True
+                        logger.warning(
+                            "Reached original EDDA maxnts=%s (2*simul/dtmin); stopping at t=%.6f s after %s attempts.",
+                            self.fortran_maxnts,
+                            t,
+                            self.fortran_nts - 1,
+                        )
+                        break
                     self.time_stepper.dt_current = dt_candidate
 
                     # Update rainfall for the candidate interval.
@@ -2295,6 +2326,9 @@ class EDDASolver:
                     self._update_outflow_process_state(used_dt)
                     break
 
+                if self.stopped_for_maxnts:
+                    break
+
                 # Output results if needed
                 did_output = False
                 if self.time_stepper.should_output():
@@ -2367,6 +2401,7 @@ class EDDASolver:
 
         # Log statistics
         self.time_stepper.log_statistics()
+        self.write_erosion_probe_csv()
 
         logger.info("=" * 60)
         logger.info("Simulation complete")
@@ -2631,8 +2666,9 @@ class EDDASolver:
                     nodata_value=nodata_value,
                 )
 
-            # Export concentration with original EDDA writer semantics:
-            # dfs.F90 writes `cv(i)` but zeros cells with `fh(i)<0.005`.
+            # Export concentration with original EDDA writer semantics.
+            # BJ dfs.F90:1451 zeros cells with `fh(i)<0.005`; Chamoli
+            # dfs.F90:1464 writes committed cv without that mask.
             Cv_export = self._build_fortran_volumetric_sediment_output(state).T.copy()
             Cv_export[nodata_mask.T == 1] = nodata_value
             if self.config.save_intermediate and write_geotiff:
@@ -2643,7 +2679,7 @@ class EDDASolver:
                     nodata_value=nodata_value,
                 )
             if write_edda_text:
-                self._export_taichi_named_edda_text_outputs(
+                frame_paths = self._export_taichi_named_edda_text_outputs(
                     state=state,
                     t=t,
                     h_export=h_export,
@@ -2652,15 +2688,55 @@ class EDDASolver:
                     nodata_mask=nodata_mask.T,
                     nodata_value=nodata_value,
                 )
+                self._record_output_frame_event(float(t), frame_paths)
 
         # Call output callback if provided
         if self.output_callback:
             self.output_callback(t, state)
 
+        self._record_native_volume_budget_output(float(t))
+        self.write_native_volume_budget_csv()
+        self.flush_erosion_probe_records()
+
     @staticmethod
     def _format_edda_output_time(t: float) -> str:
         """Format checkpoint time like original EDDA result names: `600.0`."""
         return f"{float(t):.1f}"
+
+    @staticmethod
+    def _exact_output_event_time(t: float) -> str:
+        """Keep the accepted physical time distinct from the rounded filename."""
+        return format(float(t), ".17g")
+
+    def _record_output_frame_event(self, t: float, relative_paths: Sequence[str]) -> None:
+        """Persist writer-event provenance without changing the output contract.
+
+        The sidecar records the actual accepted output event time before a
+        later audit scans files.  It intentionally does not infer time from a
+        name like ``*_45.0.txt``; that name is only a writer presentation.
+        """
+        if not relative_paths:
+            return
+        normalized = sorted({str(path).replace("\\", "/") for path in relative_paths})
+        events = getattr(self, "_output_frame_events", None)
+        if not isinstance(events, list):
+            events = []
+            self._output_frame_events = events
+        event = {
+            "event_index": len(events),
+            "time_s": self._exact_output_event_time(t),
+            "writer": "taichi_edda_text",
+            "relative_paths": normalized,
+        }
+        events.append(event)
+        payload = {
+            "schema_version": "fix3-output-frame-events-v1",
+            "events": events,
+        }
+        target = Path(self.output_dir) / "output_frame_events.json"
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(target)
 
     def _update_output_max_cache(self, attr_name: str, current: np.ndarray) -> np.ndarray:
         cached = getattr(self, attr_name, None)
@@ -2709,7 +2785,7 @@ class EDDASolver:
         cv_export: np.ndarray,
         nodata_mask: np.ndarray,
         nodata_value: float,
-    ) -> None:
+    ) -> list[str]:
         """Export original EDDA result families with `EDDA` renamed to `Taichi`.
 
         This is an output-format compatibility layer only; it does not change
@@ -2724,12 +2800,26 @@ class EDDASolver:
             return True if plan is None else plan.run_enabled(key, compatibility_default=True)
 
         z_bed = np.asarray(state['z_bed'], dtype=np.float64)
-        z_original = np.asarray(state['z_original'], dtype=np.float64)
-        deposition_export = np.maximum(z_bed - z_original, 0.0).T.copy()
+        z_original = np.asarray(state.get('z_original', z_bed), dtype=np.float64)
+        h_state = np.asarray(state['h'], dtype=np.float64)
+        depo_thickness = np.asarray(
+            state.get("depo_thickness", np.zeros_like(z_bed)),
+            dtype=np.float64,
+        )
+        chamoli_family = (
+            getattr(getattr(self.config, "hydrology", None), "dfs_flow_velocity_writer_variant", "")
+            == "absubar_chamoli"
+        )
+        # Chamoli dfs.F90:1443/:1454 writes `debdepothick` and `fh+debdepothick`.
+        # BJ dfs.F90:1412/:1438 writes bed-delta `ele-eleori` / `fh+ele-eleori`.
+        if chamoli_family:
+            deposition_export = np.where(depo_thickness < 0.0, 0.0, depo_thickness).T.copy()
+            total_depth_export = (h_state + depo_thickness).T.copy()
+        else:
+            bed_delta = z_bed - z_original
+            deposition_export = np.where(bed_delta < 0.0, 0.0, bed_delta).T.copy()
+            total_depth_export = (h_state + bed_delta).T.copy()
         erosion_export = np.asarray(state['erosion_depth_fortran_output'], dtype=np.float64).T.copy()
-        total_depth_export = (
-            np.asarray(state['h'], dtype=np.float64) + z_bed - z_original
-        ).T.copy()
         # Accepted-step extrema are a strict EDDA/DFS contract.  The older
         # control-free direct API may run the modular solver, where these fields
         # exist but are not maintained; preserve its checkpoint-cache behavior.
@@ -2822,21 +2912,35 @@ class EDDASolver:
                 state.get("maxffh", np.zeros_like(state["h"])), dtype=np.float64
             ).T.copy()
 
+        written_paths: list[str] = []
         for original_stem, data in families.items():
             self._write_edda_text_grid(original_stem, t, data, nodata_mask, nodata_value)
+            filename = f"{original_stem.replace('EDDA', 'Taichi')}_{self._format_edda_output_time(t)}.txt"
+            written_paths.append(filename)
+        return written_paths
 
     def _build_fortran_erosion_depth_output(self, state: Dict[str, Any]) -> np.ndarray:
         """
-        Build the original EDDA checkpoint `Erosion_depth_*` output field.
+        Build the EDDA checkpoint `Erosion_depth_*` output field.
 
-        dfs.F90 writes `eleori-ele`, thresholds values below 0.001 to zero,
-        and masks cells with `gindx == 1`.  The cumulative `erosion_depth`
-        field remains the internal accepted-writeback accumulator and is not
-        overwritten here.
+        BJ ``dfs.F90`` writes ``eleori-ele`` (net bed change). Chamoli writes
+        cumulative ``erodph``. Both apply the ``<0.001 → 0`` threshold and
+        ``gindx == 1 → 0`` mask. Variant:
+        ``hydrology.dfs_erosion_depth_writer_variant``.
         """
-        z_original = np.asarray(state['z_original'], dtype=np.float64)
-        z_bed = np.asarray(state['z_bed'], dtype=np.float64)
-        erosion_output = np.maximum(z_original - z_bed, 0.0)
+        writer = str(
+            getattr(
+                getattr(self.config, "hydrology", None),
+                "dfs_erosion_depth_writer_variant",
+                "net_bed_change_bj",
+            )
+        )
+        if writer == "cumulative_erodph_chamoli":
+            erosion_output = np.asarray(state["erosion_depth"], dtype=np.float64).copy()
+        else:
+            z_original = np.asarray(state["z_original"], dtype=np.float64)
+            z_bed = np.asarray(state["z_bed"], dtype=np.float64)
+            erosion_output = np.maximum(z_original - z_bed, 0.0)
         erosion_output = np.where(erosion_output < 0.001, 0.0, erosion_output)
         if self.dfs_dynamic_wave is not None and self.dfs_dynamic_wave.precomputed_failure_gindx is not None:
             gindx = np.asarray(self.dfs_dynamic_wave.precomputed_failure_gindx, dtype=np.int32)
@@ -2844,20 +2948,29 @@ class EDDASolver:
                 erosion_output = np.where(gindx == 1, 0.0, erosion_output)
         return erosion_output
 
-    @staticmethod
-    def _build_fortran_flow_velocity_output(state: Dict[str, Any]) -> np.ndarray:
+    def _build_fortran_flow_velocity_output(self, state: Dict[str, Any]) -> np.ndarray:
         """
-        Build the original EDDA checkpoint `Flow_velocity_*` scalar output field.
+        Build the EDDA checkpoint `Flow_velocity_*` scalar output field.
 
-        EDDA writes the scalar current flow velocity from the first four
-        directional face velocities:
-
-            tfg(i)=0.5*(abs(fv(i,1))+abs(fv(i,2))+abs(fv(i,3))+abs(fv(i,4)))
-
-        The internal `u`/`v` vectors remain runtime diagnostics and are not the
-        original scalar writer. Returned shape is GeoTIFF layout (rows, cols).
+        BJ writes ``0.5*(|fv1|+|fv2|+|fv3|+|fv4|)``. Chamoli writes start-of-step
+        ``absubar``. Variant: ``hydrology.dfs_flow_velocity_writer_variant``.
+        Returned shape is GeoTIFF layout (rows, cols).
         """
-        fv = np.asarray(state['fv_fortran'], dtype=np.float64)
+        writer = str(
+            getattr(
+                getattr(self.config, "hydrology", None),
+                "dfs_flow_velocity_writer_variant",
+                "half_sum_abs_fv_bj",
+            )
+        )
+        if writer == "absubar_chamoli":
+            absubar = np.asarray(state["absubar_temp"], dtype=np.float64)
+            if absubar.ndim != 2:
+                raise ValueError(f"absubar_temp must be 2D, got shape {absubar.shape}")
+            # Taichi fields are (nx, ny)=(cols, rows); GeoTIFF writers expect (rows, cols).
+            return absubar.T.copy()
+
+        fv = np.asarray(state["fv_fortran"], dtype=np.float64)
         if fv.ndim != 3:
             raise ValueError(f"fv_fortran must be 3D, got shape {fv.shape}")
         if fv.shape[-1] == 8:
@@ -2873,23 +2986,108 @@ class EDDASolver:
             + np.abs(directional[:, :, 3])
         )
 
-    @staticmethod
-    def _build_fortran_volumetric_sediment_output(state: Dict[str, Any]) -> np.ndarray:
+    def _build_fortran_volumetric_sediment_output(self, state: Dict[str, Any]) -> np.ndarray:
         """
         Build the original EDDA checkpoint `Volumetric_sediment_*` output field.
 
-        dfs.F90 writes the committed `cv(i)` field and applies only a shallow
-        flow-depth writer mask:
+        BJ dfs.F90:1451 writes committed `cv(i)` with a shallow-depth mask:
 
             tfg(i)=cv(i)
             if(fh(i)<0.005) tfg(i)=0.
 
-        This keeps internal Cv/rho transport untouched while aligning the
-        exported GeoTIFF with the original output interpretation.
+        Chamoli dfs.F90:1464 writes `tfg=cv` without that mask.
         """
         cv = np.asarray(state['Cv'], dtype=np.float64)
         h = np.asarray(state['h'], dtype=np.float64)
+        chamoli_family = (
+            getattr(getattr(self.config, "hydrology", None), "dfs_flow_velocity_writer_variant", "")
+            == "absubar_chamoli"
+        )
+        if chamoli_family:
+            return cv
         return np.where(h < 0.005, 0.0, cv)
+
+    def _record_native_volume_budget_output(self, t_output_s: float) -> None:
+        """Capture the accepted DFS budget at an output frame without feedback."""
+        dfs = getattr(self, "dfs_dynamic_wave", None)
+        if dfs is None or not hasattr(dfs, "get_volume_balance_snapshot"):
+            return
+        try:
+            volume = dict(dfs.get_volume_balance_snapshot())
+        except Exception as exc:
+            logger.debug("Unable to capture native volume budget at t=%s: %s", t_output_s, exc)
+            return
+        record: Dict[str, Any] = {
+            "t_output_s": float(t_output_s),
+            "accepted_stage": True,
+            **volume,
+        }
+        # A few long-lived exporter integrations construct a lightweight
+        # EDDASolver shell through ``object.__new__``.  The optional diagnostic
+        # must never turn their legacy result export into a failure.
+        records = getattr(self, "native_volume_budget_records", None)
+        if records is None:
+            records = []
+            self.native_volume_budget_records = records
+        if records and np.isclose(
+            float(records[-1]["t_output_s"]),
+            float(t_output_s),
+            rtol=0.0,
+            atol=1.0e-9,
+        ):
+            records[-1] = record
+        else:
+            records.append(record)
+
+    def write_native_volume_budget_csv(self) -> Optional[Path]:
+        """Persist accepted native source/sink/storage rows at output frames."""
+        records = getattr(self, "native_volume_budget_records", None)
+        if not records:
+            return None
+        path = Path(self.output_dir) / "diagnostics" / "native_volume_budget.csv"
+        self._write_dict_rows_csv(path, records)
+        return path
+
+    def flush_erosion_probe_records(self) -> Optional[Path]:
+        """Flush the bounded DFS probe writer and surface its integrity marker."""
+        dfs = getattr(self, "dfs_dynamic_wave", None)
+        if dfs is None or not getattr(dfs, "erosion_probe_enabled", False):
+            return None
+        path = Path(self.output_dir) / "diagnostics" / "erosion_probe_steps.csv"
+        if hasattr(dfs, "configure_erosion_probe") and not getattr(dfs, "_erosion_probe_writer_path", None):
+            dfs.configure_erosion_probe(
+                cells=getattr(dfs, "erosion_probe_cells", []),
+                enabled=True,
+                clear=False,
+                output_path=path,
+            )
+        if hasattr(dfs, "flush_erosion_probe_records"):
+            dfs.flush_erosion_probe_records(force=False)
+        return path if path.exists() else None
+
+    def flush_run_diagnostics(self) -> None:
+        """Best-effort finalization for normal completion, stop, and failure."""
+        self.write_native_volume_budget_csv()
+        dfs = getattr(self, "dfs_dynamic_wave", None)
+        if dfs is not None and getattr(dfs, "erosion_probe_enabled", False):
+            path = Path(self.output_dir) / "diagnostics" / "erosion_probe_steps.csv"
+            if hasattr(dfs, "configure_erosion_probe") and not getattr(dfs, "_erosion_probe_writer_path", None):
+                dfs.configure_erosion_probe(
+                    cells=getattr(dfs, "erosion_probe_cells", []),
+                    enabled=True,
+                    clear=False,
+                    output_path=path,
+                )
+            if hasattr(dfs, "close_erosion_probe_writer"):
+                dfs.close_erosion_probe_writer()
+            elif hasattr(dfs, "flush_erosion_probe_records"):
+                dfs.flush_erosion_probe_records(force=True)
+
+    def write_erosion_probe_csv(self) -> Optional[Path]:
+        """Compatibility name for existing callers of the bounded probe writer."""
+        self.flush_run_diagnostics()
+        path = Path(self.output_dir) / "diagnostics" / "erosion_probe_steps.csv"
+        return path if path.exists() else None
 
     def get_results(self) -> list:
         """
@@ -2909,6 +3107,7 @@ class EDDASolver:
         """
         logger.info(f"Exporting final results in {format} format...")
         self.flush_output_writer()
+        self.write_erosion_probe_csv()
 
         final_state = self.fields.get_full_state(
             include_fields=self.PERIODIC_OUTPUT_FIELDS,

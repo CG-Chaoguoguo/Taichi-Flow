@@ -58,8 +58,9 @@ exported with an EPSG:4326 fallback. The native affine grid transform is
 preserved, but users must provide verified CRS metadata before treating that
 fallback as authoritative georeferencing.
 
-See the tracked [Chamoli capability matrix](docs/audit/chamoli_capability_matrix.md)
-for source-to-runtime coverage and known boundaries.
+The Chamoli capability matrix under `docs/audit/` is local audit evidence,
+not distributed with the repository. Consult the [acceptance criteria](docs/backend_acceptance_criteria.md)
+for the evidence required to establish source-to-runtime coverage.
 
 ## Reference-case data flow
 
@@ -185,9 +186,9 @@ npm run build
 Pop-Location
 ~~~
 
-For a Chamoli-focused analysis, consult the
-[capability matrix](docs/audit/chamoli_capability_matrix.md), then verify the
-same case through the import, preflight, queue, and result workflow.
+For a Chamoli-focused analysis, consult the local capability matrix if available,
+then verify the same case through the import, preflight, queue, and result workflow.
+A clean checkout does not include historical case evidence.
 
 ## Documentation
 
@@ -196,7 +197,7 @@ same case through the import, preflight, queue, and result workflow.
 - [Installation guide](INSTALL.md)
 - [Architecture](docs/architecture.md)
 - [API reference](docs/api_reference.md)
-- [Chamoli capability matrix](docs/audit/chamoli_capability_matrix.md)
+- [Backend acceptance criteria](docs/backend_acceptance_criteria.md)
 
 ## Scientific boundary
 

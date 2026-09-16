@@ -217,6 +217,35 @@ _ARTIVIS_ALLOWED = {
 _ABSUBAR_ALLOWED = {
     "max_component_bj",
     "signed_mean_chamoli",
+    "weighted_signed_test31",
+}
+_FLOW_VELOCITY_WRITER_ALLOWED = {
+    "half_sum_abs_fv_bj",
+    "absubar_chamoli",
+}
+_EROSION_DEPTH_WRITER_ALLOWED = {
+    "net_bed_change_bj",
+    "cumulative_erodph_chamoli",
+}
+_SFDF_CLASSIFY_CV_ALLOWED = {
+    "previous_committed_cv",
+    "predicted_step_cv_chamoli",
+}
+_CVLIMIT_ALLOWED = {
+    "tanslo_cycle_cvstar_clamp_bj",
+    "tan_slo_unit_clamp_chamoli",
+}
+_ERODPH_DT_ALLOWED = {
+    "accepted_dt_bj",
+    "post_dti_dt_chamoli",
+}
+_BARRIER_FLUX_ALLOWED = {
+    "bj_barrier_branch",
+    "chamoli_scour_kill_or",
+}
+_COMMIT_CV_EPS_ALLOWED = {
+    "no_clamp_bj",
+    "eps_clamp_chamoli",
 }
 
 
@@ -284,6 +313,10 @@ def apply_scenario_overrides(
       - hydrology.dfs_face_flux_variant / hydrology.dfs_manningbar_variant
       - hydrology.dfs_dry_face_velocity_variant / hydrology.dfs_artivis_variant
       - hydrology.dfs_absubar_variant
+      - hydrology.dfs_flow_velocity_writer_variant
+      - hydrology.dfs_erosion_depth_writer_variant
+      - hydrology.dfs_sfdf_classify_cv_variant
+      - hydrology.dfs_cvlimit_variant
       - spatial_zones.zones: {zone_id: {flattened ZoneParams fields}}
     """
     if not overrides:
@@ -344,6 +377,69 @@ def apply_scenario_overrides(
             result.dfs_absubar_variant = absubar_text
             result.dfs_absubar_variant_basis = (
                 f"Scenario override selected absubar variant `{absubar_text}`."
+            )
+
+    flow_velocity_writer = hydrology.get("dfs_flow_velocity_writer_variant")
+    if flow_velocity_writer is not None:
+        text = str(flow_velocity_writer).strip()
+        if text in _FLOW_VELOCITY_WRITER_ALLOWED:
+            result.dfs_flow_velocity_writer_variant = text
+            result.dfs_flow_velocity_writer_variant_basis = (
+                f"Scenario override selected flow-velocity writer variant `{text}`."
+            )
+
+    erosion_depth_writer = hydrology.get("dfs_erosion_depth_writer_variant")
+    if erosion_depth_writer is not None:
+        text = str(erosion_depth_writer).strip()
+        if text in _EROSION_DEPTH_WRITER_ALLOWED:
+            result.dfs_erosion_depth_writer_variant = text
+            result.dfs_erosion_depth_writer_variant_basis = (
+                f"Scenario override selected erosion-depth writer variant `{text}`."
+            )
+
+    sfdf_classify_cv = hydrology.get("dfs_sfdf_classify_cv_variant")
+    if sfdf_classify_cv is not None:
+        text = str(sfdf_classify_cv).strip()
+        if text in _SFDF_CLASSIFY_CV_ALLOWED:
+            result.dfs_sfdf_classify_cv_variant = text
+            result.dfs_sfdf_classify_cv_variant_basis = (
+                f"Scenario override selected SF/DF/FF classify-cv variant `{text}`."
+            )
+
+    cvlimit_variant = hydrology.get("dfs_cvlimit_variant")
+    if cvlimit_variant is not None:
+        text = str(cvlimit_variant).strip()
+        if text in _CVLIMIT_ALLOWED:
+            result.dfs_cvlimit_variant = text
+            result.dfs_cvlimit_variant_basis = (
+                f"Scenario override selected cvlimit variant `{text}`."
+            )
+
+    erodph_dt_variant = hydrology.get("dfs_erodph_dt_variant")
+    if erodph_dt_variant is not None:
+        text = str(erodph_dt_variant).strip()
+        if text in _ERODPH_DT_ALLOWED:
+            result.dfs_erodph_dt_variant = text
+            result.dfs_erodph_dt_variant_basis = (
+                f"Scenario override selected erodph-dt variant `{text}`."
+            )
+
+    barrier_flux_variant = hydrology.get("dfs_barrier_flux_variant")
+    if barrier_flux_variant is not None:
+        text = str(barrier_flux_variant).strip()
+        if text in _BARRIER_FLUX_ALLOWED:
+            result.dfs_barrier_flux_variant = text
+            result.dfs_barrier_flux_variant_basis = (
+                f"Scenario override selected barrier face-flux variant `{text}`."
+            )
+
+    commit_cv_eps_variant = hydrology.get("dfs_commit_cv_eps_variant")
+    if commit_cv_eps_variant is not None:
+        text = str(commit_cv_eps_variant).strip()
+        if text in _COMMIT_CV_EPS_ALLOWED:
+            result.dfs_commit_cv_eps_variant = text
+            result.dfs_commit_cv_eps_variant_basis = (
+                f"Scenario override selected committed-cv eps variant `{text}`."
             )
 
     manning_source = _normalize_manning_source(manning.get("source"))

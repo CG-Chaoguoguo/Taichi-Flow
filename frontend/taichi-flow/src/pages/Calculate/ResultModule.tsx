@@ -3,6 +3,7 @@ import { AlertCircle, BarChart3, Download, FileText, Folder, LoaderCircle, Refre
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
 import { NumericalDiagnosticsCard } from "../../components/NumericalDiagnosticsCard";
+import { NumericVariantSummary } from "../../components/NumericVariantSummary";
 import type { Scenario, ResultFamily } from "../../types";
 import { resultApi } from "../../api/taichiFlowAdapter";
 
@@ -25,6 +26,12 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
   const metadataLoading = useTaichiFlowStore((state) => Boolean(scenario.latest_simulation_id && state.loading[`resultMetadata:${scenario.latest_simulation_id}`]));
   const metadataError = useTaichiFlowStore((state) => state.errors.resultMetadata || null);
   const setDockTab = useTaichiFlowStore((state) => state.setDockTab);
+  const setEditorSelection = useTaichiFlowStore((state) => state.setEditorSelection);
+  const updateEditorLayout = useTaichiFlowStore((state) => state.updateEditorLayout);
+  const catalog = useTaichiFlowStore((state) => state.parameterCatalog);
+  const fetchParameterCatalog = useTaichiFlowStore((state) => state.fetchParameterCatalog);
+  const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
+  const configuration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const [selectedFamily, setSelectedFamily] = useState<string | null>(null);
   const simulationId = scenario.latest_simulation_id;
 
@@ -34,6 +41,14 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
       void fetchResultMetadata(simulationId);
     }
   }, [readOnly, scenario.status, simulationId, fetchResultFamilies, fetchResultMetadata]);
+
+  useEffect(() => {
+    if (!catalog) void fetchParameterCatalog();
+  }, [catalog, fetchParameterCatalog]);
+
+  useEffect(() => {
+    if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
+  }, [fetchScenarioConfiguration, readOnly, scenario.scenario_id, scenario.version]);
 
   const families = simulationId ? resultFamilies[simulationId] || [] : [];
   const diagnostics = simulationId ? resultMetadata[simulationId]?.numerical_diagnostics : null;
@@ -88,14 +103,18 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
 
   return (
     <div className="tf-module-body tf-stack tf-module-scroll">
-      <div className="tf-row tf-justify-between">
+      <div className="tf-row tf-justify-between tf-result-run-heading">
         <span className="tf-caption tf-text-tertiary">
           模拟 ID: {scenario.latest_simulation_id}
         </span>
         <Button
           size="small"
           icon={<Download size={14} />}
-          onClick={() => setDockTab("export")}
+          onClick={() => {
+            setEditorSelection({ kind: "result", scenarioId: scenario.scenario_id });
+            setDockTab("export");
+            updateEditorLayout((layout) => ({ ...layout, collapsed: { ...layout.collapsed, dock: false } }));
+          }}
         >
           导出此方案
         </Button>
@@ -112,6 +131,10 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
         </div>
       ) : null}
       {diagnostics ? <NumericalDiagnosticsCard diagnostics={diagnostics} /> : null}
+      <NumericVariantSummary
+        resolution={configuration?.compute_policy_resolution}
+        catalogEntries={catalog?.parameters}
+      />
 
       <div className="tf-stack-sm">
         {families.length === 0 ? (

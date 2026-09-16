@@ -23,6 +23,11 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
   const local = diagnostics.local_conservation || {};
   const ledger = diagnostics.global_volume_ledger || {};
   const classification = diagnostics.classification || {};
+  const probe = diagnostics.erosion_probe_diagnostics;
+  const probeComplete = probe?.enabled === true && probe.diagnostics_incomplete === false
+    && probe.capture_active === false && probe.buffered_record_count === 0
+    && typeof probe.captured_record_count === "number"
+    && probe.captured_record_count === probe.written_record_count;
   const cudaOk = String(backend.live_arch || "").toLowerCase().includes("cuda")
     && backend.fallback_active !== true;
   const closure = statusLabel(classification.conservation_closure ?? ledger.passed);
@@ -82,6 +87,14 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
       </div>
 
       <div className="tf-diagnostics-footer">
+        {probe ? (
+          <div className={`tf-caption ${probe.diagnostics_incomplete ? "tf-text-error" : "tf-text-secondary"}`}
+            role={probe.diagnostics_incomplete ? "alert" : "status"} data-testid="erosion-probe-integrity">
+            探针证据：{probe.enabled === false ? "关闭" : probe.diagnostics_incomplete ? "不完整，不能用于验收" : probeComplete ? "完整落盘" : "采集中或完整性待核验"}
+            {probe.enabled ? ` · 采集 ${number(probe.captured_record_count, 0)} / 写入 ${number(probe.written_record_count, 0)} / 缓冲 ${number(probe.buffered_record_count, 0)}` : ""}
+            {probe.write_error ? <div>{probe.write_error}</div> : null}
+          </div>
+        ) : <span className="tf-caption tf-text-tertiary">探针证据：旧记录未提供完整性信息</span>}
         <span className="tf-caption tf-text-tertiary">
           CUDA 探针：{String(backend.cuda_probe_kernel || "未记录")} · 非有限值：{number(nonfinite, 0)}
         </span>
@@ -92,4 +105,3 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
     </section>
   );
 }
-

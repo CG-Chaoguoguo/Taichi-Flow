@@ -68,6 +68,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\desktop
 ```
 
 The historical `agentlog.md` is local-only and is intentionally not part of a
-clean checkout. Publish durable evidence as a tracked Markdown/JSON report
-under `docs/` or a deliberately retained audit asset; keep large logs and raw
-artifacts under the ignored local evidence directories.
+clean checkout. Keep case-specific audit reports, handoffs, and screenshots
+under the local-only `docs/audit/` directory, and raw results under `artifacts/`.
+Neither directory is distributed with the repository. Keep reusable contracts,
+architecture decisions, tool source, and regression tests tracked; do not use
+local audit reports as mandatory runtime or test inputs.

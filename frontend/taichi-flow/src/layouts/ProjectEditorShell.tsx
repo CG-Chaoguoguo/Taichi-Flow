@@ -5,12 +5,13 @@ import { useTaichiFlowStore } from "../stores/taichiFlowStore";
 import { IconButton } from "../components/IconButton";
 import { Button } from "../components/Button";
 import { EditorSettingsPopover } from "../components/EditorSettingsPopover";
+import { useScenarioSettings } from "../hooks/useScenarioSettings";
 
 export function ProjectEditorShell() {
   const navigate = useNavigate();
-  const { projectId } = useParams<{ projectId: string }>();
+  const settings = useScenarioSettings();
+  const { projectId, scenarioId } = useParams<{ projectId: string; scenarioId: string }>();
   const activeProject = useTaichiFlowStore((state) => state.activeProject);
-  const closeProject = useTaichiFlowStore((state) => state.closeProject);
   const serviceOnline = useTaichiFlowStore((state) => state.serviceOnline);
   const metrics = useTaichiFlowStore((state) => state.metrics);
   const theme = useTaichiFlowStore((state) => state.theme);
@@ -18,7 +19,6 @@ export function ProjectEditorShell() {
   const toasts = useTaichiFlowStore((state) => state.toasts);
   const removeToast = useTaichiFlowStore((state) => state.removeToast);
   const scenarios = useTaichiFlowStore((state) => state.scenarios);
-  const editorSelection = useTaichiFlowStore((state) => state.editorSelection);
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -29,15 +29,10 @@ export function ProjectEditorShell() {
   const resolvedTheme =
     theme === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : theme;
 
-  const selectedScenarioId =
-    editorSelection?.kind === "scenario" || editorSelection?.kind === "result"
-      ? editorSelection.scenarioId
-      : undefined;
-  const selectedScenario = scenarios.find((item) => item.scenario_id === selectedScenarioId);
+  const selectedScenario = scenarios.find((item) => item.scenario_id === scenarioId);
 
   const handleBackToLauncher = () => {
     navigate("/projects");
-    closeProject();
   };
 
   return (
@@ -79,12 +74,13 @@ export function ProjectEditorShell() {
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
             size="small"
           />
-          <IconButton
+          {settings.available && <IconButton
             icon={<Settings size={16} />}
-            label="设置"
-            onClick={() => navigate("/settings#compute-gates")}
+            label={settings.isSettings ? "返回案例" : "设置"}
+            active={settings.isSettings}
+            onClick={settings.isSettings ? settings.returnFromSettings : settings.openSettings}
             size="small"
-          />
+          />}
           <EditorSettingsPopover />
           <div className={`tf-service-status ${serviceOnline ? "online" : "offline"}`}>
             {serviceOnline ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}

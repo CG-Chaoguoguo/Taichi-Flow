@@ -10,6 +10,7 @@ from api.services.reference_config_parser import parse_reference_config_file
 
 CHAMOLI = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\Chamoli-EDDA file\Chamoli-EDDA file")
 BJ_HXL = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\BJ_HXL_Text(1)\BJ_HXL_Text")
+TEST31 = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\Test31-1_cvlandslide0.50+cs0.7")
 
 
 @pytest.mark.skipif(not (CHAMOLI / "edda_in.txt").exists(), reason="Chamoli reference case is not on disk")
@@ -29,6 +30,15 @@ def test_chamoli_edda_in_uses_six_value_sediment_line_and_triggerslide(tmp_path)
     assert parsed.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
     assert parsed.dfs_artivis_variant == "velocity_ratio_chamoli"
     assert parsed.dfs_absubar_variant == "signed_mean_chamoli"
+    assert parsed.dfs_flow_velocity_writer_variant == "absubar_chamoli"
+    assert parsed.dfs_erosion_depth_writer_variant == "cumulative_erodph_chamoli"
+    assert parsed.dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"
+    assert parsed.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"
+    assert parsed.dfs_erodph_dt_variant == "post_dti_dt_chamoli"
+    assert parsed.dfs_barrier_flux_variant == "chamoli_scour_kill_or"
+    assert parsed.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"
+    assert parsed.manningb == pytest.approx(1.0)
+    assert parsed.manningm == pytest.approx(0.0)
     assert "area-mean `cvbar`" in (parsed.dfs_face_flux_variant_basis or "")
     assert "triggerslide" in parsed.file_inputs
     assert parsed.file_inputs["triggerslide"].original_branch_active is True
@@ -62,6 +72,15 @@ def test_chamoli_edda_in_uses_six_value_sediment_line_and_triggerslide(tmp_path)
     assert config.hydrology.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"
     assert config.hydrology.dfs_artivis_variant == "velocity_ratio_chamoli"
     assert config.hydrology.dfs_absubar_variant == "signed_mean_chamoli"
+    assert config.hydrology.dfs_flow_velocity_writer_variant == "absubar_chamoli"
+    assert config.hydrology.dfs_erosion_depth_writer_variant == "cumulative_erodph_chamoli"
+    assert config.hydrology.dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"
+    assert config.hydrology.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"
+    assert config.hydrology.dfs_erodph_dt_variant == "post_dti_dt_chamoli"
+    assert config.hydrology.dfs_barrier_flux_variant == "chamoli_scour_kill_or"
+    assert config.hydrology.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"
+    assert config.rheology.manningb == pytest.approx(1.0)
+    assert config.rheology.manningm == pytest.approx(0.0)
     families = {entry["family"]: entry for entry in manifest["inputs"]}
     assert families["triggerslide"]["path"]
     assert Path(families["triggerslide"]["path"]).exists()
@@ -92,9 +111,41 @@ def test_chamoli_normalized_parameters_include_debrisflow_fields():
     assert values["hydrology.dfs_dry_face_velocity_variant"] == "zero_dry_face_chamoli"
     assert values["hydrology.dfs_artivis_variant"] == "velocity_ratio_chamoli"
     assert values["hydrology.dfs_absubar_variant"] == "signed_mean_chamoli"
+    assert values["hydrology.dfs_flow_velocity_writer_variant"] == "absubar_chamoli"
+    assert values["hydrology.dfs_erosion_depth_writer_variant"] == "cumulative_erodph_chamoli"
+    assert values["hydrology.dfs_sfdf_classify_cv_variant"] == "predicted_step_cv_chamoli"
+    assert values["hydrology.dfs_cvlimit_variant"] == "tan_slo_unit_clamp_chamoli"
+    assert values["hydrology.dfs_erodph_dt_variant"] == "post_dti_dt_chamoli"
+    assert values["hydrology.dfs_barrier_flux_variant"] == "chamoli_scour_kill_or"
+    assert values["hydrology.dfs_commit_cv_eps_variant"] == "eps_clamp_chamoli"
     assert values["hydrology.dfs_failure_source_variant"] == "precomputed_unsfin_schedule"
     assert values["edda.output_controls.save_max_solid_depth"] is False
     assert parsed.flags["save_max_solid_depth"] is None
+
+
+@pytest.mark.skipif(not (TEST31 / "edda_in.txt").exists(), reason="Test31 reference case is not on disk")
+def test_test31_uses_its_weighted_signed_absubar_lineage(tmp_path):
+    """Test31 is a separate DFS source lineage, not a Chamoli alias."""
+    from api.services.parameter_templates import normalized_parameter_values
+
+    parsed = parse_reference_config_file(str(TEST31 / "edda_in.txt"), str(TEST31))
+
+    assert parsed.dfs_absubar_variant == "weighted_signed_test31"
+    assert parsed.dfs_barrier_flux_variant == "chamoli_scour_kill_or"
+    assert parsed.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"
+    assert parsed.manningb == pytest.approx(1.0)
+    assert parsed.manningm == pytest.approx(0.0)
+    assert "0.4142" in (parsed.dfs_absubar_variant_basis or "")
+    assert "0.2929" in (parsed.dfs_absubar_variant_basis or "")
+
+    values = normalized_parameter_values(parsed)
+    assert values["hydrology.dfs_absubar_variant"] == "weighted_signed_test31"
+
+    config, _effective, _manifest, _provenance = build_reference_runtime_metadata(
+        parsed,
+        tmp_path / "output",
+    )
+    assert config.hydrology.dfs_absubar_variant == "weighted_signed_test31"
 
 
 @pytest.mark.skipif(not (CHAMOLI / "edda_in.txt").exists(), reason="Chamoli reference case is not on disk")
@@ -171,6 +222,15 @@ def test_bj_hxl_four_value_sediment_line_is_unchanged():
     assert parsed.dfs_dry_face_velocity_variant == "keep_velocity_bj"
     assert parsed.dfs_artivis_variant == "depth_ratio_bj"
     assert parsed.dfs_absubar_variant == "max_component_bj"
+    assert parsed.dfs_flow_velocity_writer_variant == "half_sum_abs_fv_bj"
+    assert parsed.dfs_erosion_depth_writer_variant == "net_bed_change_bj"
+    assert parsed.dfs_sfdf_classify_cv_variant == "previous_committed_cv"
+    assert parsed.dfs_cvlimit_variant == "tanslo_cycle_cvstar_clamp_bj"
+    assert parsed.dfs_erodph_dt_variant == "accepted_dt_bj"
+    assert parsed.dfs_barrier_flux_variant == "bj_barrier_branch"
+    assert parsed.dfs_commit_cv_eps_variant == "no_clamp_bj"
+    assert parsed.manningb == pytest.approx(0.0538)
+    assert parsed.manningm == pytest.approx(6.0896)
     assert "triggerslide" not in parsed.file_inputs
     for zone in parsed.zones.values():
         assert zone.top.cvero is None
@@ -202,3 +262,44 @@ def test_bj_zone_cvero_falls_back_to_sentinel_in_zone_params(tmp_path):
     )
     assert zone_params.shape[1] >= 28
     assert float(zone_params[0, 27]) == pytest.approx(-1.0)
+
+
+NO5_20A = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\NO.5_XHG_V2_20a(1)\NO.5_XHG_V2_20a")
+NO5_50A = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\NO.5_XHG_V2_50a\NO.5_XHG_V2_50a")
+NO8 = Path(r"C:\Users\Administrator\Desktop\EDDA_test_project\NO.8_AYG_V2")
+
+
+@pytest.mark.parametrize(
+    "case_dir, barrier, cv_eps, manningb, manningm, absubar",
+    [
+        (CHAMOLI, "chamoli_scour_kill_or", "eps_clamp_chamoli", 1.0, 0.0, "signed_mean_chamoli"),
+        (TEST31, "chamoli_scour_kill_or", "eps_clamp_chamoli", 1.0, 0.0, "weighted_signed_test31"),
+        (BJ_HXL, "bj_barrier_branch", "no_clamp_bj", 0.0538, 6.0896, "max_component_bj"),
+        (NO5_20A, "bj_barrier_branch", "no_clamp_bj", 0.0538, 6.0896, "max_component_bj"),
+        (NO5_50A, "bj_barrier_branch", "no_clamp_bj", 0.0538, 6.0896, "max_component_bj"),
+        (NO8, "bj_barrier_branch", "no_clamp_bj", 0.0538, 6.0896, "max_component_bj"),
+    ],
+)
+def test_six_reference_cases_resolve_barrier_cv_eps_and_manning_coefficients(
+    case_dir, barrier, cv_eps, manningb, manningm, absubar
+):
+    edda_in = case_dir / "edda_in.txt"
+    if not edda_in.exists():
+        pytest.skip(f"{case_dir} reference case is not on disk")
+    parsed = parse_reference_config_file(str(edda_in), str(case_dir))
+    assert parsed.dfs_barrier_flux_variant == barrier
+    assert parsed.dfs_commit_cv_eps_variant == cv_eps
+    assert parsed.manningb == pytest.approx(manningb)
+    assert parsed.manningm == pytest.approx(manningm)
+    assert parsed.dfs_absubar_variant == absubar
+
+
+def test_test31_absubar_literals_match_default_real_source_weights():
+    from edda.solver.fortran_literals import (
+        DFS_TEST31_ABSUBAR_CARDINAL_WEIGHT,
+        DFS_TEST31_ABSUBAR_DIAGONAL_GROUP_WEIGHT,
+        default_real,
+    )
+
+    assert float(DFS_TEST31_ABSUBAR_CARDINAL_WEIGHT) == default_real(0.4142)
+    assert float(DFS_TEST31_ABSUBAR_DIAGONAL_GROUP_WEIGHT) == default_real(0.2929)

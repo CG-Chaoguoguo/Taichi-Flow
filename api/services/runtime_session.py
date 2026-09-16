@@ -614,6 +614,24 @@ class RuntimeSession:
             self.dispose()
             raise
 
+    def apply_run_options(self, run_options: Optional[Dict[str, Any]]) -> None:
+        """Attach run-only diagnostics after solver initialization."""
+        if self.solver is None or not isinstance(run_options, dict):
+            return
+        diagnostics = run_options.get("diagnostics") if isinstance(run_options.get("diagnostics"), dict) else {}
+        erosion_probe = diagnostics.get("erosion_probe") if isinstance(diagnostics.get("erosion_probe"), dict) else {}
+        if not erosion_probe.get("enabled"):
+            return
+        dfs = getattr(self.solver, "dfs_dynamic_wave", None)
+        if dfs is None or not hasattr(dfs, "configure_erosion_probe"):
+            return
+        cells = erosion_probe.get("probe_cells") or []
+        dfs.configure_erosion_probe(
+            cells=cells,
+            enabled=True,
+            output_path=self.output_dir / "diagnostics" / "erosion_probe_steps.csv",
+        )
+
     def state_entry(self, *, status: str) -> Dict[str, Any]:
         return {
             "id": self.simulation_id,
@@ -698,6 +716,8 @@ class RuntimeSession:
                 }
             )
             try:
+                if self.solver is not None and hasattr(self.solver, "flush_run_diagnostics"):
+                    self.solver.flush_run_diagnostics()
                 self._write_metadata_bundle(status="stopped")
                 sim_data.update(
                     {
@@ -714,10 +734,17 @@ class RuntimeSession:
             sim_data["status"] = "failed"
             sim_data.update(_runtime_error_payload(exc))
             try:
+                if self.solver is not None and hasattr(self.solver, "flush_run_diagnostics"):
+                    self.solver.flush_run_diagnostics()
                 self._write_metadata_bundle(status="failed")
             except Exception:
                 pass
         finally:
+            if self.solver is not None and hasattr(self.solver, "flush_run_diagnostics"):
+                try:
+                    self.solver.flush_run_diagnostics()
+                except Exception:
+                    logger.debug("Unable to flush additive run diagnostics", exc_info=True)
             summary = self.dispose()
             sim_data["runtime_session"] = None
             sim_data["solver"] = None

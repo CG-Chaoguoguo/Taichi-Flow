@@ -1,4 +1,5 @@
 import { RotateCcw } from "lucide-react";
+import type { ReactNode } from "react";
 import type { ParameterCatalogEntry } from "../types";
 import { HelpTip } from "./HelpTip";
 
@@ -79,6 +80,7 @@ export function EffectiveParameterField({
   resetLabel = "重置为模板默认值",
   supportingText,
   saveState = "idle",
+  helpContent: customHelpContent,
 }: {
   entry: ParameterCatalogEntry;
   defaultValue: unknown;
@@ -98,6 +100,7 @@ export function EffectiveParameterField({
   resetLabel?: string;
   supportingText?: string;
   saveState?: "idle" | "saving" | "saved" | "error";
+  helpContent?: ReactNode;
 }) {
   const changed = overrideValue !== undefined;
   const title = entry.label_zh
@@ -128,14 +131,14 @@ export function EffectiveParameterField({
     (effectiveValue == null || ["string", "number"].includes(typeof effectiveValue));
   const isZonesPreview = entry.key === "spatial_zones.zones";
   const checked = effectiveValue === true;
-  const helpContent = [entry.description_zh, supportingText].filter((part) => Boolean(part && String(part).trim())).join("\n\n");
+  const helpContent = customHelpContent ?? [entry.description_zh, supportingText].filter((part) => Boolean(part && String(part).trim())).join("\n\n");
   return (
     <div className={`tf-param-entry tf-effective-field${changed ? " is-changed" : ""}`} data-parameter-key={entry.key}>
       <div className="tf-row tf-justify-between tf-gap-2">
         <label className="tf-body tf-font-medium" htmlFor={`parameter-${entry.key}`}>
           <span className="tf-row tf-gap-1">
             <span>{title}{unit ? <span className="tf-text-tertiary"> · {unit}</span> : null}</span>
-            {helpContent ? <HelpTip content={helpContent} /> : null}
+            {helpContent ? <HelpTip content={helpContent} label={`${entry.label_zh || entry.label}说明`} /> : null}
           </span>
         </label>
         <span className={`tf-source-chip${changed ? " is-override" : ""}`}>{chipLabel}</span>

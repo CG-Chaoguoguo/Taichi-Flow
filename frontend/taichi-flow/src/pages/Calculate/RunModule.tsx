@@ -1,12 +1,33 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, Cpu, List, Monitor, Play, RefreshCw, Square, Terminal, Timer } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useScenarioSettings } from "../../hooks/useScenarioSettings";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
 import { StatusBadge } from "../../components/StatusBadge";
 import { FailureSourcePolicySummary } from "../../components/FailureSourcePolicySummary";
+import { NumericVariantSummary } from "../../components/NumericVariantSummary";
+import {
+  diagnosticsSummaryLabel,
+  formatProbeCells,
+  RunDiagnosticsOptions,
+  type ErosionProbeDraftState,
+  type RunDiagnosticsPayload,
+} from "../../components/RunDiagnosticsOptions";
 import type { Scenario } from "../../types";
-import { runApi } from "../../api/taichiFlowAdapter";
+import { queueApi, runApi } from "../../api/taichiFlowAdapter";
+
+const EMPTY_DIAGNOSTICS: RunDiagnosticsPayload = {
+  erosion_probe: { enabled: false, probe_cells: [] },
+};
+
+type ScopedDiagnosticsState = {
+  payload: RunDiagnosticsPayload;
+  probeDraft: ErosionProbeDraftState;
+};
+
+function initialProbeDraft(payload: RunDiagnosticsPayload): ErosionProbeDraftState {
+  return { rawText: formatProbeCells(payload.erosion_probe.probe_cells), error: null };
+}
 
 export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
   const queue = useTaichiFlowStore((state) => state.queue);
@@ -20,21 +41,55 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
   const fetchParameterCatalog = useTaichiFlowStore((state) => state.fetchParameterCatalog);
   const scenarioConfiguration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
-  const navigate = useNavigate();
+  const settings = useScenarioSettings();
 
-  const item = queue.find((q) => q.scenario_id === scenario.scenario_id);
+  const item = scenario.latest_simulation_id
+    ? queue.find((q) => q.simulation_id === scenario.latest_simulation_id)
+    : [...queue].reverse().find((q) => q.scenario_id === scenario.scenario_id);
   const policyResolution = scenarioConfiguration?.compute_policy_resolution;
   const policyBlocked = policyResolution?.status === "blocked";
   const policyResolved = policyResolution?.status === "resolved";
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [runtimeProfile, setRuntimeProfile] = useState("cuda_production_default");
+  const diagnosticsKey = `${scenario.scenario_id}:${scenario.input_revision_id || "draft"}`;
+  const [diagnosticsByScope, setDiagnosticsByScope] = useState<Record<string, ScopedDiagnosticsState>>({});
+  const [enqueueError, setEnqueueError] = useState<string | null>(null);
+  const scopedDiagnostics = diagnosticsByScope[diagnosticsKey];
+  const diagnostics = scopedDiagnostics?.payload || EMPTY_DIAGNOSTICS;
+  const probeDraft = scopedDiagnostics?.probeDraft || initialProbeDraft(diagnostics);
+  const diagnosticsValid = probeDraft.error === null;
+  const setDiagnostics = (next: RunDiagnosticsPayload) => {
+    setDiagnosticsByScope((current) => {
+      const previous = current[diagnosticsKey];
+      return {
+        ...current,
+        [diagnosticsKey]: {
+          payload: next,
+          probeDraft: previous?.probeDraft || initialProbeDraft(next),
+        },
+      };
+    });
+  };
+  const setProbeDraft = (next: ErosionProbeDraftState) => {
+    setDiagnosticsByScope((current) => {
+      const previous = current[diagnosticsKey];
+      return {
+        ...current,
+        [diagnosticsKey]: {
+          payload: previous?.payload || EMPTY_DIAGNOSTICS,
+          probeDraft: next,
+        },
+      };
+    });
+  };
   const profileOptions = catalog?.runtime_profiles?.user_selectable?.length
     ? catalog.runtime_profiles.user_selectable
     : [
         { name: "cuda_production_default", label_zh: "CUDA 加速", description_zh: "使用 GPU 运行生产求解器（默认）。" },
         { name: "compat_default_off", label_zh: "CPU 兼容", description_zh: "使用 CPU 运行，适合无 GPU 环境。" },
       ];
+  const queuedDiagnosticsLabel = diagnosticsSummaryLabel(item?.run_options as { diagnostics?: RunDiagnosticsPayload } | null);
 
   useEffect(() => {
     if (readOnly) return;
@@ -58,12 +113,26 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
   }, [catalog, fetchParameterCatalog]);
 
   const handleEnqueue = async () => {
-    if (readOnly) return;
-    await enqueueScenario(scenario.scenario_id, runtimeProfile);
+    if (readOnly || !diagnosticsValid) return;
+    setEnqueueError(null);
+    try {
+      await enqueueScenario(scenario.scenario_id, runtimeProfile, diagnostics);
+    } catch (error) {
+      setEnqueueError(error instanceof Error ? error.message : "加入队列失败，请修正诊断配置后重试。");
+    }
   };
 
   const elapsed = item?.started_at ? Math.floor((Date.now() - new Date(item.started_at).getTime()) / 1000) : 0;
   const elapsedText = `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const frozenSummary = item ? (
+    <div className="tf-stack-sm" data-testid="frozen-run-summary">
+      <div className="tf-caption tf-text-info">本次运行冻结配置 · {item.simulation_id || item.queue_item_id}</div>
+      <div className="tf-caption">{queuedDiagnosticsLabel || "诊断：关闭"}</div>
+      <div className="tf-caption tf-text-secondary">运行配置：{item.runtime_profile || "旧记录未保存"}</div>
+      <FailureSourcePolicySummary resolution={item.compute_policy_resolution} />
+      <NumericVariantSummary resolution={item.compute_policy_resolution} catalogEntries={catalog?.parameters} />
+    </div>
+  ) : null;
 
   if (readOnly) {
     return (
@@ -74,20 +143,10 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             <StatusBadge variant="neutral">只读</StatusBadge>
           </div>
           <div className="tf-caption tf-text-secondary">
-            打开项目并选择方案后，可在此进行预检、入队与运行控制。
+            {scenario.latest_simulation_id ? "历史运行只读；下方仅展示实际保存的冻结选项。" : "当前方案为只读，不能在此修改或入队。"}
           </div>
         </div>
-        <div className="tf-stack-md">
-          <h4 className="tf-subtitle">运行预检</h4>
-          <div className="tf-stack-sm">
-            <CheckItem ok={false} text="DEM 输入已就绪" />
-            <CheckItem ok={false} text="运行输入将在开始计算时冻结" />
-            <CheckItem ok={metrics.gpu_percent !== null} text="GPU 指标可用" />
-          </div>
-          <Button icon={<Play size={16} />} disabled>
-            加入模拟队列
-          </Button>
-        </div>
+        {frozenSummary || <div className="tf-caption tf-text-secondary">未找到已保存的运行配置，不能从当前 Settings 推断历史选项。</div>}
       </div>
     );
   }
@@ -109,6 +168,8 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
           · {Object.keys(scenario.parameter_patch || {}).length} 项参数变更
         </div>
       </div>
+
+      {!["draft", "ready", "queued"].includes(scenario.status) ? frozenSummary : null}
 
       {/* 预检 */}
       {scenario.status === "draft" || scenario.status === "ready" ? (
@@ -154,11 +215,39 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
                 || "CUDA 与 CPU 仅影响本次入队任务，不写入方案参数。"}
             </span>
           </label>
+          <RunDiagnosticsOptions
+            key={diagnosticsKey}
+            value={diagnostics}
+            onChange={setDiagnostics}
+            probeDraft={probeDraft}
+            onProbeDraftChange={setProbeDraft}
+            onFillTopN={
+              activeProject
+                ? async () => {
+                    return queueApi.probeSuggestions(
+                      activeProject.project_id,
+                      scenario.scenario_id,
+                      10,
+                    );
+                  }
+                : undefined
+            }
+          />
+          {enqueueError ? (
+            <div className="tf-status-row is-error" role="alert">
+              <AlertCircle size={16} />
+              <span className="tf-body">{enqueueError}</span>
+            </div>
+          ) : null}
           <FailureSourcePolicySummary resolution={policyResolution} />
-          <button type="button" className="tf-link-button" onClick={() => navigate("/settings#compute-gates")}>
+          <NumericVariantSummary
+            resolution={policyResolution}
+            catalogEntries={catalog?.parameters}
+          />
+          <button type="button" className="tf-link-button" onClick={settings.openSettings} disabled={!settings.available}>
             {policyBlocked ? "前往设置调整策略 →" : "管理计算门禁 →"}
           </button>
-          <Button icon={<Play size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid || !policyResolved}>
+          <Button icon={<Play size={16} />} onClick={handleEnqueue} disabled={!scenarioConfiguration?.validation?.valid || !policyResolved || !diagnosticsValid}>
             加入模拟队列
           </Button>
         </div>
@@ -175,7 +264,16 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             当前队列并发数限制为 1，前面还有 {item.position - 1} 个任务。
           </p>
            <p className="tf-caption tf-text-info">入队时已冻结输入修订与计算策略；如需使用新的 Settings，请重新加入队列。</p>
+           {queuedDiagnosticsLabel ? (
+             <p className="tf-caption tf-text-info" data-testid="queued-diagnostics-summary">
+               {queuedDiagnosticsLabel}
+             </p>
+           ) : null}
            <FailureSourcePolicySummary resolution={item.compute_policy_resolution} />
+           <NumericVariantSummary
+             resolution={item.compute_policy_resolution}
+             catalogEntries={catalog?.parameters}
+           />
           <Button variant="secondary" icon={<Square size={16} />} onClick={() => cancelQueueItem(item.queue_item_id)}>
             取消排队
           </Button>
@@ -186,6 +284,11 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
       {scenario.status === "running" && item && (
         <div className="tf-stack-md">
           <div className="tf-caption tf-text-info">运行输入快照已冻结，计算引用中的资产不可删除。</div>
+          {queuedDiagnosticsLabel ? (
+            <div className="tf-caption tf-text-info" data-testid="running-diagnostics-summary">
+              {queuedDiagnosticsLabel}
+            </div>
+          ) : null}
           <div className="tf-row tf-gap-2">
             <Timer size={16} className="tf-text-secondary" />
             <span className="tf-body">已运行 {elapsedText}</span>

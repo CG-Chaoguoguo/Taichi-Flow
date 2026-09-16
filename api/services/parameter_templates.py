@@ -431,6 +431,27 @@ def normalized_parameter_values(parsed: Any) -> Dict[str, Any]:
     absubar = getattr(parsed, "dfs_absubar_variant", None)
     if absubar is not None:
         values["hydrology.dfs_absubar_variant"] = str(absubar)
+    flow_velocity_writer = getattr(parsed, "dfs_flow_velocity_writer_variant", None)
+    if flow_velocity_writer is not None:
+        values["hydrology.dfs_flow_velocity_writer_variant"] = str(flow_velocity_writer)
+    erosion_depth_writer = getattr(parsed, "dfs_erosion_depth_writer_variant", None)
+    if erosion_depth_writer is not None:
+        values["hydrology.dfs_erosion_depth_writer_variant"] = str(erosion_depth_writer)
+    sfdf_classify_cv = getattr(parsed, "dfs_sfdf_classify_cv_variant", None)
+    if sfdf_classify_cv is not None:
+        values["hydrology.dfs_sfdf_classify_cv_variant"] = str(sfdf_classify_cv)
+    cvlimit_variant = getattr(parsed, "dfs_cvlimit_variant", None)
+    if cvlimit_variant is not None:
+        values["hydrology.dfs_cvlimit_variant"] = str(cvlimit_variant)
+    erodph_dt_variant = getattr(parsed, "dfs_erodph_dt_variant", None)
+    if erodph_dt_variant is not None:
+        values["hydrology.dfs_erodph_dt_variant"] = str(erodph_dt_variant)
+    barrier_flux_variant = getattr(parsed, "dfs_barrier_flux_variant", None)
+    if barrier_flux_variant is not None:
+        values["hydrology.dfs_barrier_flux_variant"] = str(barrier_flux_variant)
+    commit_cv_eps_variant = getattr(parsed, "dfs_commit_cv_eps_variant", None)
+    if commit_cv_eps_variant is not None:
+        values["hydrology.dfs_commit_cv_eps_variant"] = str(commit_cv_eps_variant)
     failure_source = getattr(parsed, "dfs_failure_source_variant", None)
     topology_status = str(getattr(parsed, "dfs_failure_source_topology_status", "") or "")
     if failure_source and topology_status in {"", "recognized"}:

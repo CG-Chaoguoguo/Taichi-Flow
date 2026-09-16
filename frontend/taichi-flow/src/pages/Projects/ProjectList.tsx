@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FolderOpen, Plus, Upload, Clock, Search, MoreHorizontal } from "lucide-react";
+import { FolderOpen, Plus, Upload, Clock, Search } from "lucide-react";
 import { useTaichiFlowStore } from "../../stores/taichiFlowStore";
 import { Button } from "../../components/Button";
-import { IconButton } from "../../components/IconButton";
+import { ProjectActions } from "../../components/ProjectActions";
 import { StatusBadge } from "../../components/StatusBadge";
 import { DirectoryPickerDialog } from "../../components/DirectoryPickerDialog";
 import { LegacyCaseImportDialog } from "../../components/LegacyCaseImportDialog";
@@ -20,7 +20,6 @@ export function ProjectList() {
   const fetchProjectList = useTaichiFlowStore((state) => state.fetchProjectList);
   const createProject = useTaichiFlowStore((state) => state.createProject);
   const openProject = useTaichiFlowStore((state) => state.openProject);
-  const removeFromHistory = useTaichiFlowStore((state) => state.removeFromHistory);
   const addToast = useTaichiFlowStore((state) => state.addToast);
 
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -62,6 +61,7 @@ export function ProjectList() {
   };
 
   const handleOpen = (project: ProjectInfo) => {
+    if (project.deletion_status) { addToast({ type: "error", message: "项目删除未完成，请通过项目菜单重试清理" }); return; }
     navigate(`/launch/${project.project_id}`);
   };
 
@@ -171,16 +171,8 @@ export function ProjectList() {
                     <Clock size={12} />
                     {formatDate(project.updated_at)}
                   </span>
-                  <IconButton
-                    size="small"
-                    icon={<MoreHorizontal size={16} />}
-                    label="从历史记录移除"
-                    className="tf-text-tertiary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeFromHistory(project.project_id);
-                    }}
-                  />
+                  {project.deletion_status && <span role="status" className="tf-caption tf-text-error">删除未完成</span>}
+                  <ProjectActions project={project} onChanged={async () => setProjects(await fetchProjectList())} />
                 </div>
               </div>
             ))}

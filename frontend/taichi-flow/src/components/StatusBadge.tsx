@@ -56,7 +56,12 @@ export function StatusBadge({ variant, children, dot = false, className = "", ar
   const classes = ["tf-status-badge", variant === "running" ? "running" : "", className].filter(Boolean).join(" ");
 
   return (
-    <span className={classes} aria-label={ariaLabel || label} title={ariaLabel || label}>
+    <span
+      className={classes}
+      aria-label={ariaLabel || label}
+      title={ariaLabel || label}
+      style={{ flexShrink: 0, whiteSpace: "nowrap" }}
+    >
       {dot && <span className={`tf-status-dot tf-status-dot--${variant}`} />}
       {children || label}
     </span>

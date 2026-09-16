@@ -981,6 +981,46 @@
   box-shadow: 0 0 0 1px var(--color-brand);
 }
 
+/* Diagnostics share the inspector's narrow layout and existing theme tokens. */
+.tf-result-run-heading {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.tf-result-run-heading > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1 1 160px;
+}
+
+.tf-result-run-heading > button {
+  flex-shrink: 0;
+}
+
+.tf-run-diagnostics {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tf-run-diagnostics-textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 7.5rem;
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.tf-run-diagnostics-topn {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: var(--control-height-sm);
+  padding: var(--space-2) var(--space-3);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .tf-select {
   height: var(--control-height-sm);
   padding: 0 var(--space-3);
@@ -3799,13 +3839,6 @@
   margin: 0;
 }
 
-html[data-theme="high-contrast"] .tf-asset-binding-button,
-html[data-theme="high-contrast"] .tf-rainfall-timeline,
-html[data-theme="high-contrast"] .tf-rainfall-table-wrap,
-html[data-theme="high-contrast"] .tf-rainfall-preview,
-html[data-theme="high-contrast"] .tf-inspector-tabs button.is-active {
-  border-color: currentColor;
-}
 
 @media (max-width: 1279px) {
   .tf-rainfall-editor-grid {
@@ -4203,10 +4236,40 @@ html[data-theme="high-contrast"] .tf-inspector-tabs button.is-active {
   .tf-raster-legend { min-width: 170px; }
 }
 
-html[data-theme="high-contrast"] .tf-raster-legend,
-html[data-theme="high-contrast"] .tf-raster-identify-panel,
-html[data-theme="high-contrast"] .tf-raster-symbology,
-html[data-theme="high-contrast"] .tf-raster-metadata,
-html[data-theme="high-contrast"] .tf-raster-state {
-  border-color: var(--color-foreground);
+.tf-native-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  color: var(--color-foreground);
+  background: var(--color-surface-solid);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 24px;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+.tf-native-dialog::backdrop { background: var(--smoke-overlay, rgba(0, 0, 0, .5)); }
+.tf-native-dialog .tf-dialog-footer { flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.tf-project-actions { position: relative; }
+.tf-project-menu {
+  position: absolute; right: 0; bottom: 100%; min-width: 190px; z-index: 30;
+  padding: 6px; border-radius: var(--radius-card); border: 1px solid var(--color-border);
+  background: var(--color-surface-solid); box-shadow: var(--shadow-flyout);
+}
+.tf-project-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px; background: transparent; border: 0; color: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-control); }
+.tf-project-menu button:hover, .tf-project-menu button:focus-visible { background: var(--color-surface-hover); }
+.tf-project-menu button:last-child { color: var(--color-error); }
+.tf-project-delete-path { overflow-wrap: anywhere; padding: 12px; background: var(--color-surface-secondary); border-radius: var(--radius-control); }
+
+@media (max-width: 640px) {
+  .tf-editor-menubar { gap: 8px; }
+  .tf-editor-menubar > .tf-row:first-child { overflow: hidden; }
+  .tf-editor-menubar > .tf-row:first-child > .tf-button { flex-shrink: 0; }
+  .tf-editor-menubar .tf-topbar-metrics,
+  .tf-editor-menubar .tf-topbar-time,
+  .tf-editor-menubar .tf-logo,
+  .tf-editor-menubar .tf-service-status,
+  .tf-editor-menubar .tf-editor-scenario-chip { display: none; }
+  .tf-editor-menubar > .tf-row:last-child { flex-shrink: 0; }
 }

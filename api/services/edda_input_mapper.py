@@ -31,11 +31,19 @@ from api.services.reference_config_parser import ReferenceConfigParseResult
 from api.services.scenario_config_overrides import apply_scenario_overrides
 from edda.config.sim_config import SimulationConfig
 from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
-from edda.solver.fortran_literals import FORTRAN_DEG2RAD
+from edda.solver.fortran_literals import FORTRAN_DEG2RAD, default_real
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _fortran_assigned_real(value: float) -> float:
+    """Widen a dfs.F90 assignment: integer literals stay exact, unsuffixed reals follow default REAL."""
+    number = float(value)
+    if number == int(number):
+        return float(int(number))
+    return default_real(number)
 
 
 def _deep_merge(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -474,6 +482,62 @@ def _build_reference_input_source_registry(
             "path": parsed.dfs_absubar_variant_source,
             "exists_on_disk": bool(parsed.dfs_absubar_variant_source),
             "status_basis": parsed.dfs_absubar_variant_basis,
+        },
+        "dfs_flow_velocity_writer_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_flow_velocity_writer_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_flow_velocity_writer_variant,
+            "path": parsed.dfs_flow_velocity_writer_variant_source,
+            "exists_on_disk": bool(parsed.dfs_flow_velocity_writer_variant_source),
+            "status_basis": parsed.dfs_flow_velocity_writer_variant_basis,
+        },
+        "dfs_erosion_depth_writer_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_erosion_depth_writer_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_erosion_depth_writer_variant,
+            "path": parsed.dfs_erosion_depth_writer_variant_source,
+            "exists_on_disk": bool(parsed.dfs_erosion_depth_writer_variant_source),
+            "status_basis": parsed.dfs_erosion_depth_writer_variant_basis,
+        },
+        "dfs_sfdf_classify_cv_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_sfdf_classify_cv_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_sfdf_classify_cv_variant,
+            "path": parsed.dfs_sfdf_classify_cv_variant_source,
+            "exists_on_disk": bool(parsed.dfs_sfdf_classify_cv_variant_source),
+            "status_basis": parsed.dfs_sfdf_classify_cv_variant_basis,
+        },
+        "dfs_cvlimit_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_cvlimit_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_cvlimit_variant,
+            "path": parsed.dfs_cvlimit_variant_source,
+            "exists_on_disk": bool(parsed.dfs_cvlimit_variant_source),
+            "status_basis": parsed.dfs_cvlimit_variant_basis,
+        },
+        "dfs_erodph_dt_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_erodph_dt_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_erodph_dt_variant,
+            "path": parsed.dfs_erodph_dt_variant_source,
+            "exists_on_disk": bool(parsed.dfs_erodph_dt_variant_source),
+            "status_basis": parsed.dfs_erodph_dt_variant_basis,
+        },
+        "dfs_barrier_flux_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_barrier_flux_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_barrier_flux_variant,
+            "path": parsed.dfs_barrier_flux_variant_source,
+            "exists_on_disk": bool(parsed.dfs_barrier_flux_variant_source),
+            "status_basis": parsed.dfs_barrier_flux_variant_basis,
+        },
+        "dfs_commit_cv_eps_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_commit_cv_eps_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_commit_cv_eps_variant,
+            "path": parsed.dfs_commit_cv_eps_variant_source,
+            "exists_on_disk": bool(parsed.dfs_commit_cv_eps_variant_source),
+            "status_basis": parsed.dfs_commit_cv_eps_variant_basis,
         },
         "water_table_source": {
             "family": "depfil",
@@ -949,6 +1013,58 @@ def build_reference_runtime_metadata(
             "activation_condition": "Consume `rizerofil` only when the original scalar fallback is disabled (`rizero < 0`) and a usable raster exists on disk.",
             "status_basis": "Original `steady.f90`, `inidoublelayer.F90`, and `dfs.F90` consume `rizero(i)`; current backend now seeds the same per-cell initialization path without changing runtime formulas.",
         },
+        "rigidfil": {
+            "family": "rigidfil",
+            "path": _first_path(parsed, "rigidfil"),
+            "provenance": "reference_config",
+            "status": (
+                "production-reachable"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "rigidfil")
+                else "recognized-only"
+            ),
+            "runtime_stage": (
+                "post_initialize.native_barrier_loader"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "rigidfil")
+                else "none"
+            ),
+            "notes": (
+                "Original EDDA reads `rigidfil` only when `barriersimul` is true; "
+                "current backend loads the raster into `fields.rigid` on that same branch."
+            ),
+            "blocked_reason": (
+                None
+                if parsed.flags.get("simulate_barrier")
+                else "barriersimul is false; rigidfil remains provenance-only."
+            ),
+            "activation_condition": "Consume when `simulate_barrier` is true and the raster exists on disk.",
+            "status_basis": "Original `edda main program.F90:306-325` reads `rigidfil` only when `barriersimul` is true.",
+        },
+        "flexiblefil": {
+            "family": "flexiblefil",
+            "path": _first_path(parsed, "flexiblefil"),
+            "provenance": "reference_config",
+            "status": (
+                "production-reachable"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "flexiblefil")
+                else "recognized-only"
+            ),
+            "runtime_stage": (
+                "post_initialize.native_barrier_loader"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "flexiblefil")
+                else "none"
+            ),
+            "notes": (
+                "Original EDDA reads `flexiblefil` only when `barriersimul` is true; "
+                "current backend loads the raster into `fields.flexible` on that same branch."
+            ),
+            "blocked_reason": (
+                None
+                if parsed.flags.get("simulate_barrier")
+                else "barriersimul is false; flexiblefil remains provenance-only."
+            ),
+            "activation_condition": "Consume when `simulate_barrier` is true and the raster exists on disk.",
+            "status_basis": "Original `edda main program.F90:306-325` reads `flexiblefil` only when `barriersimul` is true.",
+        },
         "nxtfil": {
             "family": "nxtfil",
             "path": _first_path(parsed, "nxtfil"),
@@ -1110,6 +1226,13 @@ def build_reference_runtime_metadata(
             "dfs_dry_face_velocity_variant": parsed.dfs_dry_face_velocity_variant,
             "dfs_artivis_variant": parsed.dfs_artivis_variant,
             "dfs_absubar_variant": parsed.dfs_absubar_variant,
+            "dfs_flow_velocity_writer_variant": parsed.dfs_flow_velocity_writer_variant,
+            "dfs_erosion_depth_writer_variant": parsed.dfs_erosion_depth_writer_variant,
+            "dfs_sfdf_classify_cv_variant": parsed.dfs_sfdf_classify_cv_variant,
+            "dfs_cvlimit_variant": parsed.dfs_cvlimit_variant,
+            "dfs_erodph_dt_variant": parsed.dfs_erodph_dt_variant,
+            "dfs_barrier_flux_variant": parsed.dfs_barrier_flux_variant,
+            "dfs_commit_cv_eps_variant": parsed.dfs_commit_cv_eps_variant,
         },
         "soil": {
             "c": default_zone.top.c,
@@ -1163,8 +1286,8 @@ def build_reference_runtime_metadata(
             "Cv_threshold": 0.2,
             "Cv_max": parsed.cvstar,
             "limitfr": parsed.limitfr,
-            "manningb": 0.0538,
-            "manningm": 6.0896,
+            "manningb": _fortran_assigned_real(getattr(parsed, "manningb", 0.0538)),
+            "manningm": _fortran_assigned_real(getattr(parsed, "manningm", 6.0896)),
             "kresis": parsed.kresis,
             "cs": parsed.cs,
             "shallown": parsed.shallown,
@@ -1306,6 +1429,8 @@ def build_reference_runtime_metadata(
             _native_file_entry("dirfil", native_files["dirfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["dirfil"]["notes"], blocked_reason=native_files["dirfil"]["blocked_reason"], activation_condition=native_files["dirfil"]["activation_condition"], status_basis=native_files["dirfil"]["status_basis"], **_reference_file_state(parsed, "dirfil", input_source_registry)),
             _native_file_entry("depfil", native_files["depfil"]["path"], "reference_config", native_files["depfil"]["status"], native_files["depfil"]["runtime_stage"], notes=native_files["depfil"]["notes"], blocked_reason=native_files["depfil"]["blocked_reason"], activation_condition=native_files["depfil"]["activation_condition"], status_basis=native_files["depfil"]["status_basis"], **_reference_file_state(parsed, "depfil", input_source_registry)),
             _native_file_entry("rizerofil", native_files["rizerofil"]["path"], "reference_config", native_files["rizerofil"]["status"], native_files["rizerofil"]["runtime_stage"], notes=native_files["rizerofil"]["notes"], blocked_reason=native_files["rizerofil"]["blocked_reason"], activation_condition=native_files["rizerofil"]["activation_condition"], status_basis=native_files["rizerofil"]["status_basis"], **_reference_file_state(parsed, "rizerofil", input_source_registry)),
+            _native_file_entry("rigidfil", native_files["rigidfil"]["path"], "reference_config", native_files["rigidfil"]["status"], native_files["rigidfil"]["runtime_stage"], notes=native_files["rigidfil"]["notes"], blocked_reason=native_files["rigidfil"]["blocked_reason"], activation_condition=native_files["rigidfil"]["activation_condition"], status_basis=native_files["rigidfil"]["status_basis"], **_reference_file_state(parsed, "rigidfil", input_source_registry)),
+            _native_file_entry("flexiblefil", native_files["flexiblefil"]["path"], "reference_config", native_files["flexiblefil"]["status"], native_files["flexiblefil"]["runtime_stage"], notes=native_files["flexiblefil"]["notes"], blocked_reason=native_files["flexiblefil"]["blocked_reason"], activation_condition=native_files["flexiblefil"]["activation_condition"], status_basis=native_files["flexiblefil"]["status_basis"], **_reference_file_state(parsed, "flexiblefil", input_source_registry)),
             _native_file_entry("nxtfil", native_files["nxtfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["nxtfil"]["notes"], blocked_reason=native_files["nxtfil"]["blocked_reason"], activation_condition=native_files["nxtfil"]["activation_condition"], status_basis=native_files["nxtfil"]["status_basis"], **_reference_file_state(parsed, "nxtfil", input_source_registry)),
             _native_file_entry("ndxfil", native_files["ndxfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["ndxfil"]["notes"], blocked_reason=native_files["ndxfil"]["blocked_reason"], activation_condition=native_files["ndxfil"]["activation_condition"], status_basis=native_files["ndxfil"]["status_basis"], **_reference_file_state(parsed, "ndxfil", input_source_registry)),
             _native_file_entry("dscfil", native_files["dscfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["dscfil"]["notes"], blocked_reason=native_files["dscfil"]["blocked_reason"], activation_condition=native_files["dscfil"]["activation_condition"], status_basis=native_files["dscfil"]["status_basis"], **_reference_file_state(parsed, "dscfil", input_source_registry)),
@@ -1654,12 +1779,12 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
     scalar_depthwt = float(getattr(solver.config.hydrology, "depthwt_initial", 0.0))
     scalar_rizero = float(getattr(solver.config.hydrology, "rizero_initial", 0.0))
 
-    for family in ("slofil", "manningfil", "zfil", "depfil", "rizerofil", "triggerslide"):
+    for family in ("slofil", "manningfil", "zfil", "depfil", "rizerofil", "triggerslide", "rigidfil", "flexiblefil"):
         entry = next((item for item in runtime_input_manifest.get("inputs", []) if item.get("family") == family), None)
         if not entry or not entry.get("path"):
             continue
         branch_active = entry.get("original_branch_active")
-        if family in {"depfil", "rizerofil"} and branch_active is False:
+        if family in {"depfil", "rizerofil", "rigidfil", "flexiblefil"} and branch_active is False:
             _mark_manifest_entry(
                 runtime_input_manifest,
                 family,
@@ -1791,6 +1916,8 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                 solver.numpy_float_dtype, copy=False
             )
             solver.fields.erodible_thickness.from_numpy(erodible_np)
+            if hasattr(solver.fields, "temp_erodible_thickness"):
+                solver.fields.temp_erodible_thickness.from_numpy(erodible_np)
             if getattr(solver, "double_layer", None):
                 rikzero_np = solver.double_layer.build_initial_rikzero_field(solver.config.hydrology.rizero_initial)
                 solver.double_layer.initialize_double_layer(rikzero_np.astype(solver.numpy_float_dtype))
@@ -1846,6 +1973,31 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                 current_backend_branch_active=True,
                 notes="Per-cell initial/background infiltration-rate grid loaded into DFS staging and steady/double-layer initialization.",
             )
+            continue
+
+        if family in {"rigidfil", "flexiblefil"}:
+            fill_value = 0.0
+            barrier_grid = fill_raster_nodata(grid, nodata_value, fill_value)
+            barrier_np = barrier_grid.T.astype(solver.numpy_float_dtype)
+            if family == "rigidfil":
+                solver.fields.rigid.from_numpy(barrier_np)
+            else:
+                solver.fields.flexible.from_numpy(barrier_np)
+            _mark_manifest_entry(
+                runtime_input_manifest,
+                family,
+                consumed=True,
+                production_status="production-reachable",
+                runtime_stage="post_initialize.native_barrier_loader",
+                missing_on_disk=False,
+                default_substitution_used=False,
+                current_backend_branch_active=True,
+                notes=(
+                    "Barrier raster loaded into DFS `fields.rigid`/`fields.flexible` "
+                    "for the original `barriersimul` face/deposition branches."
+                ),
+            )
+            continue
 
     rnoff_topoindex_enabled = str(os.environ.get("EDDA_EXPERIMENT_RNOFF_TOPOINDEX", "")).strip() == "1"
     topoindex_entries = {

@@ -32,6 +32,13 @@ VARIANT_AND_POLICY_AUTO_KEYS = frozenset({
     "hydrology.dfs_dry_face_velocity_variant",
     "hydrology.dfs_artivis_variant",
     "hydrology.dfs_absubar_variant",
+    "hydrology.dfs_flow_velocity_writer_variant",
+    "hydrology.dfs_erosion_depth_writer_variant",
+    "hydrology.dfs_sfdf_classify_cv_variant",
+    "hydrology.dfs_cvlimit_variant",
+    "hydrology.dfs_erodph_dt_variant",
+    "hydrology.dfs_barrier_flux_variant",
+    "hydrology.dfs_commit_cv_eps_variant",
     "hydrology.dfs_failure_source_policy",
 })
 
@@ -41,6 +48,13 @@ DISPLAY_VARIANT_DEFAULTS: Dict[str, Any] = {
     "hydrology.dfs_dry_face_velocity_variant": "keep_velocity_bj",
     "hydrology.dfs_artivis_variant": "depth_ratio_bj",
     "hydrology.dfs_absubar_variant": "max_component_bj",
+    "hydrology.dfs_flow_velocity_writer_variant": "half_sum_abs_fv_bj",
+    "hydrology.dfs_erosion_depth_writer_variant": "net_bed_change_bj",
+    "hydrology.dfs_sfdf_classify_cv_variant": "previous_committed_cv",
+    "hydrology.dfs_cvlimit_variant": "tanslo_cycle_cvstar_clamp_bj",
+    "hydrology.dfs_erodph_dt_variant": "accepted_dt_bj",
+    "hydrology.dfs_barrier_flux_variant": "bj_barrier_branch",
+    "hydrology.dfs_commit_cv_eps_variant": "no_clamp_bj",
 }
 
 STATIC_GATE_DEFAULTS: Dict[str, Any] = {
@@ -215,6 +229,9 @@ def resolve_scenario_compute_snapshot(
         resolver_parameters = resolved_baseline
         resolver_gates = owned_controls
     else:
+        # Workbench defaults remain a legacy fallback; editing a scenario must
+        # take precedence without changing any other scenario's settings.
+        gates = {**gates, **owned_controls}
         merged = merge_compute_gate_defaults(
             baseline_values,
             patch,
@@ -236,7 +253,7 @@ def resolve_scenario_compute_snapshot(
         requested = str(resolver_gates.get(POLICY_KEY) or "auto")
         blocked = {
             "status": "blocked",
-            "source": "scenario_override" if reference_owned and requested != "auto" else ("global_override" if requested != "auto" else "auto"),
+            "source": "scenario_override" if POLICY_KEY in owned_controls and requested != "auto" else ("global_override" if requested != "auto" else "auto"),
             "requested": requested,
             "detected": {
                 "simulate_shallow_landslide": resolver_parameters.get(FSSIMUL_PATH),
@@ -255,6 +272,9 @@ def resolve_scenario_compute_snapshot(
                 "details": dict(exc.details),
             },
         }
+        for key, item in blocked["numeric_variants"].items():
+            if key in owned_controls:
+                item["source"] = "scenario_override"
         resolution_id, resolution_hash = compute_policy_resolution_identity(blocked)
         blocked["resolution_id"] = resolution_id
         blocked["resolution_hash"] = resolution_hash
@@ -264,6 +284,11 @@ def resolve_scenario_compute_snapshot(
             validation_issues=[blocked["blocking_issue"]],
         )
 
+    if POLICY_KEY in owned_controls and resolution.requested != "auto":
+        resolution.source = "scenario_override"
+    for key, item in resolution.numeric_variants.items():
+        if key in owned_controls:
+            item["source"] = "scenario_override"
     return ScenarioComputeSnapshot(
         effective_parameters=apply_resolved_policy_to_parameters(merged, resolution),
         resolution=resolution.to_dict(),

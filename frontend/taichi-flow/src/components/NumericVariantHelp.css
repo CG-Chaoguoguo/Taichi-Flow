@@ -1,0 +1,18 @@
+.tf-numeric-variant-help {
+  display: grid;
+  gap: 8px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.tf-numeric-variant-help > strong {
+  color: var(--color-foreground);
+  font-size: 13px;
+}
+
+.tf-numeric-variant-help b {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-foreground);
+  font-weight: 600;
+}

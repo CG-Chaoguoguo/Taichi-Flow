@@ -120,6 +120,25 @@ def classify_result_family(relative_path: str) -> str:
     return stripped or "other"
 
 
+def classify_result_writer(relative_path: str) -> str:
+    """Identify the concrete writer contract represented by an output name.
+
+    This is deliberately a writer identity rather than a file-extension label:
+    a Top-N erosion probe must not silently switch from the canonical EDDA-text
+    field writer to an unrelated raster with the same family-like filename.
+    """
+    path = _as_posix_path(relative_path)
+    stem = _strip_known_suffix(path.name).lower()
+    suffix = path.suffix.lower()
+    if suffix == ".txt" and ("edda" in stem or "taichi" in stem):
+        return "taichi_edda_text"
+    if suffix in {".tif", ".tiff"}:
+        return "taichi_geotiff"
+    if suffix == ".csv":
+        return "taichi_csv"
+    return "unknown"
+
+
 def is_result_file(path: Path, relative_path: str) -> bool:
     suffix = path.suffix.lower()
     if suffix in RESULT_FILE_SUFFIXES:

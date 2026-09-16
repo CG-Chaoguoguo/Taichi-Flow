@@ -25,6 +25,13 @@ VARIANT_GATE_KEYS = (
     "hydrology.dfs_dry_face_velocity_variant",
     "hydrology.dfs_artivis_variant",
     "hydrology.dfs_absubar_variant",
+    "hydrology.dfs_flow_velocity_writer_variant",
+    "hydrology.dfs_erosion_depth_writer_variant",
+    "hydrology.dfs_sfdf_classify_cv_variant",
+    "hydrology.dfs_cvlimit_variant",
+    "hydrology.dfs_erodph_dt_variant",
+    "hydrology.dfs_barrier_flux_variant",
+    "hydrology.dfs_commit_cv_eps_variant",
 )
 
 class ComputePolicyResolutionError(ValueError):

@@ -119,6 +119,31 @@ class ReferenceConfigParseResult:
     dfs_absubar_variant: str
     dfs_absubar_variant_source: Optional[str]
     dfs_absubar_variant_basis: Optional[str]
+    dfs_flow_velocity_writer_variant: str
+    dfs_flow_velocity_writer_variant_source: Optional[str]
+    dfs_flow_velocity_writer_variant_basis: Optional[str]
+    dfs_erosion_depth_writer_variant: str
+    dfs_erosion_depth_writer_variant_source: Optional[str]
+    dfs_erosion_depth_writer_variant_basis: Optional[str]
+    dfs_sfdf_classify_cv_variant: str
+    dfs_sfdf_classify_cv_variant_source: Optional[str]
+    dfs_sfdf_classify_cv_variant_basis: Optional[str]
+    dfs_cvlimit_variant: str
+    dfs_cvlimit_variant_source: Optional[str]
+    dfs_cvlimit_variant_basis: Optional[str]
+    dfs_erodph_dt_variant: str
+    dfs_erodph_dt_variant_source: Optional[str]
+    dfs_erodph_dt_variant_basis: Optional[str]
+    dfs_barrier_flux_variant: str
+    dfs_barrier_flux_variant_source: Optional[str]
+    dfs_barrier_flux_variant_basis: Optional[str]
+    dfs_commit_cv_eps_variant: str
+    dfs_commit_cv_eps_variant_source: Optional[str]
+    dfs_commit_cv_eps_variant_basis: Optional[str]
+    manningb: float
+    manningm: float
+    manning_coefficient_source: Optional[str]
+    manning_coefficient_basis: Optional[str]
     dtmin: float
     dtmax: float
     dti: float
@@ -203,6 +228,31 @@ class ReferenceConfigParseResult:
             "dfs_absubar_variant": self.dfs_absubar_variant,
             "dfs_absubar_variant_source": self.dfs_absubar_variant_source,
             "dfs_absubar_variant_basis": self.dfs_absubar_variant_basis,
+            "dfs_flow_velocity_writer_variant": self.dfs_flow_velocity_writer_variant,
+            "dfs_flow_velocity_writer_variant_source": self.dfs_flow_velocity_writer_variant_source,
+            "dfs_flow_velocity_writer_variant_basis": self.dfs_flow_velocity_writer_variant_basis,
+            "dfs_erosion_depth_writer_variant": self.dfs_erosion_depth_writer_variant,
+            "dfs_erosion_depth_writer_variant_source": self.dfs_erosion_depth_writer_variant_source,
+            "dfs_erosion_depth_writer_variant_basis": self.dfs_erosion_depth_writer_variant_basis,
+            "dfs_sfdf_classify_cv_variant": self.dfs_sfdf_classify_cv_variant,
+            "dfs_sfdf_classify_cv_variant_source": self.dfs_sfdf_classify_cv_variant_source,
+            "dfs_sfdf_classify_cv_variant_basis": self.dfs_sfdf_classify_cv_variant_basis,
+            "dfs_cvlimit_variant": self.dfs_cvlimit_variant,
+            "dfs_cvlimit_variant_source": self.dfs_cvlimit_variant_source,
+            "dfs_cvlimit_variant_basis": self.dfs_cvlimit_variant_basis,
+            "dfs_erodph_dt_variant": self.dfs_erodph_dt_variant,
+            "dfs_erodph_dt_variant_source": self.dfs_erodph_dt_variant_source,
+            "dfs_erodph_dt_variant_basis": self.dfs_erodph_dt_variant_basis,
+            "dfs_barrier_flux_variant": self.dfs_barrier_flux_variant,
+            "dfs_barrier_flux_variant_source": self.dfs_barrier_flux_variant_source,
+            "dfs_barrier_flux_variant_basis": self.dfs_barrier_flux_variant_basis,
+            "dfs_commit_cv_eps_variant": self.dfs_commit_cv_eps_variant,
+            "dfs_commit_cv_eps_variant_source": self.dfs_commit_cv_eps_variant_source,
+            "dfs_commit_cv_eps_variant_basis": self.dfs_commit_cv_eps_variant_basis,
+            "manningb": self.manningb,
+            "manningm": self.manningm,
+            "manning_coefficient_source": self.manning_coefficient_source,
+            "manning_coefficient_basis": self.manning_coefficient_basis,
             "inflow_denominator_variant": self.inflow_denominator_variant,
             "inflow_denominator_variant_source": self.inflow_denominator_variant_source,
             "inflow_denominator_variant_basis": self.inflow_denominator_variant_basis,
@@ -224,6 +274,8 @@ SUPPORTED_FILE_FAMILIES = {
     "triggerslide": ("priority-0", "production-reachable"),
     "manningfil": ("priority-2", "production-reachable"),
     "rifil": ("priority-1", "conditional-production-reachable"),
+    "flexiblefil": ("priority-2", "partial"),
+    "rigidfil": ("priority-2", "partial"),
 }
 RECOGNIZED_ONLY_FILE_FAMILIES = {
     "dirfil": ("priority-2", "recognized-only"),
@@ -1254,14 +1306,17 @@ def _detect_dfs_artivis_variant(base_dir: Path) -> Tuple[str, Optional[str], Opt
 
 
 def _detect_dfs_absubar_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
-    """Distinguish BJ max-component `absubar` from Chamoli signed-mean reconstruction.
+    """Resolve the source-specific DFS ``absubar`` reconstruction.
 
     Chamoli ``dfs.F90:209-212``:
 
         vx=(fv(i,5)-fv(i,1))*0.5+...0.5*0.707...
         absubar(i)=(vx**2.+vy**2.)**0.5
 
-    BJ reconstructs ``max(vorth,vcomp)`` from ``fvpredi2=0.5*(fv+fvpredi)``.
+    Test31 has a separate signed reconstruction with the literal default-REAL
+    weights ``0.4142``, ``0.707``, and ``0.2929``.  It must be recognized
+    before Chamoli because it includes the Chamoli diagonal fragment.  BJ
+    reconstructs ``max(vorth,vcomp)`` from ``fvpredi2=0.5*(fv+fvpredi)``.
     """
     dfs_path = base_dir / "dfs.F90"
     if not dfs_path.exists():
@@ -1279,6 +1334,23 @@ def _detect_dfs_absubar_variant(base_dir: Path) -> Tuple[str, Optional[str], Opt
             "Bundled `dfs.F90` could not be read cleanly; `absubar` staging falls back to `max_component_bj`.",
         )
     compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    test31_vx = (
+        "vx=(fv(i,5)-fv(i,1))*0.5*0.4142+((fv(i,4)-fv(i,8))*0.5*0.707+"
+        "(fv(i,6)-fv(i,2))*0.5*0.707)*0.2929"
+    )
+    test31_vy = (
+        "vy=(fv(i,3)-fv(i,7))*0.5*0.4142+((fv(i,4)-fv(i,8))*0.5*0.707-"
+        "(fv(i,6)-fv(i,2))*0.5*0.707)*0.2929"
+    )
+    weighted_signed_test31 = test31_vx in compact and test31_vy in compact and "absubar(i)=(vx**2" in compact
+    if weighted_signed_test31:
+        return (
+            "weighted_signed_test31",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` reconstructs `absubar` with the Test31 signed weighted formula "
+            "and default-REAL literals `0.4142`, `0.707`, and `0.2929` (Test31 `dfs.F90:210-212`).",
+        )
+
     signed_mean = (
         "vx=(fv(i,5)-fv(i,1))*0.5" in compact
         and "0.5*0.707" in compact
@@ -1296,6 +1368,297 @@ def _detect_dfs_absubar_variant(base_dir: Path) -> Tuple[str, Optional[str], Opt
         str(dfs_path.resolve()),
         "Bundled `dfs.F90` does not use the Chamoli signed-mean `absubar` reconstruction; "
         "the runtime keeps the BJ production default `max_component_bj`.",
+    )
+
+
+def _detect_dfs_flow_velocity_writer_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ half-sum |fv| writer from Chamoli `tfg=absubar` writer."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "half_sum_abs_fv_bj",
+            None,
+            "No bundled `dfs.F90` was found; flow-velocity writer keeps `half_sum_abs_fv_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "half_sum_abs_fv_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; flow-velocity writer falls back to `half_sum_abs_fv_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    if "if(fvsave)then" in compact and "tfg=absubar" in compact:
+        return (
+            "absubar_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` writes flow velocity as `tfg=absubar` under `fvsave` "
+            "(Chamoli `dfs.F90:1408-1414`).",
+        )
+    return (
+        "half_sum_abs_fv_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` uses `0.5*(abs(fv(i,1))+…+abs(fv(i,4)))` for flow velocity "
+        "(BJ production default `half_sum_abs_fv_bj`).",
+    )
+
+
+def _detect_dfs_erosion_depth_writer_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ `eleori-ele` writer from Chamoli cumulative `erodph` writer."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "net_bed_change_bj",
+            None,
+            "No bundled `dfs.F90` was found; erosion-depth writer keeps `net_bed_change_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "net_bed_change_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; erosion-depth writer falls back to `net_bed_change_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    if "erodepthsave" in compact and "tfg=erodph" in compact:
+        return (
+            "cumulative_erodph_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` writes erosion depth as cumulative `erodph` "
+            "(Chamoli `dfs.F90:1427-1436`).",
+        )
+    return (
+        "net_bed_change_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` writes erosion depth as `eleori-ele` "
+        "(BJ production default `net_bed_change_bj`).",
+    )
+
+
+def _detect_dfs_sfdf_classify_cv_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Detect Chamoli SF/DF/FF classification block; BJ has no equivalent writer."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "previous_committed_cv",
+            None,
+            "No bundled `dfs.F90` was found; SF/DF/FF classify-cv staging keeps `previous_committed_cv`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "previous_committed_cv",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; SF/DF/FF classify-cv falls back to `previous_committed_cv`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    if "if(cv(i)>=0.5)then" in compact and "sfh(i)=fhpredi2(i)" in compact:
+        return (
+            "predicted_step_cv_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` classifies SF/DF/FF with this-step `cv` from `frhopredi1` "
+            "into `fhpredi2` depths (Chamoli `dfs.F90:357` → `:1120-1133`).",
+        )
+    return (
+        "previous_committed_cv",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` has no Chamoli SF/DF/FF classification block; "
+        "the runtime keeps `previous_committed_cv` (no regime writers on BJ).",
+    )
+
+
+def _detect_dfs_cvlimit_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish BJ tanslo-cycle/cvstar clamp from Chamoli tan(slo)/unit clamp."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "tanslo_cycle_cvstar_clamp_bj",
+            None,
+            "No bundled `dfs.F90` was found; cvlimit staging keeps `tanslo_cycle_cvstar_clamp_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "tanslo_cycle_cvstar_clamp_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; cvlimit staging falls back to `tanslo_cycle_cvstar_clamp_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    chamoli = (
+        "cvlimit(i)=rhow*tan(slo(i))/" in compact
+        and "cvlimit(i)>1." in compact
+    )
+    if chamoli:
+        return (
+            "tan_slo_unit_clamp_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` recomputes `cvlimit` from `tan(slo)` each step and clamps "
+            "`cvlimit>1` to `cvstar` without a negative-tanslo cycle "
+            "(Chamoli `dfs.F90:358-371`).",
+        )
+    return (
+        "tanslo_cycle_cvstar_clamp_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` keeps BJ `tanslo<0 → cvlimit=0; cycle` and clamps "
+        "`cvlimit>cvstar` (BJ production default `tanslo_cycle_cvstar_clamp_bj`).",
+    )
+
+
+def _detect_dfs_erodph_dt_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish accepted-step erodph*dt from Chamoli post-`dti` erodph*dt."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "accepted_dt_bj",
+            None,
+            "No bundled `dfs.F90` was found; erodph timestep keeps `accepted_dt_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "accepted_dt_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; erodph timestep falls back to `accepted_dt_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    idx_dti = compact.find("dt=dt+dti")
+    idx_erodph = compact.find("erodph=erorate*dt+erodph")
+    if idx_dti >= 0 and idx_erodph >= 0 and idx_erodph > idx_dti:
+        return (
+            "post_dti_dt_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` accumulates `erodph=erorate*dt+erodph` after "
+            "`dt=dt+dti` (Chamoli `dfs.F90:1264-1272`).",
+        )
+    return (
+        "accepted_dt_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` accumulates `erodph` with the accepted-step `dt` "
+        "before `dt=dt+dti` (BJ production default `accepted_dt_bj`).",
+    )
+
+
+def _detect_dfs_barrier_flux_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish the BJ barrier `if/elseif/else` face branch from the Chamoli `.or.` scour kill.
+
+    Chamoli `dfs.F90:909-921` evaluates
+    ``elseif(fvpredi(i,ii)<0 .or. rigid(nq)>0)`` after the flux is formed. With
+    no barrier grids the ``.or.`` makes every negative-velocity face zero its
+    flux whenever ``fhpredi(nq)+ele(nq) < eleori(nq)`` (neighbour free surface
+    below its original ground). The BJ family wraps the barrier logic in
+    ``if(flexible(i)>0 .or. flexible(nq)>0) ... elseif(rigid(i)>0 .or. rigid(nq)>0) ... else``
+    so the plain flux path is untouched without barriers.
+    """
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "bj_barrier_branch",
+            None,
+            "No bundled `dfs.F90` was found; barrier face-flux handling keeps `bj_barrier_branch`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "bj_barrier_branch",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; barrier face-flux handling falls back to `bj_barrier_branch`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    if "elseif(fvpredi(i,ii)<0.or.rigid(nq)>0)" in compact:
+        return (
+            "chamoli_scour_kill_or",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` applies `elseif(fvpredi(i,ii)<0 .or. rigid(nq)>0)` after the "
+            "face flux, so negative-velocity faces are zeroed whenever "
+            "`fhpredi(nq)+ele(nq) < rigid(nq)+eleori(nq)` even without barrier grids "
+            "(Chamoli `dfs.F90:909-921`).",
+        )
+    return (
+        "bj_barrier_branch",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` keeps the BJ `flexible/rigid/else` barrier branch, leaving the "
+        "plain face flux untouched without barrier grids (BJ production default `bj_barrier_branch`).",
+    )
+
+
+def _detect_dfs_commit_cv_eps_variant(base_dir: Path) -> Tuple[str, Optional[str], Optional[str]]:
+    """Distinguish the Chamoli committed `where(cv<eps) cv=0.` clamp from the BJ bare commit."""
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            "no_clamp_bj",
+            None,
+            "No bundled `dfs.F90` was found; committed cv handling keeps `no_clamp_bj`.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            "no_clamp_bj",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; committed cv handling falls back to `no_clamp_bj`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    idx_commit = compact.find("cv=(frho-rhow)/(rhos-rhow)")
+    idx_clamp = compact.find("where(cv<eps)cv=0", idx_commit if idx_commit >= 0 else 0)
+    if idx_commit >= 0 and idx_clamp >= 0:
+        return (
+            "eps_clamp_chamoli",
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` commits `cv=(frho-rhow)/(rhos-rhow)` then `where(cv<eps) cv=0.` "
+            "(Chamoli `dfs.F90:1284-1285`).",
+        )
+    return (
+        "no_clamp_bj",
+        str(dfs_path.resolve()),
+        "Bundled `dfs.F90` commits `cv=(frho-rhow)/(rhos-rhow)` without an `eps` clamp "
+        "(BJ production default `no_clamp_bj`).",
+    )
+
+
+def _detect_dfs_manning_coefficients(
+    base_dir: Path,
+) -> Tuple[float, float, Optional[str], Optional[str]]:
+    """Read `manningb`/`manningm` assignments from bundled `dfs.F90`.
+
+    Chamoli/Test31 assign `manningb=1` and `manningm=0`. BJ family assigns
+    `manningb=0.0538` and `manningm=6.0896`. Detect from `dfs.F90` rather than
+    `wfs.F90`, which keeps the BJ coefficients even in Chamoli cases.
+    """
+    default_b, default_m = 0.0538, 6.0896
+    dfs_path = base_dir / "dfs.F90"
+    if not dfs_path.exists():
+        return (
+            default_b,
+            default_m,
+            None,
+            "No bundled `dfs.F90` was found; Manning coefficients keep the BJ `0.0538`/`6.0896` literals.",
+        )
+    try:
+        text = dfs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return (
+            default_b,
+            default_m,
+            str(dfs_path.resolve()),
+            "Bundled `dfs.F90` could not be read cleanly; Manning coefficients fall back to BJ `0.0538`/`6.0896`.",
+        )
+    compact = _compact_fortran_source(_strip_fortran_line_comments(text))
+    match_b = re.search(r"manningb=([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", compact)
+    match_m = re.search(r"manningm=([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", compact)
+    manningb = float(match_b.group(1)) if match_b else default_b
+    manningm = float(match_m.group(1)) if match_m else default_m
+    return (
+        manningb,
+        manningm,
+        str(dfs_path.resolve()),
+        f"Bundled `dfs.F90` assigns `manningb={manningb}` and `manningm={manningm}`.",
     )
 
 
@@ -1649,6 +2012,25 @@ def _annotate_reference_case_activation(
             f"reference config has ltstar={ltstar_raw} and zmax={zmax}."
         ),
     )
+    barrier_active = flags.get("simulate_barrier") is True
+    _set(
+        "flexiblefil",
+        original_branch_active=barrier_active,
+        current_backend_branch_active=(barrier_active and _exists("flexiblefil")),
+        activation_basis=(
+            "Original EDDA reads `flexiblefil` only when `barriersimul` is true "
+            f"(`simulate_barrier={barrier_active}`). Current backend loads the raster on that same branch."
+        ),
+    )
+    _set(
+        "rigidfil",
+        original_branch_active=barrier_active,
+        current_backend_branch_active=(barrier_active and _exists("rigidfil")),
+        activation_basis=(
+            "Original EDDA reads `rigidfil` only when `barriersimul` is true "
+            f"(`simulate_barrier={barrier_active}`). Current backend loads the raster on that same branch."
+        ),
+    )
     _set(
         "dirfil",
         original_branch_active=None,
@@ -1811,6 +2193,26 @@ def parse_reference_config_file(
     )
     dfs_artivis_variant, dfs_artivis_variant_source, dfs_artivis_variant_basis = _detect_dfs_artivis_variant(base_dir)
     dfs_absubar_variant, dfs_absubar_variant_source, dfs_absubar_variant_basis = _detect_dfs_absubar_variant(base_dir)
+    (
+        dfs_flow_velocity_writer_variant,
+        dfs_flow_velocity_writer_variant_source,
+        dfs_flow_velocity_writer_variant_basis,
+    ) = _detect_dfs_flow_velocity_writer_variant(base_dir)
+    (
+        dfs_erosion_depth_writer_variant,
+        dfs_erosion_depth_writer_variant_source,
+        dfs_erosion_depth_writer_variant_basis,
+    ) = _detect_dfs_erosion_depth_writer_variant(base_dir)
+    (
+        dfs_sfdf_classify_cv_variant,
+        dfs_sfdf_classify_cv_variant_source,
+        dfs_sfdf_classify_cv_variant_basis,
+    ) = _detect_dfs_sfdf_classify_cv_variant(base_dir)
+    dfs_cvlimit_variant, dfs_cvlimit_variant_source, dfs_cvlimit_variant_basis = _detect_dfs_cvlimit_variant(base_dir)
+    dfs_erodph_dt_variant, dfs_erodph_dt_variant_source, dfs_erodph_dt_variant_basis = _detect_dfs_erodph_dt_variant(base_dir)
+    dfs_barrier_flux_variant, dfs_barrier_flux_variant_source, dfs_barrier_flux_variant_basis = _detect_dfs_barrier_flux_variant(base_dir)
+    dfs_commit_cv_eps_variant, dfs_commit_cv_eps_variant_source, dfs_commit_cv_eps_variant_basis = _detect_dfs_commit_cv_eps_variant(base_dir)
+    manningb, manningm, manning_coefficient_source, manning_coefficient_basis = _detect_dfs_manning_coefficients(base_dir)
     if debrisflowmanning is not None:
         dfs_manningbar_variant = "debrisflowmanning_cvtol"
         dfs_manningbar_variant_source = str(reference_path.resolve())
@@ -2246,6 +2648,35 @@ def parse_reference_config_file(
     audit_notes.append(f"Bundled DFS absubar variant resolved to `{dfs_absubar_variant}`.")
     if dfs_absubar_variant_basis:
         audit_notes.append(dfs_absubar_variant_basis)
+    audit_notes.append(
+        f"Bundled DFS flow-velocity writer variant resolved to `{dfs_flow_velocity_writer_variant}`."
+    )
+    if dfs_flow_velocity_writer_variant_basis:
+        audit_notes.append(dfs_flow_velocity_writer_variant_basis)
+    audit_notes.append(
+        f"Bundled DFS erosion-depth writer variant resolved to `{dfs_erosion_depth_writer_variant}`."
+    )
+    if dfs_erosion_depth_writer_variant_basis:
+        audit_notes.append(dfs_erosion_depth_writer_variant_basis)
+    audit_notes.append(
+        f"Bundled DFS SF/DF/FF classify-cv variant resolved to `{dfs_sfdf_classify_cv_variant}`."
+    )
+    if dfs_sfdf_classify_cv_variant_basis:
+        audit_notes.append(dfs_sfdf_classify_cv_variant_basis)
+    audit_notes.append(f"Bundled DFS cvlimit variant resolved to `{dfs_cvlimit_variant}`.")
+    if dfs_cvlimit_variant_basis:
+        audit_notes.append(dfs_cvlimit_variant_basis)
+    audit_notes.append(f"Bundled DFS erodph-dt variant resolved to `{dfs_erodph_dt_variant}`.")
+    if dfs_erodph_dt_variant_basis:
+        audit_notes.append(dfs_erodph_dt_variant_basis)
+    audit_notes.append(f"Bundled DFS barrier face-flux variant resolved to `{dfs_barrier_flux_variant}`.")
+    if dfs_barrier_flux_variant_basis:
+        audit_notes.append(dfs_barrier_flux_variant_basis)
+    audit_notes.append(f"Bundled DFS committed-cv eps variant resolved to `{dfs_commit_cv_eps_variant}`.")
+    if dfs_commit_cv_eps_variant_basis:
+        audit_notes.append(dfs_commit_cv_eps_variant_basis)
+    if manning_coefficient_basis:
+        audit_notes.append(manning_coefficient_basis)
     if cvlandslide is not None:
         audit_notes.append(
             "Sediment line used the Chamoli six-value layout "
@@ -2403,6 +2834,31 @@ def parse_reference_config_file(
         dfs_absubar_variant=dfs_absubar_variant,
         dfs_absubar_variant_source=dfs_absubar_variant_source,
         dfs_absubar_variant_basis=dfs_absubar_variant_basis,
+        dfs_flow_velocity_writer_variant=dfs_flow_velocity_writer_variant,
+        dfs_flow_velocity_writer_variant_source=dfs_flow_velocity_writer_variant_source,
+        dfs_flow_velocity_writer_variant_basis=dfs_flow_velocity_writer_variant_basis,
+        dfs_erosion_depth_writer_variant=dfs_erosion_depth_writer_variant,
+        dfs_erosion_depth_writer_variant_source=dfs_erosion_depth_writer_variant_source,
+        dfs_erosion_depth_writer_variant_basis=dfs_erosion_depth_writer_variant_basis,
+        dfs_sfdf_classify_cv_variant=dfs_sfdf_classify_cv_variant,
+        dfs_sfdf_classify_cv_variant_source=dfs_sfdf_classify_cv_variant_source,
+        dfs_sfdf_classify_cv_variant_basis=dfs_sfdf_classify_cv_variant_basis,
+        dfs_cvlimit_variant=dfs_cvlimit_variant,
+        dfs_cvlimit_variant_source=dfs_cvlimit_variant_source,
+        dfs_cvlimit_variant_basis=dfs_cvlimit_variant_basis,
+        dfs_erodph_dt_variant=dfs_erodph_dt_variant,
+        dfs_erodph_dt_variant_source=dfs_erodph_dt_variant_source,
+        dfs_erodph_dt_variant_basis=dfs_erodph_dt_variant_basis,
+        dfs_barrier_flux_variant=dfs_barrier_flux_variant,
+        dfs_barrier_flux_variant_source=dfs_barrier_flux_variant_source,
+        dfs_barrier_flux_variant_basis=dfs_barrier_flux_variant_basis,
+        dfs_commit_cv_eps_variant=dfs_commit_cv_eps_variant,
+        dfs_commit_cv_eps_variant_source=dfs_commit_cv_eps_variant_source,
+        dfs_commit_cv_eps_variant_basis=dfs_commit_cv_eps_variant_basis,
+        manningb=manningb,
+        manningm=manningm,
+        manning_coefficient_source=manning_coefficient_source,
+        manning_coefficient_basis=manning_coefficient_basis,
         inflow_denominator_variant=inflow_denominator_variant,
         inflow_denominator_variant_source=inflow_denominator_variant_source,
         inflow_denominator_variant_basis=inflow_denominator_variant_basis,

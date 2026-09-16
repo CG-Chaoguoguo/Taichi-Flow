@@ -1,5 +1,5 @@
 import { useEffect, useState, type PropsWithChildren } from "react";
-import { BrowserRouter, HashRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
+import { createBrowserRouter, createHashRouter, createRoutesFromElements, Navigate, Route, RouterProvider, useParams } from "react-router-dom";
 import { LauncherShell } from "./layouts/LauncherShell";
 import { ProjectEditorShell } from "./layouts/ProjectEditorShell";
 import { ProjectList } from "./pages/Projects/ProjectList";
@@ -8,10 +8,10 @@ import { EditorIndexRedirect, ProjectEditor } from "./pages/Editor/ProjectEditor
 import { Settings } from "./pages/Settings/Settings";
 import { useTaichiFlowStore } from "./stores/taichiFlowStore";
 
-const Router =
+const makeRouter =
   typeof window !== "undefined" && (window as Window & { taichiFlowDesktop?: unknown }).taichiFlowDesktop
-    ? HashRouter
-    : BrowserRouter;
+    ? createHashRouter
+    : createBrowserRouter;
 
 function LegacyEditorRedirect({ dock }: { dock?: "queue" | "export" }) {
   const { projectId = "", scenarioId } = useParams();
@@ -67,18 +67,17 @@ function AppContent() {
     return cleanup;
   }, [startPolling]);
 
-  return (
-    <Router>
-      <Routes>
+  const [router] = useState(() => makeRouter(createRoutesFromElements(<>
         <Route path="/" element={<LauncherShell />}>
           <Route index element={<Navigate to="/projects" replace />} />
           <Route path="projects" element={<ProjectList />} />
-          <Route path="settings" element={<Settings />} />
+          <Route path="settings" element={<Navigate to="/projects" replace />} />
         </Route>
 
         <Route path="/launch/:projectId" element={<ProjectLaunchScreen />} />
 
         <Route path="/editor/:projectId" element={<ProjectEditorShell />}>
+          <Route path="scenarios/:scenarioId/settings" element={<Settings />} />
           <Route
             index
             element={
@@ -104,9 +103,8 @@ function AppContent() {
         <Route path="/projects/:projectId/export" element={<LegacyEditorRedirect dock="export" />} />
         <Route path="/calculate" element={<Navigate to="/projects" replace />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
-      </Routes>
-    </Router>
-  );
+      </>)));
+  return <RouterProvider router={router} />;
 }
 
 export default function App() {

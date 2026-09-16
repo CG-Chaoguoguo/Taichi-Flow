@@ -239,6 +239,7 @@ class RuntimeRunExecutor:
             # transient UUID for standalone legacy calls, so replace it here.
             prepared.simulation_id = simulation_id
             prepared.job_metadata["simulation_id"] = simulation_id
+            prepared.job_metadata["run_options"] = context.get("run_options") or {}
             session = RuntimeSession(
                 prepared,
                 solver_factory=self.solver_factory,
@@ -249,6 +250,7 @@ class RuntimeRunExecutor:
             stop_thread = Thread(target=request_session_stop, name=f"taichi-flow-stop-{simulation_id}", daemon=True)
             stop_thread.start()
             initial_state = session.initialize()
+            session.apply_run_options(context.get("run_options") or {})
             observed = _ObservableState(initial_state, on_change=on_update)
             observed["solver"] = session.solver
             on_update({"status": "starting", "end_time": float(prepared.config.time.t_end)})
@@ -309,6 +311,14 @@ class SimulationCoordinator:
         self._stop_event: Optional[asyncio.Event] = None
         self._loop_task: Optional[asyncio.Task] = None
         self._active: Dict[str, _ActiveJob] = {}
+        self.store.project_lifecycle.active_projects = lambda: set(self._active)
+        # API project mutations and queue admission share the same boundary.
+        # Active execution remains outside this lock and blocks deletion by state.
+        self.project_lifecycle_lock = asyncio.Lock()
+        self._project_locks: Dict[str, asyncio.Lock] = {}
+
+    def project_lock(self, project_id: str) -> asyncio.Lock:
+        return self._project_locks.setdefault(project_id, asyncio.Lock())
 
     @property
     def active_count(self) -> int:
@@ -378,6 +388,10 @@ class SimulationCoordinator:
                 continue
 
     async def _dispatch_available(self) -> None:
+        async with self.project_lifecycle_lock:
+            await self._dispatch_available_locked()
+
+    async def _dispatch_available_locked(self) -> None:
         active_projects = set(self._active)
         if len(active_projects) >= self.max_concurrent_projects:
             return
@@ -393,7 +407,8 @@ class SimulationCoordinator:
             if active_signatures and signature not in active_signatures:
                 continue
             try:
-                context = self.store.claim_queue_item(project_id, str(candidate["queue_item_id"]))
+                async with self.project_lock(project_id):
+                    context = self.store.claim_queue_item(project_id, str(candidate["queue_item_id"]))
             except WorkbenchError:
                 continue
             stop_event = Event()
