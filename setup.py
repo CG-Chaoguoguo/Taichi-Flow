@@ -1,15 +1,15 @@
-"""Taichi Flow: GPU-accelerated debris-flow simulation."""
+"""Taichi-Flow: GPU-accelerated debris-flow simulation."""
 from setuptools import setup, find_packages
 from pathlib import Path
 
 # Read README
 readme_file = Path(__file__).parent / "README.md"
-long_description = readme_file.read_text() if readme_file.exists() else ""
+long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists() else ""
 
 setup(
     name="taichi-flow",
     version="0.1.0",
-    author="Taichi Flow Development Team",
+    author="Taichi-Flow Development Team",
     description="Taichi/CUDA debris-flow simulation service",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -29,33 +29,39 @@ setup(
     ],
     python_requires=">=3.9,<3.14",  # Taichi 1.7.4 supports Python 3.9-3.13
     install_requires=[
-        "taichi>=1.6.0",
-        "numpy>=1.24.0",
-        "scipy>=1.10.0",
-        "gdal>=3.6.0",
-        "rasterio>=1.3.0",
-        "geopandas>=0.12.0",
-        "pyproj>=3.4.0",
-        "fastapi>=0.100.0",
-        "httpx>=0.24.0",
-        "uvicorn[standard]>=0.23.0",
-        "websockets>=11.0",
-        "websocket-client>=1.8.0",
-        "python-multipart>=0.0.6",
-        "streamlit>=1.28.0",
-        "plotly>=5.17.0",
-        "pandas>=2.0.0",
-        "pydantic>=2.0.0",
-        "python-dotenv>=1.0.0",
-        "tqdm>=4.65.0",
-        "pyyaml>=6.0",
+        "taichi>=1.7.4,<1.8.0",
+        "numpy>=1.24.0,<3.0.0",
+        "scipy>=1.10.0,<2.0.0",
+        "rasterio>=1.3.0,<2.0.0",
+        "geopandas>=0.12.0,<2.0.0",
+        "pyproj>=3.4.0,<4.0.0",
+        "shapely>=2.0.0,<3.0.0",
+        "fastapi>=0.100.0,<1.0.0",
+        "httpx>=0.24.0,<1.0.0",
+        "uvicorn[standard]>=0.23.0,<1.0.0",
+        "websockets>=11.0,<17.0",
+        "websocket-client>=1.8.0,<2.0.0",
+        "python-multipart>=0.0.6,<1.0.0",
+        "pandas>=2.0.0,<4.0.0",
+        "pydantic>=2.0.0,<3.0.0",
+        "python-dotenv>=1.0.0,<2.0.0",
+        "psutil>=5.9.0,<6.0.0",
+        "tqdm>=4.65.0,<5.0.0",
+        "pyyaml>=6.0,<7.0",
     ],
     extras_require={
         "dev": [
-            "pytest>=7.4.0",
-            "black>=23.0.0",
-            "mypy>=1.5.0",
-            "flake8>=6.0.0",
+            "pytest>=7.4.0,<10.0.0",
+            "black>=23.0.0,<27.0.0",
+            "mypy>=1.5.0,<2.0.0",
+            "flake8>=6.0.0,<8.0.0",
+            "pytest-cov>=4.1.0,<7.0.0",
+        ],
+        "examples": [
+            "matplotlib>=3.5.0,<4.0.0",
+        ],
+        "geospatial": [
+            "gdal>=3.6.0,<4.0.0",
         ],
     },
     entry_points={

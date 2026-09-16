@@ -1,5 +1,5 @@
 """
-Erosion model for EDDA simulation.
+Erosion model for Taichi-Flow simulations.
 
 This module implements bed erosion based on excess shear stress,
 following the original EDDA formulation with concentration limits,

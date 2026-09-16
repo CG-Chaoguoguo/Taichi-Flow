@@ -1,9 +1,14 @@
 # Taichi-Flow 前端产品与交互设计方案
 
-> 文档类型：前端产品定义与完整落地规格  
-> 适用对象：产品设计、UI/UX、前端开发、后端联调与验收人员  
-> 设计方向：Microsoft Fluent 2，桌面端科研计算工作台  
-> 代码基线：当前 Taichi-Flow 仓库（2026-08-02）
+> 文档类型：前端产品定义与完整落地规格（历史设计基线，当前状态见下方说明）
+> 适用对象：产品设计、UI/UX、前端开发、后端联调与验收人员
+> 设计方向：Microsoft Fluent 2，桌面端科研计算工作台
+> 代码基线：Taichi-Flow checkout（2026-08-02；当前实现校订：2026-09-03）。
+
+> 当前实现校订：主路由为 `/projects`、`/launch/:projectId` 和
+> `/editor/:projectId/scenarios/:scenarioId`；旧的项目嵌套路由只负责重定向。
+> 后端提供 WebSocket 快照合同，但当前 React 客户端以 REST 轮询为主。该
+> 文档保留产品设计决策，不应被当作逐行代码契约。
 
 ## 1. 产品定义
 
@@ -30,7 +35,8 @@ Taichi-Flow 是面向洪水与泥石流数值模拟的本地桌面工作台。�
 - 桌面端：Electron。
 - 后端：FastAPI。
 - 数据：全局项目目录与项目级 SQLite 状态库。
-- 实时状态：WebSocket 快照；断线后使用 REST 轮询恢复。
+- 实时状态：当前客户端使用 REST 轮询；后端保留 WebSocket 快照合同供后续
+  realtime 客户端接入，并继续保留轮询兜底。
 - 视觉实现：现有自定义组件和 CSS Design Tokens，可继续演进为 Fluent 2 组件体系。
 
 ### 2.2 已存在的真实能力
@@ -63,11 +69,9 @@ Taichi-Flow 是面向洪水与泥石流数值模拟的本地桌面工作台。�
 | 路由 | 页面 | 核心任务 |
 | --- | --- | --- |
 | `/projects` | 项目列表 | 新建、导入、搜索和打开项目 |
-| `/projects/:projectId` | 项目概览 | 查看共享输入、方案、队列和结果摘要 |
-| `/projects/:projectId/scenarios` | 方案管理 | 管理不同参数预设及其模拟状态 |
-| `/projects/:projectId/scenarios/:scenarioId/calculate` | 计算工作台 | 输入、参数、运行和结果的主工作区 |
-| `/projects/:projectId/queue` | 模拟队列 | 安排和监控多套方案顺序执行 |
-| `/projects/:projectId/export` | 导出数据 | 选择方案、运行记录和输出数据导出 |
+| `/launch/:projectId` | 项目启动页 | 检查项目并进入编辑器 |
+| `/editor/:projectId/scenarios/:scenarioId` | 计算工作台 | 输入、参数、运行和结果的主工作区 |
+| `/projects/:projectId/*` | 兼容重定向 | 将历史项目路径重定向到当前编辑器 |
 | `/settings` | 设置 | 主题、运行环境和系统状态 |
 
 明确删除：
@@ -228,7 +232,9 @@ Project
 - 终端日志摘要，可展开查看完整日志。
 - 停止按钮及二次确认。
 
-WebSocket 用于接收运行快照；连接中断时显示“实时连接已断开，正在轮询”，并继续通过 REST 获取状态。系统不提供暂停与恢复，不应设计相关按钮。
+当前客户端通过 REST 轮询获取运行快照；后端 WebSocket 路由可在未来接入，
+但接入后仍须在断线时显示“实时连接已断开，正在轮询”并继续通过 REST 获取
+状态。系统不提供暂停与恢复，不应设计相关按钮。
 
 #### 结果模块
 
@@ -243,7 +249,8 @@ WebSocket 用于接收运行快照；连接中断时显示“实时连接已断�
 - 单文件下载与完整结果 ZIP 下载。
 - 前往“导出数据”。
 
-当前代码中的画布仍是占位预览；真实栅格解析、图层渲染和结果时序播放属于前端后续实现项，不得用伪造数值代替。
+当前代码已通过 `RasterMapViewport` 接入 OpenLayers/GeoTIFF 图层；仍未覆盖的
+结果时序播放和部分真实数据展示属于后续实现项，不得用伪造数值代替。
 
 ### 5.5 模拟队列
 
@@ -408,8 +415,8 @@ src/
 | 方案管理 | `/api/projects/{id}/scenarios` 及 duplicate/archive |
 | 队列管理 | `/api/projects/{id}/queue`、order、stop、retry |
 | 运行状态 | `/api/projects/{id}/simulations`、terminal、stop |
-| 运行实时快照 | `/ws/simulations/{run_id}` |
-| 队列实时快照 | `/ws/projects/{id}/queue` |
+| 运行实时快照合同 | `/ws/simulations/{run_id}`（当前客户端 REST 轮询） |
+| 队列实时快照合同 | `/ws/projects/{id}/queue`（当前客户端 REST 轮询） |
 | 结果 | `/api/projects/{id}/results/{simulation_id}` |
 | 导出 | `/api/projects/{id}/exports` |
 | 参数目录 | `GET /api/parameters/catalog` |
@@ -418,10 +425,10 @@ src/
 ### 10.3 当前实现需要优先修正的问题
 
 1. 多个前端中文字符串存在乱码，必须统一使用 UTF-8 并完成全量文案检查。
-2. 可视化画布目前仅绘制网格和占位信息，尚未显示真实输入与结果。
+2. 栅格画布已接入真实 OpenLayers/GeoTIFF 路径，仍需补齐结果时序播放与更广的图层覆盖。
 3. 导出页存在前端参数文件选项与后端请求字段不完全一致的问题，需按实际接口校正。
 4. 当前前端依赖中没有 Fluent UI React；可继续使用自定义组件，但 Token、交互状态和组件行为必须统一。
-5. WebSocket 能力已存在，前端适配器尚未完整使用，应实现实时优先、轮询兜底。
+5. WebSocket 能力已存在，前端适配器当前使用 REST 轮询；后续接入实时优先时必须保留轮询兜底。
 
 ## 11. 验收标准
 

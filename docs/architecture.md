@@ -22,11 +22,8 @@ published into an `InputRevision`. A scenario references exactly one revision
 and stores both its parameter patch and server-computed effective snapshot.
 
 Scenarios become immutable after completion/archive or any run history. Copying
-is the supported edit path. Adding a scenario creates a persisted `waiting`
-item; an explicit queue-start transaction releases the current waiting batch as
-`queued`. New items added during a run remain waiting for the next batch.
-Service restart marks `starting`, `running`, and `stopping` work as
-`interrupted`; the user must retry.
+is the supported edit path. Queue state is persisted, and service restart marks
+`starting`, `running`, and `stopping` work as `interrupted`; the user must retry.
 
 The scheduler keeps project FIFO and runtime configuration signatures separate.
 It serializes runtime initialization/reset/disposal and never mixes incompatible
@@ -39,20 +36,21 @@ Taichi initialization signatures in one active runtime set.
 | Projects | `/api/projects`, `/api/projects/import`, `/api/projects/{id}` |
 | Inputs | `/api/projects/{id}/uploads/{family}`, `/input-revisions` |
 | Scenarios | `/api/projects/{id}/scenarios` and duplicate/archive actions |
-| Queue | `/api/projects/{id}/queue`, `/queue/start`, `/queue/order`, batch delete, stop/retry |
+| Queue | `/api/projects/{id}/queue`, `/queue/order`, cancel/retry |
 | Runs | `/api/projects/{id}/simulations`, run detail/stop/terminal |
 | Results | `/api/projects/{id}/results/{run_id}` and safe file downloads |
 | Exports | `/api/projects/{id}/exports` and asynchronous download |
-| Realtime | `/ws/simulations/{run_id}`, `/ws/projects/{id}/queue` |
+| Realtime contract | `/ws/simulations/{run_id}`, `/ws/projects/{id}/queue` (backend routes; current UI polls REST) |
 | System | `/api/health`, `/api/info`, `/api/system/metrics`, parameter catalog |
 
-Errors have the shape `{code, message, details, request_id}`. Old root upload,
-singular simulation, project alias, and old WebSocket routes are intentionally
-not mounted.
+Errors have the shape `{code, message, details, request_id}`. Legacy root upload
+and project aliases are not mounted; singular simulation routes remain as
+compatibility aliases. The current UI uses REST polling even though the
+WebSocket snapshot contract is available.
 
 ## Numerical boundary
 
-This cutover does not alter formulas, source-term ordering, dry/wet thresholds,
+The frontend/domain cutover does not alter formulas, source-term ordering, dry/wet thresholds,
 eight-direction ordering, timestep rules, or output semantics in `edda/`. The
 frontend exposes only parameter catalog entries with runtime-consumer evidence;
 parsed-only and mapped-only fields remain read-only metadata.

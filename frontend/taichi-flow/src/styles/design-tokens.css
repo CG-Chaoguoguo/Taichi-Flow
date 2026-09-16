@@ -121,6 +121,7 @@ html[data-theme="light"],
   --shadow-modal: var(--shadow-16);
   --shadow-floating: var(--shadow-16);
   --shadow-dialog: var(--shadow-16);
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.16), 0 0 2px rgba(0, 0, 0, 0.12);
 
   color-scheme: light;
 }
@@ -189,88 +190,11 @@ html[data-theme="dark"] {
   --shadow-modal: var(--shadow-16);
   --shadow-floating: var(--shadow-16);
   --shadow-dialog: var(--shadow-16);
+  --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 2px rgba(0, 0, 0, 0.32);
 
   color-scheme: dark;
 }
 
-/* 高对比度主题 — 禁用 blur，材质降级 solid */
-html[data-theme="high-contrast"] {
-  --seed-bg: #000000;
-  --seed-fg: #ffffff;
-  --seed-primary: #7170ff;
-  --seed-accent: #7170ff;
-  --seed-surface: #000000;
-  --seed-radius: 0px;
-
-  --blur-acrylic: 0px;
-  --blur-glass: 0px;
-
-  --mica-base: #000000;
-  --mica-alt: #000000;
-  --layer-fill-default: #000000;
-  --layer-fill-alt: #1a1a1a;
-  --layer-fill-selected: #1a1a1a;
-  --layer-on-acrylic: #1a1a1a;
-  --layer-stroke: #ffffff;
-  --acrylic-default: #000000;
-  --smoke-overlay: rgba(0, 0, 0, 0.8);
-
-  --color-bg-canvas: #000000;
-  --color-surface: #000000;
-  --color-surface-solid: #000000;
-  --color-surface-secondary: #000000;
-  --color-surface-tertiary: #1a1a1a;
-  --color-surface-hover: #1a1a1a;
-  --color-surface-active: #1a1a1a;
-  --color-surface-selected: #1a1a1a;
-  --color-border: #ffffff;
-  --color-border-strong: #ffffff;
-  --color-foreground: #ffffff;
-  --color-foreground-secondary: #ffffff;
-  --color-foreground-tertiary: #ffffff;
-  --color-foreground-disabled: #a0a0a0;
-  --color-brand: #7170ff;
-  --color-brand-hover: #828fff;
-  --color-brand-active: #9aa4ff;
-  --color-brand-glow: transparent;
-  --color-brand-bg-subtle: #000000;
-  --color-success: #00ff00;
-  --color-success-bg: #000000;
-  --color-warning: #ffff00;
-  --color-warning-bg: #000000;
-  --color-error: #ff0000;
-  --color-error-bg: #000000;
-  --color-info: #00ffff;
-  --color-info-bg: #000000;
-  --color-focus: #ffffff;
-
-  --glass-bg: #000000;
-  --glass-bg-subtle: #1a1a1a;
-  --glass-border: #ffffff;
-  --glass-highlight: none;
-
-  --gradient-ambient: var(--color-bg-canvas);
-
-  --shadow-2: none;
-  --shadow-8: none;
-  --shadow-16: none;
-  --shadow-rest: none;
-  --shadow-hover: none;
-  --shadow-float: none;
-  --shadow-modal: none;
-  --shadow-floating: none;
-  --shadow-dialog: none;
-
-  --radius-control: 0px;
-  --radius-card: 0px;
-  --radius-flyout: 0px;
-  --radius-small: 0px;
-  --radius-medium: 0px;
-  --radius-large: 0px;
-  --radius-xlarge: 0px;
-
-  color-scheme: dark;
-}
 
 @media (prefers-contrast: more) {
   :root {

@@ -1,18 +1,30 @@
 import "@testing-library/jest-dom/vitest";
+import "../index.css";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
-class ResizeObserverMock {
-  observe(_target: Element) {}
-  unobserve(_target: Element) {}
-  disconnect() {}
-}
+// react-resizable-panels observes its real DOM group in production. jsdom does
+// not provide ResizeObserver, so give component tests the same no-op browser
+// contract instead of failing before their assertions run.
+if (typeof window.ResizeObserver === "undefined") {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(_callback: ResizeObserverCallback) {}
 
-if (!("ResizeObserver" in globalThis)) {
-  Object.defineProperty(globalThis, "ResizeObserver", {
+    observe(_target: Element, _options?: ResizeObserverOptions): void {}
+    unobserve(_target: Element): void {}
+    disconnect(): void {}
+  }
+
+  Object.defineProperty(window, "ResizeObserver", {
     configurable: true,
-    value: ResizeObserverMock,
+    value: TestResizeObserver,
+    writable: true,
   });
 }
 
 afterEach(() => cleanup());
+
+if (!HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+}

@@ -1,4 +1,4 @@
-"""Utility functions for EDDA-Taichi."""
+"""Utility functions for Taichi-Flow."""
 
 from .coordinate_utils import (
     CoordinateTransformer,

@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("taichiFlowDesktop", Object.freeze({
   mode: readArgument("taichi-flow-mode", "preview"),
   apiUrl: readArgument("taichi-flow-api-url"),
   version: readArgument("taichi-flow-client-version"),
+  buildId: readArgument("taichi-flow-build-id"),
+  distributionMode: readArgument("taichi-flow-distribution-mode", "development"),
   apiContractVersion: Number.isFinite(apiContractVersion) ? apiContractVersion : 0,
   selectDirectory: (options = {}) => ipcRenderer.invoke("taichi-flow:select-directory", options),
 }));

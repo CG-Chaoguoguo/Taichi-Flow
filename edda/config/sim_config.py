@@ -1,6 +1,4 @@
-"""
-Configuration management for EDDA simulation.
-"""
+"""Configuration management for Taichi-Flow simulations."""
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -36,15 +34,15 @@ class HydrologyParams(BaseModel):
         ),
     )
     dfs_face_flux_variant: str = Field(
-        "asymmetric_head_guard",
+        "both_thin_weighted",
         description=(
             "Native-input DFS face-flux / wet-dry gating variant. "
-            "`asymmetric_head_guard` matches the EntireBanzigou-style "
-            "`if ((fhpredi(i)<=tol and hi>=hn) or (fhpredi(nq)<=tol and hn>=hi))` "
-            "gate with arithmetic `hbar/cvbar/frhobar` averaging. "
-            "`both_thin_weighted` matches the NO.5/NO.8/Test31-style "
-            "`if (fhpredi(i)<=tol and fhpredi(nq)<=tol)` gate with "
-            "`cellareacal`-weighted `hbar/cvbar/frhobar`."
+            "`both_thin_weighted` (BJ/NO.5 default) uses the both-thin gate with "
+            "`cellareacal`-weighted `hbar/cvbar/frhobar`. "
+            "`arithmetic_mean_chamoli` keeps the both-thin gate and weighted `hbar`, "
+            "but uses area-mean `cvbar` without depth and arithmetic `frhobar`. "
+            "`asymmetric_head_guard` matches EntireBanzigou-style asymmetric thin-front "
+            "gating with arithmetic `hbar/cvbar/frhobar`."
         ),
     )
     dfs_failure_source_variant: str = Field(
@@ -74,6 +72,110 @@ class HydrologyParams(BaseModel):
     inflow_denominator_fv_value: Optional[float] = Field(
         None,
         description="For CELSIZ_DIRECTIONAL_VELOCITY, the source-assigned fv value used in the denominator.",
+    )
+    dfs_manningbar_variant: str = Field(
+        "exponential_cv",
+        description=(
+            "Native-input DFS Manning-bar variant. "
+            "`exponential_cv` matches BJ_HXL `manningbar=manning*manningb*exp(manningm*cv)` "
+            "when `cv>cvtol`. `debrisflowmanning_cvtol` matches Chamoli `dfs.F90:417-421` "
+            "`manningbar=debrisflowmanning` in the erosion-rate branch, with a no-op "
+            "face-flux `cvbar>cvtol` assignment."
+        ),
+    )
+    dfs_dry_face_velocity_variant: str = Field(
+        "keep_velocity_bj",
+        description=(
+            "Native-input DFS dry-face predicted-velocity variant. "
+            "`keep_velocity_bj` keeps `fvpredi=dv+fv` even when the upstream cell is dry "
+            "(BJ production default). `zero_dry_face_chamoli` matches Chamoli "
+            "`dfs.F90:736-737`, zeroing `fvpredi` when the upstream cell is thinner "
+            "than `tol` before the sign-reversal branch."
+        ),
+    )
+    dfs_artivis_variant: str = Field(
+        "depth_ratio_bj",
+        description=(
+            "Native-input DFS artificial-viscosity weight variant. "
+            "`depth_ratio_bj` uses `0.02*|Δh|/(h_i+h_nq)` on every direction (BJ). "
+            "`velocity_ratio_chamoli` uses `0.02*|Δv|/(|v_nq|+|v_i|+1)` and divides "
+            "the diagonal `artivis` term by `√2` (Chamoli `dfs.F90:730-732`)."
+        ),
+    )
+    dfs_absubar_variant: str = Field(
+        "max_component_bj",
+        description=(
+            "Native-input DFS erosion/deposition velocity-magnitude (`absubar`) variant. "
+            "`max_component_bj` takes `max(vorth,vcomp)` from half-velocity `fvpredi2` (BJ). "
+            "`signed_mean_chamoli` reconstructs a signed Cartesian speed from raw `fv` "
+            "with literal `0.707` diagonals (Chamoli `dfs.F90:209-212`). "
+            "`weighted_signed_test31` preserves Test31's separate raw-`fv` signed expression "
+            "and its default-REAL `0.4142`, `0.707`, and `0.2929` weights."
+        ),
+    )
+    dfs_flow_velocity_writer_variant: str = Field(
+        "half_sum_abs_fv_bj",
+        description=(
+            "Native-input DFS Flow_velocity frame-writer variant. "
+            "`half_sum_abs_fv_bj` writes `0.5*Σ|fv1..4|` (BJ). "
+            "`absubar_chamoli` writes start-of-step `absubar` (Chamoli `dfs.F90:1408-1414`)."
+        ),
+    )
+    dfs_erosion_depth_writer_variant: str = Field(
+        "net_bed_change_bj",
+        description=(
+            "Native-input DFS Erosion_depth frame-writer variant. "
+            "`net_bed_change_bj` writes `max(eleori-ele,0)` (BJ). "
+            "`cumulative_erodph_chamoli` writes cumulative `erodph` "
+            "(Chamoli `dfs.F90:1427-1436`)."
+        ),
+    )
+    dfs_sfdf_classify_cv_variant: str = Field(
+        "previous_committed_cv",
+        description=(
+            "Native-input DFS SF/DF/FF classification Cv time-level variant. "
+            "`previous_committed_cv` uses previously accepted Cv (legacy Taichi/BJ-absent). "
+            "`predicted_step_cv_chamoli` uses this-step frhopredi1-derived cv "
+            "(Chamoli `dfs.F90:357` → `:1120-1133`)."
+        ),
+    )
+    dfs_cvlimit_variant: str = Field(
+        "tanslo_cycle_cvstar_clamp_bj",
+        description=(
+            "Native-input DFS cvlimit/rholimit update variant. "
+            "`tanslo_cycle_cvstar_clamp_bj` keeps BJ negative-tanslo cycle and "
+            "`cvlimit>cvstar` clamp. `tan_slo_unit_clamp_chamoli` recomputes from "
+            "`tan(slo)` each step and clamps `cvlimit>1` to `cvstar` "
+            "(Chamoli `dfs.F90:358-371`)."
+        ),
+    )
+    dfs_erodph_dt_variant: str = Field(
+        "accepted_dt_bj",
+        description=(
+            "Native-input DFS cumulative-erodph timestep variant. "
+            "`accepted_dt_bj` accumulates with the accepted step `dt`. "
+            "`post_dti_dt_chamoli` accumulates with the post-`dti` `dt_next` "
+            "(Chamoli `dfs.F90:1264-1272`)."
+        ),
+    )
+    dfs_barrier_flux_variant: str = Field(
+        "bj_barrier_branch",
+        description=(
+            "Native-input DFS barrier face-flux variant applied after `qq/qqmass` "
+            "are formed. `bj_barrier_branch` keeps the BJ `flexible/rigid/else` "
+            "branch (plain flux untouched without barrier grids). "
+            "`chamoli_scour_kill_or` reproduces Chamoli `dfs.F90:909-921`, where "
+            "`elseif(fvpredi(i,ii)<0 .or. rigid(nq)>0)` zeroes every negative-velocity "
+            "face whenever `fhpredi(nq)+ele(nq) < rigid(nq)+eleori(nq)`."
+        ),
+    )
+    dfs_commit_cv_eps_variant: str = Field(
+        "no_clamp_bj",
+        description=(
+            "Native-input DFS committed-cv variant. `no_clamp_bj` commits "
+            "`cv=(frho-rhow)/(rhos-rhow)` as is. `eps_clamp_chamoli` additionally "
+            "applies `where(cv<eps) cv=0.` (Chamoli `dfs.F90:1284-1285`)."
+        ),
     )
     use_fortran_absubar_velocity_state: bool = Field(
         True,
@@ -186,6 +288,18 @@ class RheologyParams(BaseModel):
     kresis: float = Field(8.0, description="Original EDDA viscous resistance coefficient")
     cs: float = Field(0.9, description="Original EDDA channel suspension coefficient")
     shallown: float = Field(0.2, description="Original EDDA shallow-flow Manning coefficient for wfs path")
+    debrisflowmanning: Optional[float] = Field(
+        None,
+        description="Chamoli-variant debris-flow Manning coefficient used when cv>cvtol in dfs.F90 erosion staging",
+    )
+    cvglacier: Optional[float] = Field(
+        None,
+        description="Original EDDA cvglacier; parsed for provenance. Chamoli dfs.F90 rhoero assignment is commented out.",
+    )
+    cvlandslide: Optional[float] = Field(
+        None,
+        description="Original EDDA cvlandslide used as triggerslide mixture concentration in dfs.F90:561",
+    )
 
 
 class ErosionParams(BaseModel):
@@ -235,6 +349,14 @@ class ZoneParams(BaseModel):
     phib: float = Field(15.0, description="Unsaturated shear strength angle (degrees)")
     kero: float = Field(1e-5, description="Erosion coefficient (m/s/Pa)")
     ctao: float = Field(10.0, description="Original EDDA ctao top-layer erosion threshold term (Pa)")
+    cvero: Optional[float] = Field(
+        None,
+        description="Zone bed volumetric concentration for erosion density (Chamoli cvero). Absent on BJ; rhoero falls back to cvstar.",
+    )
+    c_bottom: float = Field(8000.0, description="Bottom-layer cohesion (Pa); parsed for provenance, unused by original double-layer FS")
+    phi_bottom: float = Field(35.0, description="Bottom-layer internal friction angle (degrees); parsed for provenance, unused by original double-layer FS")
+    phib_bottom: float = Field(20.0, description="Bottom-layer basal friction angle (degrees); parsed for provenance, unused by original double-layer FS")
+    gamma_s_bottom: float = Field(21000.0, description="Bottom-layer unit weight (N/m³); parsed for provenance, unused by original double-layer FS")
     ltstar: float = Field(1.0, description="Top layer thickness (m)")
     lbstar: float = Field(1.0, description="Bottom layer thickness (m)")
 
@@ -281,6 +403,19 @@ class ComputeParams(BaseModel):
     )
     chunk_size: Optional[int] = Field(None, description="Chunk size for large grids")
     num_threads: Optional[int] = Field(None, description="Number of CPU threads")
+    async_output: bool = Field(
+        True,
+        description="Write GeoTIFF/ASCII result families on a background thread during solver.run()",
+    )
+    write_geotiff_frames: bool = Field(
+        True,
+        description="Write convenience GeoTIFF frames (depth/velocity/concentration) in addition to EDDA ASCII families",
+    )
+    numerical_observe_stride: int = Field(
+        20,
+        ge=1,
+        description="Sample volume-conservation diagnostics every N candidate steps (output frames are always sampled)",
+    )
 
 
 class RainfallConfig(BaseModel):
@@ -334,6 +469,15 @@ class NativeInputConfig(BaseModel):
     files: Dict[str, NativeInputFileConfig] = Field(default_factory=dict, description="Resolved native input families and their production status")
 
 
+class EddaControlsConfig(BaseModel):
+    """Frozen effective EDDA switch controls carried into one Simulation Run."""
+
+    registry_version: str = Field("1.0.0", description="Canonical EDDA switch registry version")
+    run_controls: Dict[str, Any] = Field(default_factory=dict, description="User and process controls keyed by canonical switch name")
+    output_controls: Dict[str, Any] = Field(default_factory=dict, description="Legacy and whole-process output controls keyed by canonical switch name")
+    extension_controls: Dict[str, Any] = Field(default_factory=dict, description="Version-specific non-core controls such as later hydrosave extensions")
+
+
 class SimulationConfig(BaseModel):
     """Complete simulation configuration."""
     # Input files
@@ -370,17 +514,26 @@ class SimulationConfig(BaseModel):
     # Native/reference input-chain metadata
     native_inputs: Optional[NativeInputConfig] = Field(None, description="Formal S1 native input-chain descriptors and provenance")
 
+    # Original EDDA run/output controls
+    edda: EddaControlsConfig = Field(default_factory=EddaControlsConfig)
+
     @classmethod
     def from_yaml(cls, yaml_file: str) -> "SimulationConfig":
         """Load configuration from YAML file."""
-        with open(yaml_file, 'r') as f:
+        with open(yaml_file, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
         return cls(**data)
 
     def to_yaml(self, yaml_file: str):
         """Save configuration to YAML file."""
-        with open(yaml_file, 'w') as f:
-            yaml.dump(self.model_dump(), f, default_flow_style=False)
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(
+                self.model_dump(),
+                f,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False,
+            )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SimulationConfig":
@@ -396,8 +549,8 @@ class SimulationConfig(BaseModel):
 def create_example_config(output_file: str = "config_example.yaml"):
     """Create an example configuration file."""
     config = SimulationConfig(
-        dem_file="examples/data/dem.tif",
-        rainfall_file="examples/data/rainfall.csv",
+        dem_file="examples/data/dev_tiny_dem.asc",
+        rainfall_file="examples/data/dev_rainfall.csv",
         output_dir="./output",
     )
     config.to_yaml(output_file)

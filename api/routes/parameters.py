@@ -1,4 +1,4 @@
-"""Parameter catalog endpoints for Taichi Flow."""
+"""Parameter catalog endpoints for Taichi-Flow."""
 from __future__ import annotations
 
 from fastapi import APIRouter

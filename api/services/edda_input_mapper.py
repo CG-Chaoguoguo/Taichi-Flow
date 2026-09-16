@@ -12,6 +12,15 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
+from api.services.compute_policy_resolver import (
+    FSSIMUL_PATH,
+    VARIANT_PATH,
+    annotate_failure_source_registry,
+    resolve_compute_policy,
+    resolution_from_parsed,
+    should_attempt_native_unsfin_provider,
+)
+from api.services.edda_switch_registry import snapshot_config_payload
 from api.services.native_sidecar_loader import (
     find_precomputed_unsfin_artifacts,
     load_inflow_runtime_payload,
@@ -22,11 +31,19 @@ from api.services.reference_config_parser import ReferenceConfigParseResult
 from api.services.scenario_config_overrides import apply_scenario_overrides
 from edda.config.sim_config import SimulationConfig
 from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
-from edda.solver.fortran_literals import FORTRAN_DEG2RAD
+from edda.solver.fortran_literals import FORTRAN_DEG2RAD, default_real
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _fortran_assigned_real(value: float) -> float:
+    """Widen a dfs.F90 assignment: integer literals stay exact, unsuffixed reals follow default REAL."""
+    number = float(value)
+    if number == int(number):
+        return float(int(number))
+    return default_real(number)
 
 
 def _deep_merge(base: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -299,7 +316,13 @@ def _any_exists(parsed: ReferenceConfigParseResult, family: str) -> bool:
     return bool(ref and any(ref.exists))
 
 
-def _build_reference_input_source_registry(parsed: ReferenceConfigParseResult) -> Dict[str, Dict[str, Any]]:
+def _build_reference_input_source_registry(
+    parsed: ReferenceConfigParseResult,
+    *,
+    config_overrides: Optional[Dict[str, Any]] = None,
+    global_gates: Optional[Dict[str, Any]] = None,
+    strict_reference: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     depth_file_exists = _any_exists(parsed, "depfil")
     rizero_file_exists = _any_exists(parsed, "rizerofil")
     manning_file_exists = _any_exists(parsed, "manningfil")
@@ -361,7 +384,13 @@ def _build_reference_input_source_registry(parsed: ReferenceConfigParseResult) -
 
     failure_schedule_locator = None
     failure_schedule_present = False
-    if parsed.dfs_failure_source_variant == "precomputed_unsfin_schedule":
+    policy_resolution = resolution_from_parsed(
+        parsed,
+        global_gates=global_gates,
+        config_overrides=config_overrides,
+        strict_reference=strict_reference,
+    )
+    if str((policy_resolution.effective or {}).get("mode")) == "precomputed":
         failure_schedule_locator = find_precomputed_unsfin_artifacts(Path(parsed.reference_base_dir))
         failure_schedule_present = bool(failure_schedule_locator.get("all_required_present"))
 
@@ -382,33 +411,36 @@ def _build_reference_input_source_registry(parsed: ReferenceConfigParseResult) -
             "exists_on_disk": bool(parsed.dfs_face_flux_variant_source),
             "status_basis": parsed.dfs_face_flux_variant_basis,
         },
-        "dfs_failure_source_variant": {
-            "family": "dfs.F90",
-            "state": "file_backed" if parsed.dfs_failure_source_variant_source else "config_fallback",
-            "selected_source": parsed.dfs_failure_source_variant,
-            "path": parsed.dfs_failure_source_variant_source,
-            "exists_on_disk": bool(parsed.dfs_failure_source_variant_source),
-            "status_basis": parsed.dfs_failure_source_variant_basis,
-            "schedule_provider": (
-                "original_tfail_artifacts"
-                if failure_schedule_present
-                else "missing_original_tfail_artifacts"
-                if parsed.dfs_failure_source_variant == "precomputed_unsfin_schedule"
-                else None
-            ),
-            "schedule_loaded": False if parsed.dfs_failure_source_variant == "precomputed_unsfin_schedule" else None,
-            "artifact_locator": failure_schedule_locator,
-            "runtime_active": parsed.dfs_failure_source_variant != "precomputed_unsfin_schedule",
-            "runtime_equivalent_implemented": parsed.dfs_failure_source_variant != "precomputed_unsfin_schedule",
-            "blocked_reason": (
-                "Bundled source requests the original `unsfin` precomputed failure schedule "
-                "(`gindx/tfail/fdepth`). The current backend can consume externally supplied "
-                "original artifacts, but this case has not provided the validated artifact set."
-                if parsed.dfs_failure_source_variant == "precomputed_unsfin_schedule"
-                and not failure_schedule_present
-                else None
-            ),
-        },
+        "dfs_failure_source_variant": annotate_failure_source_registry(
+            {
+                "family": "dfs.F90",
+                "state": "file_backed" if parsed.dfs_failure_source_variant_source else "config_fallback",
+                "selected_source": parsed.dfs_failure_source_variant or None,
+                "path": parsed.dfs_failure_source_variant_source,
+                "exists_on_disk": bool(parsed.dfs_failure_source_variant_source),
+                "status_basis": parsed.dfs_failure_source_variant_basis,
+                "schedule_provider": (
+                    "uploaded_schedule"
+                    if failure_schedule_present
+                    else "none"
+                    if str((policy_resolution.effective or {}).get("mode")) == "precomputed"
+                    else None
+                ),
+                "schedule_loaded": False if str((policy_resolution.effective or {}).get("mode")) == "precomputed" else None,
+                "artifact_locator": failure_schedule_locator,
+                "runtime_active": parsed.dfs_failure_source_variant != "precomputed_unsfin_schedule",
+                "runtime_equivalent_implemented": parsed.dfs_failure_source_variant != "precomputed_unsfin_schedule",
+                "blocked_reason": (
+                    "Bundled source requests the original `unsfin` precomputed failure schedule "
+                    "(`gindx/tfail/fdepth`). The current backend can consume externally supplied "
+                    "original artifacts, but this case has not provided the validated artifact set."
+                    if str((policy_resolution.effective or {}).get("mode")) == "precomputed"
+                    and not failure_schedule_present
+                    else None
+                ),
+            },
+            policy_resolution,
+        ),
         "inflow_denominator_variant": {
             "family": "dfs.F90",
             "state": "file_backed" if parsed.inflow_denominator_variant_source else "config_fallback",
@@ -418,6 +450,94 @@ def _build_reference_input_source_registry(parsed: ReferenceConfigParseResult) -
             "status_basis": parsed.inflow_denominator_variant_basis,
             "direction": parsed.inflow_denominator_direction,
             "fv_component_if_used": parsed.inflow_denominator_fv_value,
+        },
+        "dfs_manningbar_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_manningbar_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_manningbar_variant,
+            "path": parsed.dfs_manningbar_variant_source,
+            "exists_on_disk": bool(parsed.dfs_manningbar_variant_source),
+            "status_basis": parsed.dfs_manningbar_variant_basis,
+        },
+        "dfs_dry_face_velocity_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_dry_face_velocity_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_dry_face_velocity_variant,
+            "path": parsed.dfs_dry_face_velocity_variant_source,
+            "exists_on_disk": bool(parsed.dfs_dry_face_velocity_variant_source),
+            "status_basis": parsed.dfs_dry_face_velocity_variant_basis,
+        },
+        "dfs_artivis_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_artivis_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_artivis_variant,
+            "path": parsed.dfs_artivis_variant_source,
+            "exists_on_disk": bool(parsed.dfs_artivis_variant_source),
+            "status_basis": parsed.dfs_artivis_variant_basis,
+        },
+        "dfs_absubar_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_absubar_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_absubar_variant,
+            "path": parsed.dfs_absubar_variant_source,
+            "exists_on_disk": bool(parsed.dfs_absubar_variant_source),
+            "status_basis": parsed.dfs_absubar_variant_basis,
+        },
+        "dfs_flow_velocity_writer_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_flow_velocity_writer_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_flow_velocity_writer_variant,
+            "path": parsed.dfs_flow_velocity_writer_variant_source,
+            "exists_on_disk": bool(parsed.dfs_flow_velocity_writer_variant_source),
+            "status_basis": parsed.dfs_flow_velocity_writer_variant_basis,
+        },
+        "dfs_erosion_depth_writer_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_erosion_depth_writer_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_erosion_depth_writer_variant,
+            "path": parsed.dfs_erosion_depth_writer_variant_source,
+            "exists_on_disk": bool(parsed.dfs_erosion_depth_writer_variant_source),
+            "status_basis": parsed.dfs_erosion_depth_writer_variant_basis,
+        },
+        "dfs_sfdf_classify_cv_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_sfdf_classify_cv_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_sfdf_classify_cv_variant,
+            "path": parsed.dfs_sfdf_classify_cv_variant_source,
+            "exists_on_disk": bool(parsed.dfs_sfdf_classify_cv_variant_source),
+            "status_basis": parsed.dfs_sfdf_classify_cv_variant_basis,
+        },
+        "dfs_cvlimit_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_cvlimit_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_cvlimit_variant,
+            "path": parsed.dfs_cvlimit_variant_source,
+            "exists_on_disk": bool(parsed.dfs_cvlimit_variant_source),
+            "status_basis": parsed.dfs_cvlimit_variant_basis,
+        },
+        "dfs_erodph_dt_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_erodph_dt_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_erodph_dt_variant,
+            "path": parsed.dfs_erodph_dt_variant_source,
+            "exists_on_disk": bool(parsed.dfs_erodph_dt_variant_source),
+            "status_basis": parsed.dfs_erodph_dt_variant_basis,
+        },
+        "dfs_barrier_flux_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_barrier_flux_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_barrier_flux_variant,
+            "path": parsed.dfs_barrier_flux_variant_source,
+            "exists_on_disk": bool(parsed.dfs_barrier_flux_variant_source),
+            "status_basis": parsed.dfs_barrier_flux_variant_basis,
+        },
+        "dfs_commit_cv_eps_variant": {
+            "family": "dfs.F90",
+            "state": "file_backed" if parsed.dfs_commit_cv_eps_variant_source else "config_fallback",
+            "selected_source": parsed.dfs_commit_cv_eps_variant,
+            "path": parsed.dfs_commit_cv_eps_variant_source,
+            "exists_on_disk": bool(parsed.dfs_commit_cv_eps_variant_source),
+            "status_basis": parsed.dfs_commit_cv_eps_variant_basis,
         },
         "water_table_source": {
             "family": "depfil",
@@ -450,6 +570,16 @@ def _build_reference_input_source_registry(parsed: ReferenceConfigParseResult) -
             "config_value": parsed.manning_global,
             "status_basis": (
                 "Original EDDA uses raster Manning only when a usable `manningfil` exists; otherwise it falls back to the initiation/global Manning value."
+            ),
+        },
+        "triggerslide_source": {
+            "family": "triggerslide",
+            "state": "file_backed" if _first_path(parsed, "triggerslide") else "absent",
+            "selected_source": "triggerslidefil" if _first_path(parsed, "triggerslide") else None,
+            "path": _first_path(parsed, "triggerslide"),
+            "exists_on_disk": _any_exists(parsed, "triggerslide"),
+            "status_basis": (
+                "Original EDDA always reads `triggerslidefil` and injects it once in `dfs.F90` when `slide1==1 .and. tnow>0`."
             ),
         },
         "rainfall_source": {
@@ -619,7 +749,7 @@ def _build_sidecar_output_parity(
         "outflow.txt": _sidecar_entry(
             "outflow.txt",
             original_runtime_consumer="Original DFS selects sidecar-listed outflow cells, samples per-cell discharge/Cv during accepted steps, and exports `OUTNQ_*` through `soutf.F90` at end-of-run.",
-            current_runtime_evidence="Current backend can now load sidecar-selected outflow cells into a runtime observer/export chain and mark them as outflow boundaries, but generic edge outflow handling still coexists so full hydraulic parity remains partial.",
+            current_runtime_evidence="Current backend loads sidecar-selected cells into a dedicated DFS outflow mask, samples accepted-step discharge/Cv before clearing those cells, and keeps generic boundary metadata isolated; full numerical parity remains partial pending an active original/Taichi oracle comparison.",
             parity_status="partial",
         ),
         "hydrograph.txt": _sidecar_entry(
@@ -698,13 +828,20 @@ def build_reference_runtime_metadata(
     output_dir: Path,
     config_overrides: Optional[Dict[str, Any]] = None,
     top_level_overrides: Optional[Dict[str, Any]] = None,
+    *,
+    global_gates: Optional[Dict[str, Any]] = None,
+    strict_reference: bool = False,
 ) -> Tuple[SimulationConfig, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     # Apply scenario rainfall/manning overrides before building forcing/native files.
     parsed = apply_scenario_overrides(parsed, config_overrides)
     zone_ids = sorted(parsed.zones.keys())
     default_zone = parsed.zones[zone_ids[0]]
 
-    ltstar_default = 3.0 if parsed.ltstar_raw < 0 else parsed.ltstar_raw
+    ltstar_raw = float(parsed.ltstar_raw)
+    # Original EDDA initializes ltstar=0 then reads zfil when cltstar<0.
+    # Do not seed zone cells with a fake 3 m thickness before the raster lands.
+    ltstar_for_zones = 0.0 if ltstar_raw < 0 else ltstar_raw
+    ltstar_default = 3.0 if ltstar_raw < 0 else ltstar_raw
 
     zones_cfg: Dict[int, Dict[str, float]] = {}
     for zone_id in zone_ids:
@@ -736,7 +873,12 @@ def build_reference_runtime_metadata(
             "phib": zone.top.phib,
             "kero": zone.top.kero,
             "ctao": zone.top.ctao,
-            "ltstar": ltstar_default,
+            "cvero": zone.top.cvero,
+            "c_bottom": zone.bottom.c,
+            "phi_bottom": zone.bottom.phi,
+            "phib_bottom": zone.bottom.phib,
+            "gamma_s_bottom": zone.bottom.gamma_s,
+            "ltstar": ltstar_for_zones,
             "lbstar": parsed.lbstar,
         }
 
@@ -773,27 +915,50 @@ def build_reference_runtime_metadata(
             "runtime_stage": "post_initialize.native_slope_loader",
             "notes": "S1 formal slope-angle loader; no test helper dependency.",
         },
+        "triggerslide": {
+            "family": "triggerslide",
+            "path": _first_path(parsed, "triggerslide"),
+            "provenance": "reference_config",
+            "status": "production-reachable" if _first_path(parsed, "triggerslide") else "recognized-only",
+            "runtime_stage": "post_initialize.native_triggerslide_loader" if _first_path(parsed, "triggerslide") else "none",
+            "notes": (
+                "Original EDDA always reads `triggerslidefil` and injects it once in `dfs.F90` when "
+                "`slide1==1 .and. tnow>0`, independent of `fssimul`."
+            ),
+            "blocked_reason": (
+                None
+                if _first_path(parsed, "triggerslide")
+                else "This case does not declare a triggering-slide grid."
+            ),
+            "activation_condition": "Consume when the declared triggerslide raster exists; injection is independent of simulate_shallow_landslide.",
+            "status_basis": (
+                "Original `edda main program.F90:150` always reads the grid. `dfs.F90:55,559-564,1277` "
+                "adds it to `tempfsh` on the first step with `tnow>0`, then clears `slide1`."
+            ),
+        },
         "zfil": {
             "family": "zfil",
             "path": _first_path(parsed, "zfil"),
             "provenance": "reference_config",
-            "status": "partial" if parsed.ltstar_raw < 0 else "recognized-only",
+            "status": "production-reachable" if parsed.ltstar_raw < 0 else "recognized-only",
             "runtime_stage": "post_initialize.native_ltstar_loader" if parsed.ltstar_raw < 0 else "none",
             "notes": (
-                "Current backend can inject `zfil` into `ltstar_field` when `ltstar < 0`. "
-                "Original Fortran uses the same declared file for upper-layer soil thickness when `ltstar < 0`, "
-                "and reuses it as the `zmax` grid only when scalar `zmax < 0`."
+                "Original `edda main program.F90` uses the declared `zfil`/`ltstarfil` for upper-layer "
+                "soil thickness and `inierodithick=ltstar` when `ltstar < 0`. The current backend loads "
+                "the grid into `ltstar_field` and `erodible_thickness` on that branch."
+                if parsed.ltstar_raw < 0
+                else "Scalar `ltstar` is active; the current backend does not consume `zfil` when the ltstar fallback is not requested."
             ),
             "blocked_reason": (
                 None
                 if parsed.ltstar_raw < 0
                 else "Scalar `ltstar` is active; the current backend does not consume `zfil` when the ltstar fallback is not requested."
             ),
-            "activation_condition": "Current backend only attempts the `zfil` loader when `ltstar_raw < 0` and double-layer runtime is enabled.",
+            "activation_condition": "Activate when `ltstar_raw < 0` (original ltstarfil branch).",
             "status_basis": (
-                "Original `edda main program.F90` uses the declared `zfil` file for `ltstar` when `ltstar < 0` "
-                "and for `zmax` when `zmax < 0`. Current backend only closes the `ltstar` branch, so treat the family "
-                "as partial semantic alignment overall."
+                "Original and current backends activate the `zfil`/`ltstarfil` branch when `ltstar < 0`."
+                if parsed.ltstar_raw < 0
+                else "Scalar `ltstar` is active; `zfil` remains provenance-only."
             ),
         },
         "manningfil": {
@@ -848,6 +1013,58 @@ def build_reference_runtime_metadata(
             "activation_condition": "Consume `rizerofil` only when the original scalar fallback is disabled (`rizero < 0`) and a usable raster exists on disk.",
             "status_basis": "Original `steady.f90`, `inidoublelayer.F90`, and `dfs.F90` consume `rizero(i)`; current backend now seeds the same per-cell initialization path without changing runtime formulas.",
         },
+        "rigidfil": {
+            "family": "rigidfil",
+            "path": _first_path(parsed, "rigidfil"),
+            "provenance": "reference_config",
+            "status": (
+                "production-reachable"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "rigidfil")
+                else "recognized-only"
+            ),
+            "runtime_stage": (
+                "post_initialize.native_barrier_loader"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "rigidfil")
+                else "none"
+            ),
+            "notes": (
+                "Original EDDA reads `rigidfil` only when `barriersimul` is true; "
+                "current backend loads the raster into `fields.rigid` on that same branch."
+            ),
+            "blocked_reason": (
+                None
+                if parsed.flags.get("simulate_barrier")
+                else "barriersimul is false; rigidfil remains provenance-only."
+            ),
+            "activation_condition": "Consume when `simulate_barrier` is true and the raster exists on disk.",
+            "status_basis": "Original `edda main program.F90:306-325` reads `rigidfil` only when `barriersimul` is true.",
+        },
+        "flexiblefil": {
+            "family": "flexiblefil",
+            "path": _first_path(parsed, "flexiblefil"),
+            "provenance": "reference_config",
+            "status": (
+                "production-reachable"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "flexiblefil")
+                else "recognized-only"
+            ),
+            "runtime_stage": (
+                "post_initialize.native_barrier_loader"
+                if parsed.flags.get("simulate_barrier") and _first_path(parsed, "flexiblefil")
+                else "none"
+            ),
+            "notes": (
+                "Original EDDA reads `flexiblefil` only when `barriersimul` is true; "
+                "current backend loads the raster into `fields.flexible` on that same branch."
+            ),
+            "blocked_reason": (
+                None
+                if parsed.flags.get("simulate_barrier")
+                else "barriersimul is false; flexiblefil remains provenance-only."
+            ),
+            "activation_condition": "Consume when `simulate_barrier` is true and the raster exists on disk.",
+            "status_basis": "Original `edda main program.F90:306-325` reads `flexiblefil` only when `barriersimul` is true.",
+        },
         "nxtfil": {
             "family": "nxtfil",
             "path": _first_path(parsed, "nxtfil"),
@@ -898,10 +1115,10 @@ def build_reference_runtime_metadata(
             "provenance": "reference_config",
             "status": "partial",
             "runtime_stage": "post_initialize.outflow_sidecar_loader",
-            "notes": "Current backend can now load the original outflow-cell sidecar into a selected-cell outflow observer/export chain, but full hydraulic parity with original outflow-only routing is still partial.",
-            "blocked_reason": "Current backend still keeps generic edge/outflow handling alongside the sidecar-selected observer path, so original hydraulic parity remains incomplete.",
+            "notes": "Current backend loads the original outflow-cell sidecar into a dedicated DFS mask and samples accepted-step discharge/Cv before selected cells are cleared; generic boundary metadata remains separate.",
+            "blocked_reason": "The semantic chain is implemented, but no active non-zero original/Taichi oracle comparison has yet established full numerical outflow parity for the exact BJ case.",
             "activation_condition": "Consume `outflow.txt` only when the sidecar exists and original `simulate_outflow_cell` is active.",
-            "status_basis": "Original EDDA reads `outflow.txt` when `outflowsimul` is enabled, zeroes selected outflow cells during DFS, and later writes `OUTNQ_` files; current backend now closes the selected-cell observation/export chain but not full routing parity.",
+            "status_basis": "Original EDDA reads `outflow.txt` when `outflowsimul` is enabled, samples selected cells during accepted DFS steps before zeroing them, and later writes `OUTNQ_` files; current backend closes that control/order/export chain while numerical parity remains unproven.",
             "structure_summary": _structure_summary(parsed, "outflow.txt"),
         },
         "hydrograph.txt": {
@@ -954,7 +1171,19 @@ def build_reference_runtime_metadata(
         },
     }
     rainfall_config, rainfall_audit = _build_rainfall_forcing(parsed, output_dir, native_files)
-    input_source_registry = _build_reference_input_source_registry(parsed)
+    policy_resolution = resolution_from_parsed(
+        parsed,
+        global_gates=global_gates,
+        config_overrides=config_overrides,
+        strict_reference=strict_reference,
+        source_mode="reference_config",
+    )
+    input_source_registry = _build_reference_input_source_registry(
+        parsed,
+        global_gates=global_gates,
+        config_overrides=config_overrides,
+        strict_reference=strict_reference,
+    )
     failure_schedule_registry = input_source_registry.get("dfs_failure_source_variant", {})
     failure_schedule_locator = failure_schedule_registry.get("artifact_locator") or {}
     failure_schedule_artifacts_present = bool(failure_schedule_locator.get("all_required_present"))
@@ -993,6 +1222,17 @@ def build_reference_runtime_metadata(
             "inflow_denominator_variant": parsed.inflow_denominator_variant,
             "inflow_denominator_direction": parsed.inflow_denominator_direction,
             "inflow_denominator_fv_value": parsed.inflow_denominator_fv_value,
+            "dfs_manningbar_variant": parsed.dfs_manningbar_variant,
+            "dfs_dry_face_velocity_variant": parsed.dfs_dry_face_velocity_variant,
+            "dfs_artivis_variant": parsed.dfs_artivis_variant,
+            "dfs_absubar_variant": parsed.dfs_absubar_variant,
+            "dfs_flow_velocity_writer_variant": parsed.dfs_flow_velocity_writer_variant,
+            "dfs_erosion_depth_writer_variant": parsed.dfs_erosion_depth_writer_variant,
+            "dfs_sfdf_classify_cv_variant": parsed.dfs_sfdf_classify_cv_variant,
+            "dfs_cvlimit_variant": parsed.dfs_cvlimit_variant,
+            "dfs_erodph_dt_variant": parsed.dfs_erodph_dt_variant,
+            "dfs_barrier_flux_variant": parsed.dfs_barrier_flux_variant,
+            "dfs_commit_cv_eps_variant": parsed.dfs_commit_cv_eps_variant,
         },
         "soil": {
             "c": default_zone.top.c,
@@ -1046,11 +1286,14 @@ def build_reference_runtime_metadata(
             "Cv_threshold": 0.2,
             "Cv_max": parsed.cvstar,
             "limitfr": parsed.limitfr,
-            "manningb": 0.0538,
-            "manningm": 6.0896,
+            "manningb": _fortran_assigned_real(getattr(parsed, "manningb", 0.0538)),
+            "manningm": _fortran_assigned_real(getattr(parsed, "manningm", 6.0896)),
             "kresis": parsed.kresis,
             "cs": parsed.cs,
             "shallown": parsed.shallown,
+            "debrisflowmanning": parsed.debrisflowmanning,
+            "cvglacier": parsed.cvglacier,
+            "cvlandslide": parsed.cvlandslide,
         },
         "erosion": {
             "tau_c": default_zone.top.ctao,
@@ -1071,11 +1314,15 @@ def build_reference_runtime_metadata(
             "include_nodata": True,
         },
         "spatial_zones": {
-            "enabled": True,
-            "zone_file": _first_path(parsed, "zonfil"),
+            "enabled": parsed.nzon > 1,
+            "zone_file": _first_path(parsed, "zonfil") if parsed.nzon > 1 else None,
             "num_zones": len(zone_ids),
             "zones": zones_cfg,
         },
+        "edda": snapshot_config_payload(
+            parsed.switch_snapshot,
+            extension_controls=parsed.extension_flags,
+        ),
         "native_inputs": {
             "enabled": True,
             "source_mode": "reference_config",
@@ -1093,6 +1340,16 @@ def build_reference_runtime_metadata(
                 config_dict[key] = value
 
     config_dict = _deep_merge(config_dict, config_overrides)
+    policy_payload = policy_resolution.to_dict()
+    edda_controls = config_dict.setdefault("edda", {}).setdefault("run_controls", {})
+    edda_controls["simulate_shallow_landslide"] = bool(
+        policy_payload.get("effective", {}).get("simulate_shallow_landslide")
+    )
+    active_variant = policy_payload.get("effective", {}).get("active_variant")
+    configured_variant = policy_payload.get("effective", {}).get("configured_variant")
+    config_dict.setdefault("hydrology", {})["dfs_failure_source_variant"] = (
+        active_variant or configured_variant or parsed.dfs_failure_source_variant or "live_doublelayer_in_dfs"
+    )
     config = SimulationConfig.from_dict(config_dict)
     sidecar_output_parity = _build_sidecar_output_parity(parsed, native_files)
 
@@ -1108,6 +1365,7 @@ def build_reference_runtime_metadata(
         "period_source_map": parsed.period_source_map,
         "reference_case_activation": _reference_case_activation_snapshot(parsed, input_source_registry),
         "reference_output_expectations": parsed.reference_output_expectations,
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "sidecar_output_parity": sidecar_output_parity,
         "inputs": [
             _native_file_entry("reference_config", parsed.reference_config_file, "reference_config", "production-reachable", "parse.reference_config", consumed=True),
@@ -1131,6 +1389,18 @@ def build_reference_runtime_metadata(
             ),
             _native_file_entry("zonfil", config.spatial_zones.zone_file if config.spatial_zones else None, "reference_config", "production-reachable", "initialize.zone_reader", **_reference_file_state(parsed, "zonfil", input_source_registry)),
             _native_file_entry("slofil", native_files["slofil"]["path"], "reference_config", "production-reachable", "post_initialize.native_slope_loader", notes=native_files["slofil"]["notes"], **_reference_file_state(parsed, "slofil", input_source_registry)),
+            _native_file_entry(
+                "triggerslide",
+                native_files["triggerslide"]["path"],
+                "reference_config",
+                native_files["triggerslide"]["status"],
+                native_files["triggerslide"]["runtime_stage"],
+                notes=native_files["triggerslide"]["notes"],
+                blocked_reason=native_files["triggerslide"]["blocked_reason"],
+                activation_condition=native_files["triggerslide"]["activation_condition"],
+                status_basis=native_files["triggerslide"]["status_basis"],
+                **_reference_file_state(parsed, "triggerslide", input_source_registry),
+            ),
             _native_file_entry(
                 "zfil",
                 native_files["zfil"]["path"],
@@ -1159,6 +1429,8 @@ def build_reference_runtime_metadata(
             _native_file_entry("dirfil", native_files["dirfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["dirfil"]["notes"], blocked_reason=native_files["dirfil"]["blocked_reason"], activation_condition=native_files["dirfil"]["activation_condition"], status_basis=native_files["dirfil"]["status_basis"], **_reference_file_state(parsed, "dirfil", input_source_registry)),
             _native_file_entry("depfil", native_files["depfil"]["path"], "reference_config", native_files["depfil"]["status"], native_files["depfil"]["runtime_stage"], notes=native_files["depfil"]["notes"], blocked_reason=native_files["depfil"]["blocked_reason"], activation_condition=native_files["depfil"]["activation_condition"], status_basis=native_files["depfil"]["status_basis"], **_reference_file_state(parsed, "depfil", input_source_registry)),
             _native_file_entry("rizerofil", native_files["rizerofil"]["path"], "reference_config", native_files["rizerofil"]["status"], native_files["rizerofil"]["runtime_stage"], notes=native_files["rizerofil"]["notes"], blocked_reason=native_files["rizerofil"]["blocked_reason"], activation_condition=native_files["rizerofil"]["activation_condition"], status_basis=native_files["rizerofil"]["status_basis"], **_reference_file_state(parsed, "rizerofil", input_source_registry)),
+            _native_file_entry("rigidfil", native_files["rigidfil"]["path"], "reference_config", native_files["rigidfil"]["status"], native_files["rigidfil"]["runtime_stage"], notes=native_files["rigidfil"]["notes"], blocked_reason=native_files["rigidfil"]["blocked_reason"], activation_condition=native_files["rigidfil"]["activation_condition"], status_basis=native_files["rigidfil"]["status_basis"], **_reference_file_state(parsed, "rigidfil", input_source_registry)),
+            _native_file_entry("flexiblefil", native_files["flexiblefil"]["path"], "reference_config", native_files["flexiblefil"]["status"], native_files["flexiblefil"]["runtime_stage"], notes=native_files["flexiblefil"]["notes"], blocked_reason=native_files["flexiblefil"]["blocked_reason"], activation_condition=native_files["flexiblefil"]["activation_condition"], status_basis=native_files["flexiblefil"]["status_basis"], **_reference_file_state(parsed, "flexiblefil", input_source_registry)),
             _native_file_entry("nxtfil", native_files["nxtfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["nxtfil"]["notes"], blocked_reason=native_files["nxtfil"]["blocked_reason"], activation_condition=native_files["nxtfil"]["activation_condition"], status_basis=native_files["nxtfil"]["status_basis"], **_reference_file_state(parsed, "nxtfil", input_source_registry)),
             _native_file_entry("ndxfil", native_files["ndxfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["ndxfil"]["notes"], blocked_reason=native_files["ndxfil"]["blocked_reason"], activation_condition=native_files["ndxfil"]["activation_condition"], status_basis=native_files["ndxfil"]["status_basis"], **_reference_file_state(parsed, "ndxfil", input_source_registry)),
             _native_file_entry("dscfil", native_files["dscfil"]["path"], "reference_config", "recognized-only", "none", notes=native_files["dscfil"]["notes"], blocked_reason=native_files["dscfil"]["blocked_reason"], activation_condition=native_files["dscfil"]["activation_condition"], status_basis=native_files["dscfil"]["status_basis"], **_reference_file_state(parsed, "dscfil", input_source_registry)),
@@ -1170,7 +1442,8 @@ def build_reference_runtime_metadata(
             _native_file_entry("swmm.txt", native_files["swmm.txt"]["path"], "reference_config", native_files["swmm.txt"]["status"], native_files["swmm.txt"]["runtime_stage"], notes=native_files["swmm.txt"]["notes"], blocked_reason=native_files["swmm.txt"]["blocked_reason"], activation_condition=native_files["swmm.txt"]["activation_condition"], status_basis=native_files["swmm.txt"]["status_basis"], structure_summary=native_files["swmm.txt"].get("structure_summary"), **_reference_file_state(parsed, "swmm.txt", input_source_registry)),
         ],
     }
-    if parsed.dfs_failure_source_variant == "precomputed_unsfin_schedule":
+    runtime_input_manifest["compute_policy_resolution"] = policy_resolution.to_dict()
+    if str((policy_resolution.effective or {}).get("mode")) == "precomputed":
         runtime_input_manifest["inputs"].append(
             _native_file_entry(
                 "precomputed_unsfin_schedule",
@@ -1212,6 +1485,7 @@ def build_reference_runtime_metadata(
         "input_source_registry": input_source_registry,
         "reference_case_activation": _reference_case_activation_snapshot(parsed, input_source_registry),
         "reference_output_expectations": parsed.reference_output_expectations,
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "sidecar_output_parity": sidecar_output_parity,
         "reference_config_sidecars": {
             family: native_files[family]["structure_summary"]
@@ -1223,6 +1497,7 @@ def build_reference_runtime_metadata(
             "zmax": "Scalar `zmax` was parsed from the reference config, but no canonical current-backend consumer exists.",
         },
         "rainfall_audit": rainfall_audit,
+        "compute_policy_resolution": policy_resolution.to_dict(),
     }
 
     provenance = {
@@ -1231,6 +1506,7 @@ def build_reference_runtime_metadata(
         "helper_fallback_used": False,
         "reference_config_file": parsed.reference_config_file,
         "reference_config_audit": parsed.to_audit_dict(),
+        "switch_snapshot": parsed.switch_snapshot.to_dict(),
         "reference_output_expectations": parsed.reference_output_expectations,
         "sidecar_output_parity": sidecar_output_parity,
         "input_source_registry": input_source_registry,
@@ -1238,6 +1514,7 @@ def build_reference_runtime_metadata(
         "period_source_map": parsed.period_source_map,
         "manning_source": parsed.manning_source,
         "unsupported_flags": parsed.unsupported_flags,
+        "compute_policy_resolution": policy_resolution.to_dict(),
     }
 
     return config, effective_config, runtime_input_manifest, provenance
@@ -1299,6 +1576,23 @@ def build_direct_runtime_metadata(config: SimulationConfig) -> Tuple[Dict[str, A
             "status_basis": "Direct API payload mode does not imply original `inflow.txt` sidecar semantics unless a dedicated sidecar contract is supplied.",
         },
     }
+    direct_policy = resolve_compute_policy(
+        {
+            FSSIMUL_PATH: (getattr(config.edda, "run_controls", {}) or {}).get("simulate_shallow_landslide"),
+            VARIANT_PATH: getattr(config.hydrology, "dfs_failure_source_variant", None),
+        },
+        source_mode="direct_api",
+        strict_reference=False,
+    )
+    input_source_registry["dfs_failure_source_variant"] = annotate_failure_source_registry(
+        {
+            "family": "dfs_failure_source_variant",
+            "state": "config_fallback",
+            "selected_source": getattr(config.hydrology, "dfs_failure_source_variant", None),
+            "status_basis": "Direct API compatibility mode uses the canonical SimulationConfig variant; no bundled Fortran topology is inferred.",
+        },
+        direct_policy,
+    )
     if native_path("manningfil"):
         input_source_registry["manning_source"].update(
             {
@@ -1347,6 +1641,7 @@ def build_direct_runtime_metadata(config: SimulationConfig) -> Tuple[Dict[str, A
         "source_mode": "api_payload",
         "helper_fallback_used": False,
         "input_source_registry": input_source_registry,
+        "compute_policy_resolution": direct_policy.to_dict(),
         "inputs": [
             _native_file_entry("demfil", config.dem_file, "api_payload", "production-reachable", "initialize.dem_reader", consumed=False, status_basis="Direct API payload provides the DEM path using canonical backend config fields."),
         ],
@@ -1431,6 +1726,7 @@ def build_direct_runtime_metadata(config: SimulationConfig) -> Tuple[Dict[str, A
         "source_mode": "api_payload",
         "config": config.to_dict(),
         "input_source_registry": input_source_registry,
+        "compute_policy_resolution": direct_policy.to_dict(),
     }
     provenance = {
         "generated_at": _timestamp(),
@@ -1438,6 +1734,7 @@ def build_direct_runtime_metadata(config: SimulationConfig) -> Tuple[Dict[str, A
         "helper_fallback_used": False,
         "reference_config_audit": None,
         "input_source_registry": input_source_registry,
+        "compute_policy_resolution": direct_policy.to_dict(),
     }
     return effective_config, runtime_input_manifest, provenance
 
@@ -1482,12 +1779,12 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
     scalar_depthwt = float(getattr(solver.config.hydrology, "depthwt_initial", 0.0))
     scalar_rizero = float(getattr(solver.config.hydrology, "rizero_initial", 0.0))
 
-    for family in ("slofil", "manningfil", "zfil", "depfil", "rizerofil"):
+    for family in ("slofil", "manningfil", "zfil", "depfil", "rizerofil", "triggerslide", "rigidfil", "flexiblefil"):
         entry = next((item for item in runtime_input_manifest.get("inputs", []) if item.get("family") == family), None)
         if not entry or not entry.get("path"):
             continue
         branch_active = entry.get("original_branch_active")
-        if family in {"depfil", "rizerofil"} and branch_active is False:
+        if family in {"depfil", "rizerofil", "rigidfil", "flexiblefil"} and branch_active is False:
             _mark_manifest_entry(
                 runtime_input_manifest,
                 family,
@@ -1563,6 +1860,24 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
             _mark_manifest_entry(runtime_input_manifest, "slofil", consumed=True, missing_on_disk=False, default_substitution_used=False)
             continue
 
+        if family == "triggerslide":
+            fill_value = 0.0
+            trigger_grid = fill_raster_nodata(grid, nodata_value, fill_value)
+            trigger_np = trigger_grid.T.astype(solver.numpy_float_dtype)
+            solver.dfs_dynamic_wave.set_triggerslide_field(trigger_np)
+            _mark_manifest_entry(
+                runtime_input_manifest,
+                "triggerslide",
+                consumed=True,
+                production_status="production-reachable",
+                runtime_stage="post_initialize.native_triggerslide_loader",
+                missing_on_disk=False,
+                default_substitution_used=False,
+                current_backend_branch_active=True,
+                notes="Triggering-slide grid loaded for the original one-shot dfs.F90 injection when tnow>0.",
+            )
+            continue
+
         if family == "manningfil":
             if entry.get("production_status") == "fallback-to-global":
                 _mark_manifest_entry(
@@ -1585,24 +1900,40 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
             continue
 
         if family == "zfil":
-            if not getattr(solver, "double_layer", None):
-                _mark_manifest_entry(
-                    runtime_input_manifest,
-                    "zfil",
-                    consumed=False,
-                    missing_on_disk=False,
-                    default_substitution_used=True,
-                    notes="Reference `zfil` was recognized but the current run did not enable double-layer runtime consumption.",
-                )
-                continue
-            fill_value = _median_fill_value(grid, nodata_value, fallback=float(solver.config.soil.double_layer.ltstar))
-            ltstar_grid = fill_raster_nodata(grid, nodata_value, fill_value)
+            # Chamoli/original: ltstar<0 reads ltstarfil into ltstar and
+            # inierodithick=ltstar (edda main program.F90:174-190). Unread /
+            # NODATA cells stay 0; negatives clamp to 0 for erodible thickness.
+            # Do not median-fill NODATA — that would invent glacier thickness
+            # on cells Fortran left at zero.
+            ltstar_grid = np.array(grid, dtype=np.float64, copy=True)
+            invalid = ~np.isfinite(ltstar_grid)
+            if nodata_value is not None:
+                invalid |= np.isclose(ltstar_grid, nodata_value)
+            ltstar_grid = np.where(invalid, 0.0, ltstar_grid)
             ltstar_np = ltstar_grid.T.astype(solver.numpy_float_dtype)
             solver.fields.ltstar_field.from_numpy(ltstar_np)
-            rikzero_np = solver.double_layer.build_initial_rikzero_field(solver.config.hydrology.rizero_initial)
-            solver.double_layer.initialize_double_layer(rikzero_np.astype(solver.numpy_float_dtype))
-            solver.dfs_dynamic_wave.set_initial_rikzero_field(rikzero_np)
-            _mark_manifest_entry(runtime_input_manifest, "zfil", consumed=True, missing_on_disk=False, default_substitution_used=False)
+            erodible_np = np.maximum(ltstar_np.astype(np.float64, copy=False), 0.0).astype(
+                solver.numpy_float_dtype, copy=False
+            )
+            solver.fields.erodible_thickness.from_numpy(erodible_np)
+            if hasattr(solver.fields, "temp_erodible_thickness"):
+                solver.fields.temp_erodible_thickness.from_numpy(erodible_np)
+            if getattr(solver, "double_layer", None):
+                rikzero_np = solver.double_layer.build_initial_rikzero_field(solver.config.hydrology.rizero_initial)
+                solver.double_layer.initialize_double_layer(rikzero_np.astype(solver.numpy_float_dtype))
+                solver.dfs_dynamic_wave.set_initial_rikzero_field(rikzero_np)
+            _mark_manifest_entry(
+                runtime_input_manifest,
+                "zfil",
+                consumed=True,
+                missing_on_disk=False,
+                default_substitution_used=False,
+                current_backend_branch_active=True,
+                notes=(
+                    "ltstar/upper-layer thickness grid loaded into ltstar_field and "
+                    "erodible_thickness (original inierodithick=ltstar)."
+                ),
+            )
             continue
 
         if family == "depfil":
@@ -1642,6 +1973,31 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                 current_backend_branch_active=True,
                 notes="Per-cell initial/background infiltration-rate grid loaded into DFS staging and steady/double-layer initialization.",
             )
+            continue
+
+        if family in {"rigidfil", "flexiblefil"}:
+            fill_value = 0.0
+            barrier_grid = fill_raster_nodata(grid, nodata_value, fill_value)
+            barrier_np = barrier_grid.T.astype(solver.numpy_float_dtype)
+            if family == "rigidfil":
+                solver.fields.rigid.from_numpy(barrier_np)
+            else:
+                solver.fields.flexible.from_numpy(barrier_np)
+            _mark_manifest_entry(
+                runtime_input_manifest,
+                family,
+                consumed=True,
+                production_status="production-reachable",
+                runtime_stage="post_initialize.native_barrier_loader",
+                missing_on_disk=False,
+                default_substitution_used=False,
+                current_backend_branch_active=True,
+                notes=(
+                    "Barrier raster loaded into DFS `fields.rigid`/`fields.flexible` "
+                    "for the original `barriersimul` face/deposition branches."
+                ),
+            )
+            continue
 
     rnoff_topoindex_enabled = str(os.environ.get("EDDA_EXPERIMENT_RNOFF_TOPOINDEX", "")).strip() == "1"
     topoindex_entries = {
@@ -1768,7 +2124,7 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                     missing_on_disk=False,
                     default_substitution_used=False,
                     current_backend_branch_active=True,
-                    notes="Sidecar-selected outflow cells were loaded into the current runtime observer/export chain and boundary registry.",
+                    notes="Sidecar-selected outflow cells were loaded into the dedicated DFS outflow mask and accepted-step observer/export chain.",
                     structure_summary={
                         **structure_summary,
                         "configured_cell_count": observer_result["configured_cell_count"],
@@ -1783,8 +2139,8 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                     sidecar_parity["configured_cell_count"] = observer_result["configured_cell_count"]
                     sidecar_parity["missing_runtime_cell_ids"] = observer_result["missing_cell_ids"]
                     sidecar_parity["current_runtime_evidence"] = (
-                        "Current backend now loads sidecar-selected outflow cells into a runtime observer/export chain and marks those cells as outflow boundaries, "
-                        "but generic edge outflow handling still coexists so full hydraulic parity remains partial."
+                        "Current backend loads sidecar-selected cells into a dedicated DFS outflow mask, samples accepted-step discharge/Cv before clearing those cells, "
+                        "and keeps generic boundary metadata isolated; full numerical parity remains partial pending an active original/Taichi oracle comparison."
                     )
 
     hydrograph_entry = next(
@@ -1896,13 +2252,46 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                     )
 
     failure_registry = runtime_input_manifest.get("input_source_registry", {}).get("dfs_failure_source_variant", {})
+    policy_resolution = runtime_input_manifest.get("compute_policy_resolution") or failure_registry
+    effective_policy_mode = str((policy_resolution.get("effective") or {}).get("mode") or failure_registry.get("effective_mode") or "disabled")
+    if str(policy_resolution.get("status") or "resolved") != "resolved":
+        issue = policy_resolution.get("blocking_issue") or {}
+        raise ValueError(str(issue.get("message") or "Failure-source policy resolution is blocked."))
+    if effective_policy_mode == "live":
+        capability_verified = bool(
+            getattr(solver, "double_layer_model", None) is not None
+            and callable(getattr(getattr(solver, "double_layer_model", None), "populate_failure_source_terms", None))
+        )
+        failure_registry["runtime_capability_verified"] = capability_verified
+        if not capability_verified:
+            failure_registry["runtime_active"] = False
+            failure_registry["runtime_equivalent_implemented"] = False
+            failure_registry["blocked_reason"] = "live_doublelayer_runtime_capability_unavailable"
+            # A control-free SimulationConfig is the documented direct-API
+            # compatibility path.  It may not carry a DoubleLayerSoilModel,
+            # so preserve the legacy mapper contract without claiming that
+            # the experimental live source was actually executed.  Strict
+            # reference/workbench runs still fail closed below.
+            if str(policy_resolution.get("source") or "") != "direct_api_compatibility":
+                raise ValueError(
+                    "live failure-source policy requires a verified double-layer runtime capability."
+                )
+            failure_registry["compatibility_fallback"] = True
+            failure_registry["notes"] = (
+                failure_registry.get("notes") or ""
+            ) + " Direct API compatibility path has no double-layer runtime capability; live source was not executed."
     truthy = {"1", "true", "yes", "on"}
-    native_provider_attempted = (
-        str(os.environ.get("EDDA_NATIVE_UNSFIN_RUNTIME_FEED", "")).strip().lower() in truthy
-        or str(os.environ.get("EDDA_ENABLE_PRODUCTION_NATIVE_UNSFIN_RUNTIME", "")).strip().lower() in truthy
-    )
     force_native_provider_generation = (
         str(os.environ.get("EDDA_FORCE_NATIVE_UNSFIN_PROVIDER_GENERATION", "")).strip().lower() in truthy
+    )
+    provider_env_requested = (
+        str(os.environ.get("EDDA_NATIVE_UNSFIN_RUNTIME_FEED", "")).strip().lower() in truthy
+        or str(os.environ.get("EDDA_ENABLE_PRODUCTION_NATIVE_UNSFIN_RUNTIME", "")).strip().lower() in truthy
+        or force_native_provider_generation
+    )
+    native_provider_attempted = provider_env_requested and should_attempt_native_unsfin_provider(
+        policy_resolution,
+        force_native_provider_generation=force_native_provider_generation,
     )
     if (
         native_provider_attempted
@@ -1957,7 +2346,7 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
         }
         failure_registry.update(
             {
-                "selected_source": "production_native_unsfin",
+                "selected_source": failure_registry.get("selected_source") or "precomputed_unsfin_schedule",
                 "schedule_provider": "production_native_unsfin",
                 "schedule_loaded": False,
                 "runtime_active": False,
@@ -2078,7 +2467,7 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
         }
         failure_registry.update(
             {
-                "selected_source": "production_native_unsfin",
+                "selected_source": failure_registry.get("selected_source") or "precomputed_unsfin_schedule",
                 "schedule_provider": "production_native_unsfin",
                 "schedule_loaded": provider_result.schedule_configured_into_solver,
                 "runtime_active": provider_result.schedule_configured_into_solver,
@@ -2133,7 +2522,11 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
             ),
         )
 
-    if not native_provider_attempted and failure_registry.get("selected_source") == "precomputed_unsfin_schedule":
+    if (
+        not native_provider_attempted
+        and should_attempt_native_unsfin_provider(policy_resolution)
+        and failure_registry.get("selected_source") == "precomputed_unsfin_schedule"
+    ):
         case_dir_value = runtime_input_manifest.get("reference_base_dir")
         dem_path = next(
             (
@@ -2155,11 +2548,20 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
         artifact_paths = schedule_summary.get("artifact_paths") or {}
         registry_update = {
             "schedule_provider": (
+                "uploaded_schedule"
+                if schedule_payload.get("parse_status") == "ok"
+                else "none"
+            ),
+            "schedule_provider_detail": (
                 "original_tfail_artifacts"
                 if schedule_payload.get("parse_status") == "ok"
                 else "missing_original_tfail_artifacts"
             ),
             "schedule_loaded": schedule_payload.get("parse_status") == "ok",
+            "schedule_generated": False,
+            "schedule_validated": schedule_payload.get("parse_status") == "ok",
+            "schedule_configured_into_solver": False,
+            "schedule_consumed_by_dfs": False,
             "artifact_validation": schedule_summary,
         }
         if schedule_payload.get("parse_status") == "ok" and schedule_payload.get("runtime_arrays"):
@@ -2173,6 +2575,8 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                 {
                     "runtime_active": True,
                     "runtime_equivalent_implemented": True,
+                    "schedule_configured_into_solver": True,
+                    "schedule_consumed_by_dfs": bool(schedule_info.get("schedule_consumed_by_dfs", False)),
                     "blocked_reason": None,
                     "consumed_count": schedule_info.get("scheduled_cell_count"),
                     "schedule_runtime_diagnostics": schedule_info,
@@ -2200,6 +2604,9 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
                 {
                     "runtime_active": False,
                     "runtime_equivalent_implemented": False,
+                    "schedule_validated": False,
+                    "schedule_configured_into_solver": False,
+                    "schedule_consumed_by_dfs": False,
                     "blocked_reason": blocked_reason,
                     "consumed_count": 0,
                 }
@@ -2242,6 +2649,10 @@ def collect_runtime_source_chain_diagnostics(
     diagnostics = {
         "schedule_provider": failure_registry.get("schedule_provider"),
         "schedule_loaded": bool(failure_registry.get("schedule_loaded")),
+        "schedule_generated": bool(failure_registry.get("schedule_generated")),
+        "schedule_validated": bool(failure_registry.get("schedule_validated")),
+        "schedule_configured_into_solver": bool(failure_registry.get("schedule_configured_into_solver")),
+        "schedule_consumed_by_dfs": bool(failure_registry.get("schedule_consumed_by_dfs")),
         "runtime_active": bool(failure_registry.get("runtime_active")),
         "runtime_equivalent_implemented": bool(failure_registry.get("runtime_equivalent_implemented")),
         **solver_diag,

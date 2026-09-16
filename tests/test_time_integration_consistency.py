@@ -36,6 +36,8 @@ class _HarnessSolver(EDDASolver):
         self.fortran_tempdt = 0.0
         self.dfs_candidate_step_id = 0
         self.dfs_accepted_step_id = 0
+        self.step_lifecycle_trace_enabled = False
+        self.step_lifecycle_trace_records = []
         self._scripted_steps = list(scripted_steps)
         self.physics_dts = []
         self.output_times = []
@@ -154,3 +156,17 @@ def test_output_truncation_precedes_end_time_truncation_when_boundaries_coincide
     # dt must still survive even when the run also ends at that same time.
     assert solver.fortran_tempdt == pytest.approx(8.0)
     assert solver.time_stepper.dt_current == pytest.approx(8.0)
+
+
+def test_final_output_does_not_duplicate_an_output_boundary(monkeypatch):
+    monkeypatch.setenv("TQDM_DISABLE", "1")
+    solver = _HarnessSolver(
+        scripted_steps=[{"accepted": True, "used_dt": 5.0, "next_dt": 5.0}],
+        t_end=5.0,
+        dt_initial=5.0,
+        dt_output=5.0,
+    )
+
+    solver.run()
+
+    assert solver.output_times == [5.0]

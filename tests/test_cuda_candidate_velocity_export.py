@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.run_cuda_candidate_case import apply_flow_velocity_output_state, velocity_fields
+from edda.io.output_fields import apply_flow_velocity_output_state, velocity_fields
 
 
 class _FakeField:

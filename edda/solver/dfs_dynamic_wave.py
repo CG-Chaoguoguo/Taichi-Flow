@@ -7,12 +7,17 @@ accept/retry contract so the caller can reproduce original EDDA's fixed-step
 decrease / increase logic without mutating the accepted state on rejected steps.
 """
 
+import csv
 import hashlib
+import json
 import os
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import taichi as ti
 
+from edda.config.edda_runtime_plan import EddaRuntimeControlPlan, build_runtime_control_plan
 from edda.config.sim_config import SimulationConfig
 from edda.core.fields import EDDAFields
 from edda.io.topoindex_sidecar import (
@@ -28,6 +33,7 @@ from edda.io.stormdrain_reader import (
 )
 from edda.solver.dynamic_wave_fortran import FORTRAN_OPPOSITE_DIR, FortranDynamicWaveWorkspace
 from edda.solver.fortran_literals import (
+    DFS_ABSUBAR_DIAGONAL,
     DFS_ARTIVIS_COEFF,
     DFS_CFL_COEFF,
     DFS_CVLIMIT_BREAK,
@@ -42,8 +48,16 @@ from edda.solver.fortran_literals import (
     DFS_MANNINGM,
     DFS_MIU_BASE,
     DFS_SLOPE_BRANCH,
+    DFS_TEST31_ABSUBAR_CARDINAL_WEIGHT,
+    DFS_TEST31_ABSUBAR_DIAGONAL_GROUP_WEIGHT,
     DFS_TOL,
+    DFS_TWO_FIFTHS,
     DFS_TWO_THIRDS,
+    DFS_BARRIER_CV_HIGH,
+    DFS_BARRIER_CV_HIGH_BJ,
+    DFS_BARRIER_CV_LOW,
+    DFS_FLEXIBLE_MASS_DENSITY,
+    DFS_FLEXIBLE_VELOCITY_FACTOR,
     DFS_VOLUME_REL_TOL,
     FORTRAN_DEG2RAD,
     FORTRAN_INV_SQRT2,
@@ -387,21 +401,54 @@ class DFSDynamicWaveSolver:
         fields: EDDAFields,
         config: SimulationConfig,
         workspace: FortranDynamicWaveWorkspace,
+        *,
+        runtime_control_plan: EddaRuntimeControlPlan | None = None,
     ):
         self.fields = fields
         self.config = config
         self.workspace = workspace
+        self.runtime_control_plan = runtime_control_plan or build_runtime_control_plan(config)
+        self.simulate_rainfall = self.runtime_control_plan.run_enabled(
+            "simulate_rainfall", compatibility_default=True
+        )
+        self.simulate_infiltration = self.runtime_control_plan.run_enabled(
+            "simulate_infiltration", compatibility_default=True
+        )
+        self.simulate_outflow_cell = self.runtime_control_plan.run_enabled(
+            "simulate_outflow_cell", compatibility_default=True
+        )
+        self.simulate_shallow_landslide = self.runtime_control_plan.run_enabled(
+            "simulate_shallow_landslide", compatibility_default=True
+        )
+        self.simulate_erosion = self.runtime_control_plan.run_enabled(
+            "simulate_erosion", compatibility_default=True
+        )
+        self.simulate_separate_deposition = self.runtime_control_plan.run_enabled(
+            "simulate_water_and_solid_separately", compatibility_default=True
+        )
 
         self.fp = fields.fp
         self.g = DFS_GRAV
+        # Keep the Fortran default-REAL `0.707` in an f64 runtime field. A
+        # Python scalar inside a Taichi kernel is specialized through the
+        # compiler's default literal type, which can apply a second rounding.
+        self.absubar_diagonal_literal = ti.field(dtype=self.fp, shape=())
+        self.absubar_diagonal_literal[None] = DFS_ABSUBAR_DIAGONAL
+        # Preserve Test31's source literals as f64 runtime values too. The
+        # field boundary avoids Taichi specializing a Python literal with a
+        # different rounding before it joins the f64 expression.
+        self.absubar_test31_cardinal_literal = ti.field(dtype=self.fp, shape=())
+        self.absubar_test31_cardinal_literal[None] = DFS_TEST31_ABSUBAR_CARDINAL_WEIGHT
+        self.absubar_test31_diagonal_group_literal = ti.field(dtype=self.fp, shape=())
+        self.absubar_test31_diagonal_group_literal[None] = DFS_TEST31_ABSUBAR_DIAGONAL_GROUP_WEIGHT
         self.rhow = float(config.rheology.rho_water)
         self.rhos = float(config.rheology.rho_sediment)
         self.cvstar = float(config.rheology.Cv_max)
         self.limitfr = float(config.rheology.limitfr)
         self.kresis = float(config.rheology.kresis)
         self.cs = float(config.rheology.cs)
-        self.manningb = DFS_MANNINGB
-        self.manningm = DFS_MANNINGM
+        self.manningb = float(getattr(config.rheology, "manningb", DFS_MANNINGB))
+        self.manningm = float(getattr(config.rheology, "manningm", DFS_MANNINGM))
         self.d50 = float(config.erosion.d50)
         self.coedepo = float(config.erosion.coedepo)
         self.dt_min = float(config.time.dt_min)
@@ -414,10 +461,67 @@ class DFSDynamicWaveSolver:
         self.rizero0 = float(config.hydrology.rizero_initial)
         self.depthwt0_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
         self.rizero0_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.triggerslide_field = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.slide1 = 1
+        self.isslidetriggered = 0
+        self.triggerslide_enabled = False
+        self.cvlandslide = float(getattr(config.rheology, "cvlandslide", None) or 0.0)
+        self.debrisflowmanning = float(
+            getattr(config.rheology, "debrisflowmanning", None)
+            or config.rheology.n_manning
+        )
+        self.dfs_manningbar_variant = str(
+            getattr(config.hydrology, "dfs_manningbar_variant", "exponential_cv")
+        )
+        self.dfs_dry_face_velocity_variant = str(
+            getattr(config.hydrology, "dfs_dry_face_velocity_variant", "keep_velocity_bj")
+        )
+        self.dfs_artivis_variant = str(
+            getattr(config.hydrology, "dfs_artivis_variant", "depth_ratio_bj")
+        )
+        self.dfs_absubar_variant = str(
+            getattr(config.hydrology, "dfs_absubar_variant", "max_component_bj")
+        )
+        self.dfs_sfdf_classify_cv_variant = str(
+            getattr(config.hydrology, "dfs_sfdf_classify_cv_variant", "previous_committed_cv")
+        )
+        self.dfs_cvlimit_variant = str(
+            getattr(config.hydrology, "dfs_cvlimit_variant", "tanslo_cycle_cvstar_clamp_bj")
+        )
+        self.dfs_erodph_dt_variant = str(
+            getattr(config.hydrology, "dfs_erodph_dt_variant", "accepted_dt_bj")
+        )
+        self.dfs_barrier_flux_variant = str(
+            getattr(config.hydrology, "dfs_barrier_flux_variant", "bj_barrier_branch")
+        )
+        self.dfs_commit_cv_eps_variant = str(
+            getattr(config.hydrology, "dfs_commit_cv_eps_variant", "no_clamp_bj")
+        )
+        self.workspace.dfs_cvlimit_variant = self.dfs_cvlimit_variant
+        # dfs.F90:113/:128 seed `rhodepo` and `tempinierodithick` once before
+        # the main loop.  The seed runs on the first `step()` so every native
+        # input (erodible thickness grids) is already loaded.  A Taichi scalar
+        # (not a host flag) keeps the marker inside restart checkpoints.
+        self._persistent_source_state_seeded = False
+        self.persistent_source_state_initialized = ti.field(dtype=ti.i32, shape=())
 
         self.reject_flag = ti.field(dtype=ti.i32, shape=())
         self.suggested_dt = ti.field(dtype=self.fp, shape=())
         self.max_wave_speed = ti.field(dtype=self.fp, shape=())
+        self.step_result_pack = ti.field(dtype=self.fp, shape=4)
+        self.volume_snapshot_pack = ti.field(dtype=self.fp, shape=12)
+        self._rholimit_seeded = False
+        self._momentum_probe_enabled_host = False
+        self._momentum_probe_lightweight_host = False
+        self._rainfall_zeroed = False
+        self.capture_depo_velocity_snapshots = _env_flag("EDDA_CAPTURE_DEPO_VELOCITY")
+        self.sync_legacy_directional_velocity = _env_flag("EDDA_SYNC_LEGACY_DIRECTIONAL_VELOCITY")
+        # Observational volume-balance scalars.  These mirror the values used
+        # by the existing retry gate; they are persisted for post-run audit
+        # but never feed back into the candidate-step decision.
+        self.volume_error = ti.field(dtype=self.fp, shape=())
+        self.volume_relative_error = ti.field(dtype=self.fp, shape=())
+        self.volume_denominator = ti.field(dtype=self.fp, shape=())
         self.experimental_first_reject_short_circuit = _env_flag("EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT")
         # Source-backed original EDDA semantics. The env flag is retained only
         # for explicit ablation (`0`), not as a candidate gate.
@@ -440,20 +544,50 @@ class DFSDynamicWaveSolver:
             DFS_IFORT_INACTIVE_BARRIER_DEPTH_GATE_COMPAT_ENV, default=False
         )
         self.legacy_parity_mode = _env_flag("EDDA_LEGACY_PARITY_MODE")
-        # Source-backed original EDDA semantics.  The active dfs.F90 erosion
-        # branch consumes the scalar `cvbar` carried from the previous
-        # face-flux lifecycle rather than recomputing sfy from the local cell
-        # `cv`.  Keep this default-on for original-live parity; the env flag is
-        # retained only for explicit ablation (`0`).
-        self.legacy_cvbar_erosion_parity = self.legacy_parity_mode or _env_flag(
-            "EDDA_LEGACY_CVBAR_EROSION_PARITY", default=True
-        )
-        self.experimental_cvbar_erosion_parity = _env_flag("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY")
-        self.cvbar_erosion_parity_enabled = (
-            self.legacy_cvbar_erosion_parity or self.experimental_cvbar_erosion_parity
-        )
+        # Source-backed original EDDA semantics: the active dfs.F90 erosion
+        # branch always consumes the stale scalar `cvbar` carried from the
+        # previous face-flux lifecycle (never the local cell `cv`).
         self.legacy_previous_face_cvbar_scalar = 0.0
+        # A host-side lineage marker is observational only.  Unlike the
+        # Fortran scalar itself it deliberately starts as unknown: the first
+        # original source evaluation may consume an uninitialised local.
+        self._legacy_previous_face_cvbar_origin: dict[str, object] | None = None
+        self.erosion_probe_enabled = False
+        self.erosion_probe_cells: list[tuple[int, int]] = []
+        self.erosion_probe_records: list[dict[str, object]] = []
+        self._erosion_probe_cvbar_at_source = 0.0
+        self._erosion_probe_cvbar_origin_at_source: dict[str, object] | None = None
+        self._erosion_probe_cvbar_next_assignment = False
+        self._erosion_probe_cvbar_cfl_stop_order: int | None = None
+        self._erosion_probe_attempt_id = 0
+        self._erosion_probe_current_attempt_id: int | None = None
+        self._erosion_probe_source_buffer_terms = 5
+        self._erosion_probe_writer_path: Path | None = None
+        self._erosion_probe_writer_initialized = False
+        self._erosion_probe_writer_fields: list[str] | None = None
+        self._erosion_probe_capture_active = True
+        self._erosion_probe_diagnostics_incomplete = False
+        self._erosion_probe_write_error: str | None = None
+        self._erosion_probe_written_record_count = 0
+        self._erosion_probe_captured_record_count = 0
+        self._erosion_probe_max_records_in_memory = 4096
+        self._erosion_probe_max_cells = 32
+        self._erosion_probe_n_terms = 25
+        self.erosion_probe_count = ti.field(dtype=ti.i32, shape=())
+        self.erosion_probe_cell_i = ti.field(dtype=ti.i32, shape=self._erosion_probe_max_cells)
+        self.erosion_probe_cell_j = ti.field(dtype=ti.i32, shape=self._erosion_probe_max_cells)
+        self.erosion_probe_cell_row = ti.field(dtype=ti.i32, shape=self._erosion_probe_max_cells)
+        self.erosion_probe_cell_col = ti.field(dtype=ti.i32, shape=self._erosion_probe_max_cells)
+        self.erosion_probe_buffer = ti.field(
+            dtype=self.fp,
+            shape=(self._erosion_probe_max_cells, self._erosion_probe_n_terms),
+        )
+        self.erosion_probe_source_buffer = ti.field(
+            dtype=self.fp,
+            shape=(self._erosion_probe_max_cells, self._erosion_probe_source_buffer_terms),
+        )
         self._legacy_fortran_order_face_pairs: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._legacy_fortran_order_face_pair_order: np.ndarray | None = None
         self.first_reject_count = ti.field(dtype=ti.i32, shape=())
         self.first_reject_reason = ti.field(dtype=ti.i32, shape=())
         self.first_reject_source_i = ti.field(dtype=ti.i32, shape=())
@@ -467,6 +601,17 @@ class DFSDynamicWaveSolver:
         self.first_reject_dt = ti.field(dtype=self.fp, shape=())
         self.first_reject_value = ti.field(dtype=self.fp, shape=())
         self.first_reject_threshold = ti.field(dtype=self.fp, shape=())
+        # CUDA evaluates independent faces in parallel, whereas dfs.F90 exits
+        # its serial face loop at the first CFL violation. Keep the smallest
+        # Fortran-order face key so the legacy scalar lifecycle can preserve the
+        # same partial-loop `cvbar` assignment without serializing CUDA fluxes.
+        self.cfl_reject_fortran_order = ti.field(dtype=ti.i32, shape=())
+        # The stale source scalar must come from a face that the active CUDA
+        # face kernel actually evaluated.  Keep its Fortran-order key separate
+        # from the CFL stopping key: host-side reconstruction of the dry-face
+        # predicate can otherwise select a face that the kernel skipped.
+        self.legacy_cvbar_assignment_fortran_order = ti.field(dtype=ti.i32, shape=())
+        self.legacy_cvbar_prefix_fortran_order = ti.field(dtype=ti.i32, shape=())
         self.experimental_first_reject_early_return_count = ti.field(dtype=ti.i32, shape=())
         self.totaloutflowvolume = ti.field(dtype=self.fp, shape=())
         self.totalinfilvolume = ti.field(dtype=self.fp, shape=())
@@ -491,10 +636,24 @@ class DFSDynamicWaveSolver:
         self.cand_totalerosionvolume = ti.field(dtype=self.fp, shape=())
         self.cand_totalfsvolume = ti.field(dtype=self.fp, shape=())
         self.cand_totaldepovolume = ti.field(dtype=self.fp, shape=())
+        # `dfs.F90` records `fhpredi2(outflowcell)` and its discharge before
+        # zeroing the selected outflow cells.  Keep candidate and accepted
+        # snapshots separate so a rejected retry cannot overwrite the last
+        # accepted OUTNQ state.
+        self.outflow_candidate_depth = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_candidate_density = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_accepted_depth = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.outflow_accepted_density = ti.field(dtype=self.fp, shape=(fields.nx, fields.ny))
+        self.last_accepted_outflow_dt = 0.0
         self.double_layer_model = None
         self.initial_rikzero_field = None
         self.numpy_float_dtype = np.float64 if self.fp == ti.f64 else np.float32
-        self.use_background_flux = bool(getattr(config.hydrology, "use_background_flux_offset", False))
+        self.use_background_flux = bool(
+            self.runtime_control_plan.run_controls.get(
+                "background_flux_offset",
+                getattr(config.hydrology, "use_background_flux_offset", False),
+            )
+        )
         self.use_transient_green_ampt = bool(getattr(config.hydrology, "use_transient_green_ampt_in_dfs", False))
         self.dfs_infiltration_variant = str(getattr(config.hydrology, "dfs_infiltration_variant", "tol_clipped_fhw"))
         self.dfs_face_flux_variant = str(getattr(config.hydrology, "dfs_face_flux_variant", "both_thin_weighted"))
@@ -538,7 +697,16 @@ class DFSDynamicWaveSolver:
         )
         self.use_tol_subtracted_inflx = bool(getattr(config.hydrology, "use_tol_subtracted_inflx_in_dfs", False))
         self.use_tanslodir_carry_quirk = bool(getattr(config.compute, "use_tanslodir_carry_quirk", False))
-        self.cvlimit_seed_cvstar_clamp_enabled = _env_flag(DFS_CVLIMIT_SEED_CVSTAR_CLAMP_ENV)
+        self.dfs_cvlimit_variant = str(
+            getattr(config.hydrology, "dfs_cvlimit_variant", "tanslo_cycle_cvstar_clamp_bj")
+        )
+        # Variant takes priority over the legacy seed-only env flag.
+        self.cvlimit_seed_cvstar_clamp_enabled = (
+            self.dfs_cvlimit_variant == "tanslo_cycle_cvstar_clamp_bj"
+            and _env_flag(DFS_CVLIMIT_SEED_CVSTAR_CLAMP_ENV)
+        )
+        if self.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli":
+            self.cvlimit_seed_cvstar_clamp_enabled = False
         self._ci_candidate: np.ndarray | None = None
         self._flow_connectivity_host_cache: dict[str, np.ndarray] | None = None
         self._flow_connectivity_host_cache_version: int | None = None
@@ -838,6 +1006,44 @@ class DFSDynamicWaveSolver:
         self.rizero0_field.from_numpy(
             np.full((fields.nx, fields.ny), self.rizero0, dtype=self.numpy_float_dtype)
         )
+        self.triggerslide_field.from_numpy(
+            np.zeros((fields.nx, fields.ny), dtype=self.numpy_float_dtype)
+        )
+        self.outflow_candidate_depth.fill(0.0)
+        self.outflow_candidate_density.fill(self.rhow)
+        self.outflow_accepted_depth.fill(0.0)
+        self.outflow_accepted_density.fill(self.rhow)
+
+    def get_last_accepted_outflow_samples(
+        self,
+        cells: list[dict[str, int]],
+        *,
+        dt_used: float | None = None,
+    ) -> list[dict[str, float]]:
+        """Return original-order OUTNQ samples from the accepted pre-clear state."""
+        sample_dt = self.last_accepted_outflow_dt if dt_used is None else float(dt_used)
+        if sample_dt <= 0.0:
+            return []
+
+        density_span = self.rhos - self.rhow
+        samples: list[dict[str, float]] = []
+        for cell in cells:
+            i = int(cell["i"])
+            j = int(cell["j"])
+            depth = float(self.outflow_accepted_depth[i, j])
+            density = float(self.outflow_accepted_density[i, j])
+            cell_area = float(self.fields.cell_area_cal[i, j])
+            cv = 0.0 if density_span <= 0.0 else max((density - self.rhow) / density_span, 0.0)
+            samples.append(
+                {
+                    "cell_id": int(cell["cell_id"]),
+                    "predictor_depth": depth,
+                    "predictor_density": density,
+                    "discharge_cms": depth * cell_area / sample_dt,
+                    "cv": cv,
+                }
+            )
+        return samples
 
     def set_double_layer_model(self, double_layer_model) -> None:
         self.double_layer_model = double_layer_model
@@ -860,6 +1066,60 @@ class DFSDynamicWaveSolver:
                 f"Initial depthwt field shape {depthwt_np.shape} does not match solver shape {(self.fields.nx, self.fields.ny)}."
             )
         self.depthwt0_field.from_numpy(depthwt_np)
+
+    def set_triggerslide_field(self, trigger_field: np.ndarray | None) -> None:
+        """Load original `triggerslide` grid. Independent of `fssimul`.
+
+        Fortran: `edda main program.F90` always reads the raster; `dfs.F90:103`
+        copies it to `temptriggerslide`, then `dfs.F90:559-564` adds it once
+        when `slide1==1 .and. tnow>0`.
+        """
+        if trigger_field is None:
+            self.triggerslide_field.from_numpy(
+                np.zeros((self.fields.nx, self.fields.ny), dtype=self.numpy_float_dtype)
+            )
+            self.triggerslide_enabled = False
+            return
+        trigger_np = np.asarray(trigger_field, dtype=self.numpy_float_dtype)
+        if trigger_np.shape != (self.fields.nx, self.fields.ny):
+            raise ValueError(
+                f"Triggering-slide field shape {trigger_np.shape} does not match solver shape {(self.fields.nx, self.fields.ny)}."
+            )
+        self.triggerslide_field.from_numpy(trigger_np)
+        self.triggerslide_enabled = True
+        self.slide1 = 1
+        self.isslidetriggered = 0
+
+    def set_barrier_fields(
+        self,
+        rigid_field: np.ndarray | None,
+        flexible_field: np.ndarray | None,
+    ) -> None:
+        """Load original `rigidfil`/`flexiblefil` grids when `barriersimul` is on.
+
+        Fortran `edda main program.F90:306-325` reads the rasters only when
+        `barriersimul` is true. Absent grids stay the zero-initialized fields
+        that Chamoli treats as "no barrier".
+        """
+        shape = (self.fields.nx, self.fields.ny)
+        if rigid_field is None:
+            rigid_np = np.zeros(shape, dtype=self.numpy_float_dtype)
+        else:
+            rigid_np = np.asarray(rigid_field, dtype=self.numpy_float_dtype)
+            if rigid_np.shape != shape:
+                raise ValueError(
+                    f"Rigid barrier field shape {rigid_np.shape} does not match solver shape {shape}."
+                )
+        if flexible_field is None:
+            flexible_np = np.zeros(shape, dtype=self.numpy_float_dtype)
+        else:
+            flexible_np = np.asarray(flexible_field, dtype=self.numpy_float_dtype)
+            if flexible_np.shape != shape:
+                raise ValueError(
+                    f"Flexible barrier field shape {flexible_np.shape} does not match solver shape {shape}."
+                )
+        self.fields.rigid.from_numpy(rigid_np)
+        self.fields.flexible.from_numpy(flexible_np)
 
     def set_initial_rizero_field(self, rizero_field: np.ndarray | None) -> None:
         if rizero_field is None:
@@ -1033,6 +1293,7 @@ class DFSDynamicWaveSolver:
         self._flow_connectivity_host_cache = None
         self._flow_connectivity_host_cache_version = None
         self._legacy_fortran_order_face_pairs = None
+        self._legacy_fortran_order_face_pair_order = None
 
     def _get_flow_connectivity_numpy_cached(self) -> dict[str, np.ndarray]:
         """Return immutable host snapshots for static cell/connectivity fields.
@@ -1630,6 +1891,340 @@ class DFSDynamicWaveSolver:
     def get_erosion_step_diagnostics(self) -> list[dict[str, object]]:
         return list(self.erosion_step_diagnostics)
 
+    def configure_erosion_probe(
+        self,
+        cells: list[tuple[int, int]] | list[list[int]] | tuple[tuple[int, int], ...] | None = None,
+        *,
+        enabled: bool = True,
+        clear: bool = True,
+        output_path: str | Path | None = None,
+    ) -> dict[str, object]:
+        """Configure run-only per-cell erosion term diagnostics.
+
+        ``cells`` are ``(row, col)`` in GeoTIFF / ASC convention. Taichi fields
+        are indexed as ``(i, j) = (col, row)``.
+        """
+        self.erosion_probe_enabled = bool(enabled)
+        normalized: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for cell in cells or []:
+            if not isinstance(cell, (list, tuple)) or len(cell) != 2:
+                raise ValueError("each erosion probe cell must be exactly [row, col]")
+            if isinstance(cell[0], bool) or isinstance(cell[1], bool) or not isinstance(cell[0], (int, np.integer)) or not isinstance(cell[1], (int, np.integer)):
+                raise ValueError("erosion probe row and col must be integers")
+            row = int(cell[0])
+            col = int(cell[1])
+            if row < 0 or col < 0 or col >= int(self.fields.nx) or row >= int(self.fields.ny):
+                raise ValueError(f"probe cell ({row},{col}) is outside the DEM bounds")
+            if (row, col) in seen:
+                raise ValueError(f"duplicate erosion probe cell ({row},{col})")
+            if int(self.fields.is_nodata[col, row]) != 0:
+                raise ValueError(f"probe cell ({row},{col}) is a DEM NoData cell")
+            seen.add((row, col))
+            normalized.append((row, col))
+            if len(normalized) > self._erosion_probe_max_cells:
+                raise ValueError(f"at most {self._erosion_probe_max_cells} erosion probe cells are allowed")
+        self.erosion_probe_cells = normalized
+        self.erosion_probe_count[None] = len(normalized)
+        for index in range(self._erosion_probe_max_cells):
+            if index < len(normalized):
+                row, col = normalized[index]
+                self.erosion_probe_cell_row[index] = row
+                self.erosion_probe_cell_col[index] = col
+                self.erosion_probe_cell_i[index] = col
+                self.erosion_probe_cell_j[index] = row
+            else:
+                self.erosion_probe_cell_row[index] = -1
+                self.erosion_probe_cell_col[index] = -1
+                self.erosion_probe_cell_i[index] = 0
+                self.erosion_probe_cell_j[index] = 0
+        if clear:
+            self.erosion_probe_records = []
+            self._erosion_probe_writer_initialized = False
+            self._erosion_probe_writer_fields = None
+            self._erosion_probe_capture_active = True
+            self._erosion_probe_diagnostics_incomplete = False
+            self._erosion_probe_write_error = None
+            self._erosion_probe_written_record_count = 0
+            self._erosion_probe_captured_record_count = 0
+        self._erosion_probe_writer_path = Path(output_path) if output_path is not None else None
+        return {
+            "enabled": self.erosion_probe_enabled,
+            "probe_cells": [[row, col] for row, col in self.erosion_probe_cells],
+            "probe_count": len(self.erosion_probe_cells),
+            "writer_path": str(self._erosion_probe_writer_path) if self._erosion_probe_writer_path else None,
+        }
+
+    def get_erosion_probe_records(self) -> list[dict[str, object]]:
+        return list(self.erosion_probe_records)
+
+    def get_erosion_probe_diagnostics_status(self) -> dict[str, object]:
+        """Return probe-capture integrity separately from solver health."""
+        return {
+            "enabled": bool(self.erosion_probe_enabled),
+            "capture_active": bool(self._erosion_probe_capture_active),
+            "diagnostics_incomplete": bool(self._erosion_probe_diagnostics_incomplete),
+            "write_error": self._erosion_probe_write_error,
+            "captured_record_count": int(self._erosion_probe_captured_record_count),
+            "written_record_count": int(self._erosion_probe_written_record_count),
+            "buffered_record_count": len(self.erosion_probe_records),
+            "max_buffered_record_count": int(self._erosion_probe_max_records_in_memory),
+            "writer_path": str(self._erosion_probe_writer_path) if self._erosion_probe_writer_path else None,
+        }
+
+    def _write_erosion_probe_status(self) -> None:
+        if self._erosion_probe_writer_path is None:
+            return
+        metadata_path = self._erosion_probe_writer_path.with_name("erosion_probe_metadata.json")
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        with metadata_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(self.get_erosion_probe_diagnostics_status(), handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+
+    def flush_erosion_probe_records(self, *, force: bool = False) -> bool:
+        """Append bounded probe records without affecting numerical state.
+
+        A write failure is latched and disables further capture.  It is not a
+        solver failure, but the resulting diagnostic evidence is explicitly
+        marked incomplete and cannot be used for FIX3 acceptance.
+        """
+        if not self.erosion_probe_enabled:
+            return True
+        if not self.erosion_probe_records:
+            try:
+                self._write_erosion_probe_status()
+            except OSError as exc:
+                self._erosion_probe_diagnostics_incomplete = True
+                self._erosion_probe_write_error = f"{type(exc).__name__}: {exc}"
+                self._erosion_probe_capture_active = False
+                return False
+            return True
+        if self._erosion_probe_writer_path is None:
+            if force or len(self.erosion_probe_records) >= self._erosion_probe_max_records_in_memory:
+                self._erosion_probe_diagnostics_incomplete = True
+                self._erosion_probe_write_error = "erosion probe writer path is not configured"
+                self._erosion_probe_capture_active = False
+                return False
+            return True
+        try:
+            self._erosion_probe_writer_path.parent.mkdir(parents=True, exist_ok=True)
+            fieldnames = self._erosion_probe_writer_fields or list(self.erosion_probe_records[0])
+            self._erosion_probe_writer_fields = fieldnames
+            mode = "a" if self._erosion_probe_writer_initialized else "w"
+            with self._erosion_probe_writer_path.open(mode, newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="raise")
+                if not self._erosion_probe_writer_initialized:
+                    writer.writeheader()
+                writer.writerows(self.erosion_probe_records)
+            self._erosion_probe_writer_initialized = True
+            self._erosion_probe_written_record_count += len(self.erosion_probe_records)
+            self.erosion_probe_records = []
+            self._write_erosion_probe_status()
+            return True
+        except (OSError, ValueError) as exc:
+            self._erosion_probe_diagnostics_incomplete = True
+            self._erosion_probe_write_error = f"{type(exc).__name__}: {exc}"
+            self._erosion_probe_capture_active = False
+            return False
+
+    def close_erosion_probe_writer(self) -> bool:
+        """Finalize the additive writer at normal, stopped, or failed run end.
+
+        The CSV is opened only for each bounded flush, but the explicit close
+        state prevents a disposed solver from capturing any further records and
+        leaves an auditable terminal integrity marker.
+        """
+        if not self.erosion_probe_enabled:
+            return True
+        flushed = self.flush_erosion_probe_records(force=True)
+        self._erosion_probe_capture_active = False
+        try:
+            self._write_erosion_probe_status()
+        except OSError as exc:
+            self._erosion_probe_diagnostics_incomplete = True
+            self._erosion_probe_write_error = f"{type(exc).__name__}: {exc}"
+            return False
+        return bool(flushed and not self._erosion_probe_diagnostics_incomplete)
+
+    def _capture_erosion_probe_source_state(self) -> None:
+        if not self.erosion_probe_enabled or not self.erosion_probe_cells or not self._erosion_probe_capture_active:
+            return
+        self._capture_erosion_probe_source_state_kernel()
+
+    @ti.kernel
+    def _capture_erosion_probe_source_state_kernel(self):
+        n = self.erosion_probe_count[None]
+        for p in range(n):
+            i = self.erosion_probe_cell_i[p]
+            j = self.erosion_probe_cell_j[p]
+            self.erosion_probe_source_buffer[p, 0] = self.fields.h[i, j]
+            self.erosion_probe_source_buffer[p, 1] = self.fields.rho[i, j]
+            self.erosion_probe_source_buffer[p, 2] = self.fields.Cv[i, j]
+            self.erosion_probe_source_buffer[p, 3] = self.fields.erodible_thickness[i, j]
+            self.erosion_probe_source_buffer[p, 4] = self.fields.erosion_depth[i, j]
+
+    @staticmethod
+    def _probe_origin_fields(prefix: str, origin: dict[str, object] | None) -> dict[str, object | None]:
+        source = origin or {}
+        return {
+            f"{prefix}_origin_attempt_id": source.get("attempt_id"),
+            f"{prefix}_origin_source_row": source.get("source_row"),
+            f"{prefix}_origin_source_col": source.get("source_col"),
+            f"{prefix}_origin_source_cell_id": source.get("source_cell_id"),
+            f"{prefix}_origin_target_row": source.get("target_row"),
+            f"{prefix}_origin_target_col": source.get("target_col"),
+            f"{prefix}_origin_target_cell_id": source.get("target_cell_id"),
+            f"{prefix}_origin_direction_zero_based": source.get("direction_zero_based"),
+            f"{prefix}_origin_assignment_known": bool(origin),
+        }
+
+    def _gather_erosion_probe(
+        self,
+        *,
+        dt_used: float,
+        accepted: bool,
+        dt_next: float | None = None,
+        reject_reason: str | None = None,
+    ) -> None:
+        if not self.erosion_probe_enabled or not self.erosion_probe_cells or not self._erosion_probe_capture_active:
+            return
+        self._gather_erosion_probe_kernel(
+            float(self.current_time),
+            float(dt_used),
+            1 if accepted else 0,
+            float(getattr(self, "_erosion_probe_cvbar_at_source", self.legacy_previous_face_cvbar_scalar)),
+        )
+        count = int(self.erosion_probe_count[None])
+        buffer = np.asarray(self.erosion_probe_buffer.to_numpy()[:count], dtype=np.float64)
+        source_buffer = np.asarray(self.erosion_probe_source_buffer.to_numpy()[:count], dtype=np.float64)
+        used_origin = self._erosion_probe_cvbar_origin_at_source
+        next_origin = self._legacy_previous_face_cvbar_origin
+        t_start = float(self.current_time)
+        attempt_id = self._erosion_probe_current_attempt_id
+        for index in range(count):
+            row = buffer[index]
+            source = source_buffer[index]
+            tanslo = float(row[9])
+            predictor_cv = 0.0
+            if float(row[4]) > EPS and self.rhos > self.rhow:
+                predictor_cv = (float(row[5]) - self.rhow) / (self.rhos - self.rhow)
+            if predictor_cv < EPS:
+                predictor_cv = 0.0
+            taoc_evaluated = predictor_cv < float(row[7])
+            rate_terms_applicable = taoc_evaluated and float(row[4]) > TOL
+            if not taoc_evaluated:
+                rate_terms_reason = "cv_at_or_above_limit"
+            elif not rate_terms_applicable:
+                rate_terms_reason = "predictor_depth_at_or_below_tol"
+            else:
+                rate_terms_reason = None
+            record: dict[str, object] = {
+                    "t": float(row[0]),
+                    "dt": float(row[1]),
+                    "t_start_s": t_start,
+                    "t_end_s": t_start + float(row[1]),
+                    "dt_used_s": float(row[1]),
+                    "dt_next_s": float(dt_next) if dt_next is not None else None,
+                    "attempt_id": attempt_id,
+                    "accepted": int(row[2]),
+                    "reject_reason": reject_reason,
+                    "sample_phase": "post_commit" if accepted else "post_candidate_rejected",
+                    "row": int(row[23]),
+                    "col": int(row[24]),
+                    "source_h_m": float(source[0]),
+                    "source_rho_kg_m3": float(source[1]),
+                    "source_cv": float(source[2]),
+                    "source_erodible_thickness_m": float(source[3]),
+                    "source_erosion_depth_m": float(source[4]),
+                    "predictor_h_m": float(row[4]),
+                    "predictor_rho_kg_m3": float(row[5]),
+                    "predictor_cv": predictor_cv,
+                    "committed_h_m": float(row[3]),
+                    "committed_cv": float(row[6]),
+                    # Compatibility aliases retained for existing offline
+                    # probe readers; new consumers should use phase-labelled
+                    # source/predictor/committed fields above.
+                    "h": float(row[3]),
+                    "fhpredi1": float(row[4]),
+                    "frhopredi1": float(row[5]),
+                    "cv": float(row[6]),
+                    "cvlimit": float(row[7]),
+                    "rholimit": float(row[8]),
+                    "tanslo_dynamic": tanslo,
+                    "tanslo": tanslo,
+                    "slope_dynamic_radians": float(np.arctan(tanslo)),
+                    "slope_branch": "steep" if float(np.arctan(tanslo)) > DFS_SLOPE_BRANCH else "gentle",
+                    "absubar": float(row[10]),
+                    "cvbar_used": float(row[11]),
+                    "cvbar_scalar": float(row[11]),
+                    "cvbar_next": float(self.legacy_previous_face_cvbar_scalar),
+                    "cvbar_next_assigned": bool(self._erosion_probe_cvbar_next_assignment),
+                    # Present only for a CFL-rejected candidate.  It makes the
+                    # serial Fortran stopping point auditable without turning
+                    # an unavailable assignment into a synthetic zero.
+                    "cvbar_next_cfl_stop_order": self._erosion_probe_cvbar_cfl_stop_order,
+                    "source_taoc_evaluated": taoc_evaluated,
+                    "source_rate_terms_applicable": rate_terms_applicable,
+                    "source_rate_terms_reason": rate_terms_reason,
+                    "sfy": float(row[12]) if rate_terms_applicable else None,
+                    "sfmanning": float(row[13]) if rate_terms_applicable else None,
+                    "sfmiu": float(row[14]) if rate_terms_applicable else None,
+                    "tao": float(row[15]) if rate_terms_applicable else None,
+                    "taoc": float(row[16]) if taoc_evaluated else None,
+                    "erorate_raw": float(row[17]),
+                    "erorate_rholimit_clamped": float(row[18]),
+                    "erorate_cap_clamped": float(row[19]),
+                    "committed_erodible_thickness_m": float(row[20]),
+                    "committed_erosion_depth_m": float(row[21]),
+                    "erodible_thickness": float(row[20]),
+                    "erosion_depth": float(row[21]),
+                    "deporate": float(row[22]),
+            }
+            record.update(self._probe_origin_fields("cvbar_used", used_origin))
+            record.update(self._probe_origin_fields("cvbar_next", next_origin))
+            self.erosion_probe_records.append(record)
+            self._erosion_probe_captured_record_count += 1
+        if len(self.erosion_probe_records) >= self._erosion_probe_max_records_in_memory:
+            self.flush_erosion_probe_records()
+
+    @ti.kernel
+    def _gather_erosion_probe_kernel(
+        self,
+        t_now: ti.f64,
+        dt_used: ti.f64,
+        accepted: ti.i32,
+        cvbar_scalar: ti.f64,
+    ):
+        n = self.erosion_probe_count[None]
+        for p in range(n):
+            i = self.erosion_probe_cell_i[p]
+            j = self.erosion_probe_cell_j[p]
+            self.erosion_probe_buffer[p, 0] = t_now
+            self.erosion_probe_buffer[p, 1] = dt_used
+            self.erosion_probe_buffer[p, 2] = accepted
+            self.erosion_probe_buffer[p, 3] = self.fields.h[i, j]
+            self.erosion_probe_buffer[p, 4] = self.fields.fhpredi1[i, j]
+            self.erosion_probe_buffer[p, 5] = self.fields.frhopredi1[i, j]
+            self.erosion_probe_buffer[p, 6] = self.fields.Cv[i, j]
+            self.erosion_probe_buffer[p, 7] = self.fields.cvlimit_temp[i, j]
+            self.erosion_probe_buffer[p, 8] = self.fields.rholimit_temp[i, j]
+            self.erosion_probe_buffer[p, 9] = self.fields.tanslo_fortran[i, j]
+            self.erosion_probe_buffer[p, 10] = self.fields.absubar_temp[i, j]
+            self.erosion_probe_buffer[p, 11] = cvbar_scalar
+            self.erosion_probe_buffer[p, 12] = self.fields.sfy_temp[i, j]
+            self.erosion_probe_buffer[p, 13] = self.fields.sfmanning_temp[i, j]
+            self.erosion_probe_buffer[p, 14] = self.fields.sfmiu_temp[i, j]
+            self.erosion_probe_buffer[p, 15] = self.fields.tau_temp[i, j]
+            self.erosion_probe_buffer[p, 16] = self.fields.taoc_temp[i, j]
+            self.erosion_probe_buffer[p, 17] = self.fields.erorate_raw_temp[i, j]
+            self.erosion_probe_buffer[p, 18] = self.fields.erorate_rholimit_clamped_temp[i, j]
+            self.erosion_probe_buffer[p, 19] = self.fields.erorate_clamped_temp[i, j]
+            self.erosion_probe_buffer[p, 20] = self.fields.erodible_thickness[i, j]
+            self.erosion_probe_buffer[p, 21] = self.fields.erosion_depth[i, j]
+            self.erosion_probe_buffer[p, 22] = self.fields.deposition_rate[i, j]
+            self.erosion_probe_buffer[p, 23] = self.erosion_probe_cell_row[p]
+            self.erosion_probe_buffer[p, 24] = self.erosion_probe_cell_col[p]
+
     def configure_stage_trace(
         self,
         *,
@@ -1841,6 +2436,67 @@ class DFSDynamicWaveSolver:
             "early_return_count": int(self.experimental_first_reject_early_return_count[None]),
         }
 
+    def get_volume_balance_snapshot(self) -> dict[str, float | bool]:
+        """Return accepted cumulative volumes and the last candidate balance.
+
+        The scalar fields are the same values already used by
+        ``_finalize_volume_balance``.  Reading them on the host is deliberately
+        kept outside the Taichi kernels so this method remains observational.
+        ``acc_flowvolume`` and ``acc_depositvolume`` are the current accepted
+        storage values because the accumulators are reset at the start of each
+        candidate step and committed only after a successful retry check.
+        """
+
+        self._pack_volume_balance_snapshot()
+        pack = np.asarray(self.volume_snapshot_pack.to_numpy(), dtype=np.float64)
+        rainfall = float(pack[0])
+        inflow = float(pack[1])
+        erosion = float(pack[2])
+        failure_source = float(pack[3])
+        infiltration = float(pack[4])
+        outflow = float(pack[5])
+        deposition_flux = float(pack[6])
+        flow_storage = float(pack[7])
+        deposit_storage = float(pack[8])
+        denominator = float(pack[9])
+        residual = float(pack[10])
+        relative_error = float(pack[11])
+
+        return {
+            "rainfall_m3": rainfall,
+            "inflow_m3": inflow,
+            "erosion_m3": erosion,
+            "failure_source_m3": failure_source,
+            "infiltration_m3": infiltration,
+            "outflow_m3": outflow,
+            "deposition_flux_m3": deposition_flux,
+            "flow_storage_m3": flow_storage,
+            "deposit_storage_m3": deposit_storage,
+            "source_total_m3": rainfall + inflow + erosion + failure_source,
+            "sink_and_storage_total_m3": (
+                infiltration + outflow + flow_storage + deposit_storage
+            ),
+            "denominator_m3": denominator,
+            "residual_m3": residual,
+            "relative_error": relative_error,
+            "within_retry_tolerance": abs(relative_error) <= DFS_VOLUME_REL_TOL,
+        }
+
+    @ti.kernel
+    def _pack_volume_balance_snapshot(self):
+        self.volume_snapshot_pack[0] = self.totalrivolume[None]
+        self.volume_snapshot_pack[1] = self.totalinflowvolume[None]
+        self.volume_snapshot_pack[2] = self.totalerosionvolume[None]
+        self.volume_snapshot_pack[3] = self.totalfsvolume[None]
+        self.volume_snapshot_pack[4] = self.totalinfilvolume[None]
+        self.volume_snapshot_pack[5] = self.totaloutflowvolume[None]
+        self.volume_snapshot_pack[6] = self.totaldepovolume[None]
+        self.volume_snapshot_pack[7] = self.acc_flowvolume[None]
+        self.volume_snapshot_pack[8] = self.acc_depositvolume[None]
+        self.volume_snapshot_pack[9] = self.volume_denominator[None]
+        self.volume_snapshot_pack[10] = self.volume_error[None]
+        self.volume_snapshot_pack[11] = self.volume_relative_error[None]
+
     def enable_momentum_faceflux_tracked_probe(
         self,
         *,
@@ -1853,6 +2509,8 @@ class DFSDynamicWaveSolver:
         """Enable tracked scalar momentum/face-flux diagnostics for one face."""
         self.momentum_faceflux_probe_enabled[None] = 1 if enabled else 0
         self.momentum_faceflux_probe_lightweight[None] = 1 if lightweight else 0
+        self._momentum_probe_enabled_host = bool(enabled)
+        self._momentum_probe_lightweight_host = bool(lightweight)
         self.momentum_faceflux_probe_target_cell_id[None] = int(target_cell_id)
         self.momentum_faceflux_probe_target_direction[None] = int(target_direction)
         if clear:
@@ -1976,6 +2634,7 @@ class DFSDynamicWaveSolver:
         self.first_reject_dt[None] = dt
         self.first_reject_value[None] = 0.0
         self.first_reject_threshold[None] = 0.0
+        self.cfl_reject_fortran_order[None] = 2147483647
 
     @ti.func
     def _record_first_reject(
@@ -2566,6 +3225,13 @@ class DFSDynamicWaveSolver:
             self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_YFLUX] = yflux
             self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_WIDTH] = width
             self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_DT0] = dt0
+            # Keep the source-rate terms with the historical face row.  The
+            # current-step probe already stored these fields, but omitting them
+            # here made every completed candidate look like zero erosion when
+            # the history was exported after later retries.
+            self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_SOURCE_DEPTH_RATE] = source_depth_rate
+            self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_ERORATE] = erorate
+            self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_DEPORATE] = deporate
             self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_OPERAND_FV_NEIGHBOR_SAME_DIRECTION] = self.fields.fv_fortran[neighbor_i, neighbor_j, direction]
             self.momentum_faceflux_assignment_history_float[history_row, MFP_FLOAT_OPERAND_FV_SOURCE_OPPOSITE_DIRECTION] = self.fields.fv_fortran[source_i, source_j, opposite_direction]
 
@@ -5909,7 +6575,15 @@ class DFSDynamicWaveSolver:
         connectivity = self._get_flow_connectivity_numpy_cached()
         cell_id = np.asarray(connectivity["cell_id"], dtype=np.int64)
         active = ~np.asarray(self.fields.is_nodata.to_numpy(), dtype=bool)
-        boundary = np.asarray(self.fields.boundary_type.to_numpy(), dtype=np.int32)
+        # Chamoli/BJ dfs.F90 face loop contains:
+        #   if (outflow(i)==.true.) then
+        #       continue
+        #   end if
+        # Fortran CONTINUE is a no-op here (not CYCLE), so outflow cells remain
+        # face-flux sources and can set the trailing stale scalar `cvbar`.
+        # Excluding them made the last valid face an interior wet-wet pair
+        # (cvbar≈0.55) while Fortran kept a wet-dry outflow face (cvbar≈0.275),
+        # which doubled sfy/erorate on Chamoli probe cells.
         neighbor_i = np.asarray(connectivity["flow_neighbor_i"], dtype=np.int32)
         neighbor_j = np.asarray(connectivity["flow_neighbor_j"], dtype=np.int32)
         neighbor_id = np.asarray(connectivity["flow_neighbor_id"], dtype=np.int64)
@@ -5918,13 +6592,12 @@ class DFSDynamicWaveSolver:
         source_j: list[int] = []
         target_i: list[int] = []
         target_j: list[int] = []
+        fortran_order: list[int] = []
         active_indices = sorted(
             ((int(cell_id[i, j]), int(i), int(j)) for i, j in zip(*np.where(active))),
             key=lambda item: item[0],
         )
         for source_cell_id, i, j in active_indices:
-            if boundary[i, j] == 1:
-                continue
             for direction in range(8):
                 ni = int(neighbor_i[i, j, direction])
                 nj = int(neighbor_j[i, j, direction])
@@ -5938,6 +6611,7 @@ class DFSDynamicWaveSolver:
                 source_j.append(j)
                 target_i.append(ni)
                 target_j.append(nj)
+                fortran_order.append(source_cell_id * 8 + direction)
 
         self._legacy_fortran_order_face_pairs = (
             np.asarray(source_i, dtype=np.intp),
@@ -5945,33 +6619,168 @@ class DFSDynamicWaveSolver:
             np.asarray(target_i, dtype=np.intp),
             np.asarray(target_j, dtype=np.intp),
         )
+        self._legacy_fortran_order_face_pair_order = np.asarray(fortran_order, dtype=np.int64)
         return self._legacy_fortran_order_face_pairs
 
-    def _update_legacy_previous_face_cvbar_scalar(self) -> None:
+    @ti.kernel
+    def _select_legacy_cvbar_assignment_prefix(self, inclusive_order: ti.i32):
+        """Find the serial DFS trailing assignment before a rejected CFL face.
+
+        ``fybar_fortran`` is reset at the start of the face pass and receives a
+        non-zero value exactly after the original ``ybar /= 0`` branch has been
+        entered.  Reading that execution witness avoids reimplementing the
+        dry-face predicate on the host just to recover a stale scalar.
+        """
+        self.legacy_cvbar_prefix_fortran_order[None] = -1
+        for i, j in self.fields.h:
+            if self.fields.is_nodata[i, j]:
+                continue
+            for d in ti.static(range(8)):
+                ni = self.fields.flow_neighbor_i[i, j, d]
+                nj = self.fields.flow_neighbor_j[i, j, d]
+                if ni >= 0 and nj >= 0:
+                    face_owner_active = self.fields.cell_id[ni, nj] > self.fields.cell_id[i, j]
+                    if ti.static(self.fortran_face_owner_max_cell_enabled):
+                        face_owner_active = self.fields.cell_id[i, j] > self.fields.cell_id[ni, nj]
+                    order = self.fields.cell_id[i, j] * 8 + d
+                    if (
+                        face_owner_active
+                        and order <= inclusive_order
+                        and self.fields.fybar_fortran[i, j, d] != 0.0
+                    ):
+                        ti.atomic_max(self.legacy_cvbar_prefix_fortran_order[None], order)
+
+    def _select_legacy_cvbar_assignment_order(self, cfl_stop_order: int | None) -> int:
+        """Return the actual face-kernel assignment selected by DFS ordering.
+
+        A serial Fortran retry jumps immediately at its first CFL violation;
+        that failing face has already assigned ``cvbar``.  CUDA completes the
+        parallel pass, so rejected candidates need a prefix selection whereas
+        accepted candidates can use the kernel's global trailing assignment.
+        """
+        if cfl_stop_order is None:
+            return int(self.legacy_cvbar_assignment_fortran_order[None])
+        self._select_legacy_cvbar_assignment_prefix(int(cfl_stop_order))
+        return int(self.legacy_cvbar_prefix_fortran_order[None])
+
+    def _update_legacy_previous_face_cvbar_scalar(
+        self,
+        *,
+        cfl_stop_order: int | None = None,
+        assignment_order: int | None = None,
+    ) -> None:
+        # A rejected retry deliberately keeps any assignment made by this face
+        # pass, matching the original local scalar lifecycle.  `False` means
+        # no valid face assigned a replacement during this attempt.
+        self._erosion_probe_cvbar_next_assignment = False
+        self._erosion_probe_cvbar_cfl_stop_order = cfl_stop_order
         source_i, source_j, target_i, target_j = self._ensure_legacy_fortran_order_face_pairs()
         if source_i.size == 0:
             return
+        pair_order = self._legacy_fortran_order_face_pair_order
+        if pair_order is None:
+            raise RuntimeError("Fortran face order was not initialized with its face pairs.")
+        if assignment_order is not None:
+            if assignment_order < 0:
+                return
+            selected = np.flatnonzero(pair_order == int(assignment_order))
+            if selected.size != 1:
+                raise RuntimeError(
+                    f"Kernel cvbar assignment order {assignment_order} has no unique Fortran face pair."
+                )
+            last_index = int(selected[0])
+            # Actual face-kernel selection is authoritative in production.
+            # The branch below remains a small CPU-only fallback for focused
+            # unit tests that construct predictor state without a face pass.
+        else:
+            fhpredi = np.asarray(self.fields.fhpredi.to_numpy(), dtype=np.float64)
+            cell_area = np.asarray(self.fields.cell_area_cal.to_numpy(), dtype=np.float64)
+            h_source = fhpredi[source_i, source_j]
+            h_target = fhpredi[target_i, target_j]
+            area_source = cell_area[source_i, source_j]
+            area_target = cell_area[target_i, target_j]
+            denominator = h_source + h_target
+            valid = (denominator != 0.0) & ~((h_source <= TOL) & (h_target <= TOL))
+            if cfl_stop_order is not None:
+                valid &= pair_order <= int(cfl_stop_order)
+            if not np.any(valid):
+                return
+            last_index = int(np.flatnonzero(valid)[-1])
+
         fhpredi = np.asarray(self.fields.fhpredi.to_numpy(), dtype=np.float64)
         frhopredi = np.asarray(self.fields.frhopredi.to_numpy(), dtype=np.float64)
+        cell_area = np.asarray(self.fields.cell_area_cal.to_numpy(), dtype=np.float64)
         h_source = fhpredi[source_i, source_j]
         h_target = fhpredi[target_i, target_j]
+        area_source = cell_area[source_i, source_j]
+        area_target = cell_area[target_i, target_j]
         denominator = h_source + h_target
-        valid = (denominator != 0.0) & ~((h_source <= TOL) & (h_target <= TOL))
-        if not np.any(valid):
-            return
-        last_index = int(np.flatnonzero(valid)[-1])
-        cv_source_depth = (frhopredi[source_i[last_index], source_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
-        cv_target_depth = (frhopredi[target_i[last_index], target_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
-        para_source = max(float(cv_source_depth * h_source[last_index]), 0.0)
-        para_target = max(float(cv_target_depth * h_target[last_index]), 0.0)
-        self.legacy_previous_face_cvbar_scalar = (para_source + para_target) / float(denominator[last_index])
+        hs = float(h_source[last_index])
+        ht = float(h_target[last_index])
+        cv_source = (frhopredi[source_i[last_index], source_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
+        cv_target = (frhopredi[target_i[last_index], target_j[last_index]] - self.rhow) / (self.rhos - self.rhow)
+        cv_source = max(float(cv_source), 0.0)
+        cv_target = max(float(cv_target), 0.0)
+        if self.dfs_face_flux_variant == "arithmetic_mean_chamoli":
+            area_sum = float(area_source[last_index] + area_target[last_index])
+            if area_sum <= 0.0:
+                return
+            next_cvbar = (
+                cv_source * float(area_source[last_index]) + cv_target * float(area_target[last_index])
+            ) / area_sum
+        elif self.dfs_face_flux_variant == "asymmetric_head_guard":
+            next_cvbar = 0.5 * (cv_source + cv_target)
+        else:
+            # both_thin_weighted: use the same depth-and-cell-area weighting
+            # as the active face kernel, not a host-only depth mean.
+            para_source = cv_source * hs * float(area_source[last_index])
+            para_target = cv_target * ht * float(area_target[last_index])
+            denom = hs * float(area_source[last_index]) + ht * float(area_target[last_index])
+            if denom == 0.0:
+                return
+            next_cvbar = (para_source + para_target) / denom
+        self.legacy_previous_face_cvbar_scalar = float(next_cvbar)
+        self._erosion_probe_cvbar_next_assignment = True
+        if self.erosion_probe_enabled:
+            connectivity = self._get_flow_connectivity_numpy_cached()
+            source_col = int(source_i[last_index])
+            source_row = int(source_j[last_index])
+            target_col = int(target_i[last_index])
+            target_row = int(target_j[last_index])
+            directions = np.flatnonzero(
+                (np.asarray(connectivity["flow_neighbor_i"])[source_col, source_row] == target_col)
+                & (np.asarray(connectivity["flow_neighbor_j"])[source_col, source_row] == target_row)
+            )
+            direction = int(directions[0]) if directions.size else None
+            cell_id = np.asarray(connectivity["cell_id"], dtype=np.int64)
+            self._legacy_previous_face_cvbar_origin = {
+                "attempt_id": self._erosion_probe_current_attempt_id,
+                "source_row": source_row,
+                "source_col": source_col,
+                "source_cell_id": int(cell_id[source_col, source_row]),
+                "target_row": target_row,
+                "target_col": target_col,
+                "target_cell_id": int(cell_id[target_col, target_row]),
+                "direction_zero_based": direction,
+            }
 
     def step(self, dt: float) -> dict:
         """Perform one DFS step on workspace state without partial main-state commits."""
-        if self.rholimit_initialized[None] == 0:
-            self._zero_tanslodir_carry()
-            self._seed_initial_rholimit_from_input_slope(self.rhow, self.rhos, self.cvstar)
-            self.rholimit_initialized[None] = 1
+        if not self.simulate_outflow_cell:
+            # Enforce the frozen control even if a checkpoint or external
+            # caller supplied a stale sidecar mask after initialization.
+            self.fields.dfs_outflow_mask.fill(0)
+        if not self._rholimit_seeded:
+            if self.rholimit_initialized[None] == 0:
+                self._zero_tanslodir_carry()
+                self._seed_initial_rholimit_from_input_slope(self.rhow, self.rhos, self.cvstar)
+                self.rholimit_initialized[None] = 1
+            self._rholimit_seeded = True
+        if not self._persistent_source_state_seeded:
+            if self.persistent_source_state_initialized[None] == 0:
+                self._seed_persistent_source_state(self.rhow, self.rhos, self.cvstar)
+                self.persistent_source_state_initialized[None] = 1
+            self._persistent_source_state_seeded = True
         self.workspace.reset_step_workspace()
         if self.use_tanslodir_carry_quirk:
             self.workspace.compute_bed_slope_limiter_with_carry(
@@ -5982,31 +6791,40 @@ class DFSDynamicWaveSolver:
         self._ci_candidate = None
 
         dt_used = float(dt)
+        self._erosion_probe_attempt_id += 1
+        self._erosion_probe_current_attempt_id = self._erosion_probe_attempt_id
         dt_reject = dt_used - self.dt_decrease if self.dt_decrease > 0.0 else dt_used * 0.5
         if dt_reject < self.dt_min:
             dt_reject = self.dt_min
 
-        self.reject_flag[None] = 0
-        self.suggested_dt[None] = dt_reject
-        self.max_wave_speed[None] = 0.0
-        self._reset_first_reject_diagnostics(self.current_time, dt_used)
+        self._reset_candidate_step_scalars(dt_reject, self.current_time, dt_used)
+        if not self.simulate_rainfall:
+            if not self._rainfall_zeroed:
+                self._zero_rainfall_forcing()
+                self._rainfall_zeroed = True
+        else:
+            self._rainfall_zeroed = False
         self._stage_inflow_forcing(dt_used)
         rnoff_period_precompute_manifest = self.apply_rnoff_period_precompute(dt_used)
 
-        if self.dfs_infiltration_variant == "direct_rain_plus_storage":
+        if not self.simulate_infiltration:
+            self._stage_surface_forcing_without_infiltration(dt_used, self.rhow, self.cvstar)
+        elif self.dfs_infiltration_variant == "direct_rain_plus_storage":
             self._stage_surface_forcing_direct_rain_plus_storage(dt_used, self.rhow, self.cvstar)
         elif self.use_transient_green_ampt:
             self._stage_surface_forcing_green_ampt(dt_used, self.rhow, self.cvstar)
         else:
             self._stage_surface_forcing(dt_used, self.rhow, self.cvstar)
-        if bool(rnoff_period_precompute_manifest.get("rnoff_period_precompute_enabled", False)):
-            self.apply_rnoff_period_precompute_to_surface_staging(dt_used)
-        else:
-            self.apply_rnoff_topoindex_runtime_hook(dt_used)
+        if self.simulate_infiltration:
+            if bool(rnoff_period_precompute_manifest.get("rnoff_period_precompute_enabled", False)):
+                self.apply_rnoff_period_precompute_to_surface_staging(dt_used)
+            else:
+                self.apply_rnoff_topoindex_runtime_hook(dt_used)
         self._record_stage_trace("STEP_START", dt_used, event="STEP_START")
-        self._capture_depo_velocity_source_entry()
-        momentum_probe_enabled = int(self.momentum_faceflux_probe_enabled[None]) != 0
-        momentum_probe_lightweight = int(self.momentum_faceflux_probe_lightweight[None]) != 0
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_source_entry()
+        momentum_probe_enabled = bool(self._momentum_probe_enabled_host)
+        momentum_probe_lightweight = bool(self._momentum_probe_lightweight_host)
         if momentum_probe_enabled:
             self.momentum_faceflux_probe_t_start[None] = self.current_time
             self.momentum_faceflux_probe_dt[None] = dt_used
@@ -6014,22 +6832,38 @@ class DFSDynamicWaveSolver:
                 self._capture_momentum_faceflux_source_entry_state_probe_lightweight()
             else:
                 self._capture_momentum_faceflux_source_entry_state_probe()
-        self._capture_depo_velocity_pre_source_branch()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_pre_source_branch()
+        self._capture_erosion_probe_source_state()
+        self._erosion_probe_cvbar_at_source = float(self.legacy_previous_face_cvbar_scalar)
+        self._erosion_probe_cvbar_origin_at_source = (
+            dict(self._legacy_previous_face_cvbar_origin)
+            if self._legacy_previous_face_cvbar_origin is not None
+            else None
+        )
         self._compute_source_rates(
             dt_used,
             self.rhow,
             self.rhos,
             self.cvstar,
-            1 if self.cvbar_erosion_parity_enabled else 0,
             self.legacy_previous_face_cvbar_scalar,
+            1 if self.simulate_erosion else 0,
+            1 if self.simulate_separate_deposition else 0,
         )
-        self._advance_double_layer_failure_sources(dt_used)
+        if self.simulate_shallow_landslide:
+            self._advance_double_layer_failure_sources(dt_used)
+        else:
+            self._zero_failure_source_staging()
+        if self.triggerslide_enabled and self.slide1 == 1 and self.current_time > 0.0:
+            self._apply_triggerslide_one_shot(self.rhow, self.rhos, self.cvlandslide)
+            self.isslidetriggered = 1
         self._record_stage_trace("SOURCE_STAGING", dt_used, event="POST_SOURCE_STAGING")
         self._merge_source_terms(dt_used, self.rhow, self.rhos, self.cvstar)
         self._run_erosion_deposition_kernel_diagnostic_if_enabled(dt_used)
         self._run_erosion_deposition_mutation_if_enabled()
         self._record_stage_trace("POST_SOURCE_MERGE", dt_used, event="POST_SOURCE_MERGE")
-        self._capture_depo_velocity_before_face_flux()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_before_face_flux()
         if momentum_probe_enabled:
             self.momentum_faceflux_probe_t_start[None] = self.current_time
             self.momentum_faceflux_probe_dt[None] = dt_used
@@ -6049,30 +6883,45 @@ class DFSDynamicWaveSolver:
         )
         self._record_stage_trace("FACE_FLUX", dt_used, event="FACE_FLUX_NQ", face_flux=True)
         self._run_face_flux_kernel_diagnostic_if_enabled()
-        if self.cvbar_erosion_parity_enabled:
-            self._update_legacy_previous_face_cvbar_scalar()
-        if self.experimental_first_reject_short_circuit and int(self.reject_flag[None]) != 0:
-            self.experimental_first_reject_early_return_count[None] = (
-                int(self.experimental_first_reject_early_return_count[None]) + 1
-            )
-            if momentum_probe_enabled:
-                self._mark_momentum_faceflux_probe_rejected_status(1)
-            if self.double_layer_model is not None:
-                self.double_layer_model.restore_richards_committed_state()
-            self._ci_candidate = None
-            self._discard_precomputed_failure_candidate()
-            return {
-                "accepted": False,
-                "used_dt": dt_used,
-                "suggested_dt": float(self.suggested_dt[None]),
-                "next_dt": float(self.suggested_dt[None]),
-                "max_wave_speed": float(self.max_wave_speed[None]),
-                "experimental_first_reject_short_circuit": True,
-                "first_reject": self.get_first_reject_diagnostics(),
-            }
+        cfl_stop_order = int(self.cfl_reject_fortran_order[None])
+        if cfl_stop_order >= 2147483647:
+            cfl_stop_order = None
+        assignment_order = self._select_legacy_cvbar_assignment_order(cfl_stop_order)
+        self._update_legacy_previous_face_cvbar_scalar(
+            cfl_stop_order=cfl_stop_order,
+            assignment_order=assignment_order,
+        )
+        if self.experimental_first_reject_short_circuit:
+            accepted_early, suggested_dt, max_wave_speed = self._read_step_result_pack()
+            if not accepted_early:
+                self.experimental_first_reject_early_return_count[None] = (
+                    int(self.experimental_first_reject_early_return_count[None]) + 1
+                )
+                if momentum_probe_enabled:
+                    self._mark_momentum_faceflux_probe_rejected_status(1)
+                first_reject = self.get_first_reject_diagnostics()
+                self._gather_erosion_probe(
+                    dt_used=dt_used,
+                    accepted=False,
+                    reject_reason=str(first_reject.get("first_reject_reason_name") or "early_reject"),
+                )
+                if self.simulate_shallow_landslide and self.double_layer_model is not None:
+                    self.double_layer_model.restore_richards_committed_state()
+                self._ci_candidate = None
+                self._discard_precomputed_failure_candidate()
+                return {
+                    "accepted": False,
+                    "used_dt": dt_used,
+                    "suggested_dt": suggested_dt,
+                    "next_dt": suggested_dt,
+                    "max_wave_speed": max_wave_speed,
+                    "experimental_first_reject_short_circuit": True,
+                    "first_reject": first_reject,
+                }
         if momentum_probe_enabled and momentum_probe_lightweight:
             self._capture_momentum_faceflux_post_edge_lightweight(dt_used, self.limitfr)
-        self._capture_depo_velocity_after_face_flux()
+        if self.capture_depo_velocity_snapshots:
+            self._capture_depo_velocity_after_face_flux()
         self._accumulate_and_check(dt_used, self.rhow, self.toldh, self.toldhp)
         self._run_qnet_qmassnet_kernel_diagnostic_if_enabled()
         self._run_qnet_qmassnet_mutation_if_enabled()
@@ -6082,12 +6931,13 @@ class DFSDynamicWaveSolver:
         if momentum_probe_enabled:
             self._capture_momentum_faceflux_post_accumulate_probe()
         self.apply_stormdrain_runtime_hook(dt_used)
-        self._reset_volume_balance_accumulators()
+        self._classify_sfdf_pre_outflow(self.rhow, self.rhos)
         self._accumulate_volume_balance(dt_used)
         self._finalize_volume_balance(dt_used)
+        self._capture_outflow_candidate_before_clear(self.rhow)
         self._apply_post_balance_outflow(self.rhow)
 
-        accepted = int(self.reject_flag[None]) == 0
+        accepted, suggested_dt, max_wave_speed = self._read_step_result_pack()
         self._record_stage_trace(
             "RETRY_CHECK",
             dt_used,
@@ -6096,7 +6946,13 @@ class DFSDynamicWaveSolver:
         if momentum_probe_enabled:
             self._mark_momentum_faceflux_probe_rejected_status(0 if accepted else 1)
         if not accepted:
-            if self.double_layer_model is not None:
+            first_reject = self.get_first_reject_diagnostics()
+            self._gather_erosion_probe(
+                dt_used=dt_used,
+                accepted=False,
+                reject_reason=str(first_reject.get("first_reject_reason_name") or "unknown"),
+            )
+            if self.simulate_shallow_landslide and self.double_layer_model is not None:
                 # `dfs.F90` retries rejected dynamic-wave steps from the previously
                 # accepted Richards state. Only the temporary candidate arrays are
                 # advanced inside the rejected step; the committed `kkt/kkb`
@@ -6107,11 +6963,11 @@ class DFSDynamicWaveSolver:
             return {
                 "accepted": False,
                 "used_dt": dt_used,
-                "suggested_dt": float(self.suggested_dt[None]),
-                "next_dt": float(self.suggested_dt[None]),
-                "max_wave_speed": float(self.max_wave_speed[None]),
+                "suggested_dt": suggested_dt,
+                "next_dt": suggested_dt,
+                "max_wave_speed": max_wave_speed,
                 "experimental_first_reject_short_circuit": False,
-                "first_reject": self.get_first_reject_diagnostics(),
+                "first_reject": first_reject,
             }
 
         dt_next = dt_used + self.dt_increase if self.dt_increase > 0.0 else dt_used
@@ -6124,8 +6980,10 @@ class DFSDynamicWaveSolver:
 
         self._prepare_h_cv_rho_diagnostic_if_enabled()
         self._prepare_h_cv_rho_mutation_if_enabled()
-        self._commit_volume_counters()
+        self._commit_accepted_outflow_candidate()
+        self.last_accepted_outflow_dt = dt_used
         self._commit_step(dt_used, dt_next, self.rhow, self.rhos, self.cvstar)
+        self._gather_erosion_probe(dt_used=dt_used, accepted=True, dt_next=dt_next)
         self._finalize_h_cv_rho_diagnostic_if_enabled()
         self._run_h_cv_rho_mutation_if_enabled()
         self._record_stage_trace(
@@ -6154,20 +7012,154 @@ class DFSDynamicWaveSolver:
                 - float(erosion_diag_record["deposition_depth_increment_sum_expected"])
             )
             self.erosion_step_diagnostics.append(erosion_diag_record)
-        self._commit_precomputed_failure_schedule()
+        if self.simulate_shallow_landslide:
+            self._commit_precomputed_failure_schedule()
+        if self.isslidetriggered == 1:
+            self.slide1 = 0
         self._commit_cumulative_infiltration()
         self._sync_uv_from_fortran_velocity()
-        self._sync_legacy_directional_velocity()
+        if self.sync_legacy_directional_velocity:
+            self._sync_legacy_directional_velocity()
 
         return {
             "accepted": True,
             "used_dt": dt_used,
             "suggested_dt": float(dt_next),
             "next_dt": float(dt_next),
-            "max_wave_speed": float(self.max_wave_speed[None]),
+            "max_wave_speed": max_wave_speed,
             "experimental_first_reject_short_circuit": False,
-            "first_reject": self.get_first_reject_diagnostics(),
+            "first_reject": {},
         }
+
+    def _read_step_result_pack(self) -> tuple[bool, float, float]:
+        self._pack_step_result_scalars()
+        pack = np.asarray(self.step_result_pack.to_numpy(), dtype=np.float64)
+        return int(pack[0]) == 0, float(pack[1]), float(pack[2])
+
+    @ti.kernel
+    def _reset_candidate_step_scalars(self, dt_reject: ti.f64, t_start: ti.f64, dt_used: ti.f64):
+        self.reject_flag[None] = 0
+        self.suggested_dt[None] = dt_reject
+        self.max_wave_speed[None] = 0.0
+        self.first_reject_count[None] = 0
+        self.first_reject_reason[None] = FIRST_REJECT_NONE
+        self.first_reject_source_i[None] = -1
+        self.first_reject_source_j[None] = -1
+        self.first_reject_neighbor_i[None] = -1
+        self.first_reject_neighbor_j[None] = -1
+        self.first_reject_cell_id[None] = -1
+        self.first_reject_neighbor_cell_id[None] = -1
+        self.first_reject_direction[None] = -1
+        self.first_reject_t_start[None] = t_start
+        self.first_reject_dt[None] = dt_used
+        self.first_reject_value[None] = 0.0
+        self.first_reject_threshold[None] = 0.0
+        # This scalar is consumed after the face kernel on every candidate.
+        # It must be reset in the candidate-step lifecycle (not only in the
+        # legacy diagnostics helper, which `step()` no longer calls).
+        self.cfl_reject_fortran_order[None] = 2147483647
+        self.legacy_cvbar_assignment_fortran_order[None] = -1
+        self.legacy_cvbar_prefix_fortran_order[None] = -1
+
+    @ti.kernel
+    def _pack_step_result_scalars(self):
+        self.step_result_pack[0] = ti.cast(self.reject_flag[None], ti.f64)
+        self.step_result_pack[1] = self.suggested_dt[None]
+        self.step_result_pack[2] = self.max_wave_speed[None]
+
+    @ti.kernel
+    def _seed_persistent_source_state(self, rho_water: ti.f64, rho_sediment: ti.f64, cvstar: ti.f64):
+        """One-shot pre-main-loop seeds from dfs.F90.
+
+            rhodepo=cvstar*(rhos-rhow)+rhow        ! dfs.F90:113
+            tempinierodithick=inierodithick        ! dfs.F90:128
+            tempdebdepothick=0.                    ! dfs.F90:129
+
+        Both arrays are persistent afterwards: `rhodepo(i)` is only lowered by
+        the deposition clamps and `tempinierodithick(i)` is only rewritten by
+        the erosion branch, so neither may be re-seeded per step or per retry.
+        """
+        rhodepo_cvstar = cvstar * (rho_sediment - rho_water) + rho_water
+        for i, j in self.fields.h:
+            self.fields.rhodepo[i, j] = rhodepo_cvstar
+            self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j]
+            self.fields.temp_depo_thickness[i, j] = 0.0
+
+    @ti.kernel
+    def _zero_rainfall_forcing(self):
+        for i, j in self.fields.rainfall:
+            self.fields.rainfall[i, j] = 0.0
+
+    @ti.kernel
+    def _zero_failure_source_staging(self):
+        for i, j in self.fields.tempfsh_flow:
+            self.fields.tempfsh_flow[i, j] = 0.0
+            self.fields.tempfsrho_flow[i, j] = 0.0
+
+    @ti.kernel
+    def _apply_triggerslide_one_shot(self, rho_water: ti.f64, rho_sediment: ti.f64, cvlandslide: ti.f64):
+        """Original `dfs.F90:559-564` one-shot triggering-slide injection.
+
+        if (slide1==1 .and. tnow>0) then
+            tempfsh(:)=tempfsh(:)+temptriggerslide(:)
+            tempfsrho(:)=(rhos-rhow)*cvlandslide+rhow
+            eleori(:)=ele(:)-tempfsh(:)
+            isslidetriggered=1
+        end if
+        """
+        for i, j in self.fields.tempfsh_flow:
+            if self.fields.is_nodata[i, j]:
+                continue
+            self.fields.tempfsh_flow[i, j] = self.fields.tempfsh_flow[i, j] + self.triggerslide_field[i, j]
+            self.fields.tempfsrho_flow[i, j] = (rho_sediment - rho_water) * cvlandslide + rho_water
+            self.fields.z_original[i, j] = self.fields.z_bed[i, j] - self.fields.tempfsh_flow[i, j]
+
+    @ti.kernel
+    def _stage_surface_forcing_without_infiltration(
+        self,
+        dt: ti.f64,
+        rho_water: ti.f64,
+        cvstar: ti.f64,
+    ):
+        """Original `infilsimul=.false.` branch: `ir=0`, then normal mass staging."""
+        for i, j in self.fields.h:
+            if self.fields.is_nodata[i, j]:
+                self.fields.infiltration[i, j] = 0.0
+                self.fields.tempri[i, j] = 0.0
+                self.fields.tempinflowh[i, j] = 0.0
+                self.fields.tempinflowrho[i, j] = 0.0
+                self.fields.fhw[i, j] = 0.0
+                self.fields.fhpredi1[i, j] = 0.0
+                self.fields.frhopredi1[i, j] = rho_water
+                continue
+
+            self.fields.tempri[i, j] = self.fields.rainfall[i, j]
+            self.fields.infiltration[i, j] = 0.0
+            self.fields.fhw[i, j] = (
+                self.fields.h[i, j] * (1.0 - self.fields.Cv[i, j] / cvstar)
+                + self.fields.tempri[i, j] * dt
+                + self.fields.tempinflowh[i, j]
+            )
+            fhpredi1 = (
+                self.fields.h[i, j]
+                + self.fields.tempri[i, j] * dt
+                + self.fields.tempinflowh[i, j]
+            )
+            if fhpredi1 <= 0.0:
+                fhpredi1 = 0.0
+            self.fields.fhpredi1[i, j] = fhpredi1
+            if fhpredi1 <= EPS:
+                self.fields.frhopredi1[i, j] = rho_water
+            else:
+                mass = (
+                    self.fields.rho[i, j] * self.fields.h[i, j]
+                    + self.fields.tempri[i, j] * dt * rho_water
+                    + self.fields.tempinflowh[i, j] * self.fields.tempinflowrho[i, j]
+                )
+                self.fields.frhopredi1[i, j] = mass / fhpredi1
+            if _is_outflow(self.fields, i, j) == 1:
+                self.fields.fhpredi1[i, j] = 0.0
+                self.fields.frhopredi1[i, j] = rho_water
 
     @ti.kernel
     def _capture_depo_velocity_source_entry(self):
@@ -6246,8 +7238,9 @@ class DFSDynamicWaveSolver:
                 # per-step cvlimit update already uses the source-backed
                 # `> cvstar` clamp in dynamic_wave_fortran.py.
                 invalid_cvlimit = cvlimit < 0.0 or cvlimit > 1.0
-                if ti.static(self.cvlimit_seed_cvstar_clamp_enabled):
-                    invalid_cvlimit = cvlimit < 0.0 or cvlimit > cvstar
+                if ti.static(self.dfs_cvlimit_variant == "tanslo_cycle_cvstar_clamp_bj"):
+                    if ti.static(self.cvlimit_seed_cvstar_clamp_enabled):
+                        invalid_cvlimit = cvlimit < 0.0 or cvlimit > cvstar
                 if invalid_cvlimit:
                     cvlimit = cvstar
 
@@ -6277,9 +7270,10 @@ class DFSDynamicWaveSolver:
         rho = self.fields.rho.to_numpy().astype(np.float64, copy=False)
         rainfall = self.fields.rainfall.to_numpy().astype(np.float64, copy=False)
         nodata = self.fields.is_nodata.to_numpy().astype(bool, copy=False)
-        is_boundary = self.fields.is_boundary.to_numpy()
-        boundary_type = self.fields.boundary_type.to_numpy()
-        outflow = (is_boundary == 1) & (boundary_type == 1)
+        if self.runtime_control_plan.strict:
+            outflow = self.fields.dfs_outflow_mask.to_numpy() == 1
+        else:
+            outflow = self.fields.boundary_type.to_numpy() == 1
 
         kst = self.fields.K_sat_field.to_numpy().astype(np.float64, copy=False)
         theta_s = self.fields.theta_s_field.to_numpy().astype(np.float64, copy=False)
@@ -6445,11 +7439,14 @@ class DFSDynamicWaveSolver:
             fhw = self.fields.h[i, j] * (1.0 - cv / cvstar)
             self.fields.fhw[i, j] = fhw
 
-            inflx = 0.0
+            # Keep local scalar precision aligned with the f64 field state.
+            # Taichi otherwise infers a bare `0.0` local as f32 and rounds the
+            # staged forcing before it is committed to the predictor fields.
+            inflx = ti.cast(0.0, ti.f64)
             if dt > 0.0:
                 inflx = self.fields.tempri[i, j] + (self.fields.tempinflowh[i, j] + fhw) / dt
 
-            ir = 0.0
+            ir = ti.cast(0.0, ti.f64)
             depthwt0 = self.depthwt0_field[i, j]
             rizero0 = self.rizero0_field[i, j]
             if depthwt0 == 0.0 and rizero0 < 0.0:
@@ -6966,22 +7963,25 @@ class DFSDynamicWaveSolver:
                 fhw = 0.0
             self.fields.fhw[i, j] = fhw
 
-            inflx = 0.0
+            # This is the active Chamoli staged-forcing kernel (not the
+            # alternate WFS staging path above).  Preserve f64 intermediates
+            # before writing predictor fields.
+            inflx = ti.cast(0.0, ti.f64)
             if dt > 0.0:
                 if self.use_tol_subtracted_inflx:
                     inflx = (fhw - TOL) / dt
                     if inflx < 0.0:
-                        inflx = 0.0
+                        inflx = ti.cast(0.0, ti.f64)
                     if cv > CVTOL:
-                        inflx = 0.0
+                        inflx = ti.cast(0.0, ti.f64)
                 else:
                     inflx = fhw / dt
 
-            ir = 0.0
+            ir = ti.cast(0.0, ti.f64)
             depthwt0 = self.depthwt0_field[i, j]
             rizero0 = self.rizero0_field[i, j]
             if depthwt0 == 0.0 and rizero0 < 0.0:
-                ir = 0.0
+                ir = ti.cast(0.0, ti.f64)
             else:
                 kst = self.fields.K_sat_top_field[i, j]
                 if kst < inflx:
@@ -7015,16 +8015,24 @@ class DFSDynamicWaveSolver:
         rho_water: float,
         rho_sediment: float,
         cvstar: float,
-        erosion_cvbar_override_enabled: int = 0,
         erosion_cvbar_override: float = 0.0,
+        simulate_erosion: int = 1,
+        simulate_separate_deposition: int = 1,
+        *,
+        erosion_cvbar_override_enabled: int | None = None,
     ) -> None:
+        # Stale scalar cvbar is the only Fortran-consistent sfy path. The
+        # unused ``erosion_cvbar_override_enabled`` kwarg is accepted only so
+        # older diagnostic call sites keep compiling during the transition.
+        del erosion_cvbar_override_enabled
         self._compute_source_rates_kernel(
             dt,
             rho_water,
             rho_sediment,
             cvstar,
-            int(erosion_cvbar_override_enabled),
             float(erosion_cvbar_override),
+            int(simulate_erosion),
+            int(simulate_separate_deposition),
         )
 
     @ti.kernel
@@ -7034,11 +8042,10 @@ class DFSDynamicWaveSolver:
         rho_water: ti.f64,
         rho_sediment: ti.f64,
         cvstar: ti.f64,
-        erosion_cvbar_override_enabled: ti.i32,
         erosion_cvbar_override: ti.f64,
+        simulate_erosion: ti.i32,
+        simulate_separate_deposition: ti.i32,
     ):
-        rhoero = cvstar * (rho_sediment - rho_water) + rho_water
-
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 self.fields.erosion_rate[i, j] = 0.0
@@ -7048,7 +8055,6 @@ class DFSDynamicWaveSolver:
                 self.fields.absubar_vcomp_temp[i, j] = 0.0
                 self.fields.absubar_velocity_state_scale_temp[i, j] = 0.0
                 self.fields.absubar_selected_is_vorth_temp[i, j] = 0
-                self.fields.rhodepo_temp[i, j] = rhoero
                 self.fields.tau_temp[i, j] = 0.0
                 self.fields.taoc_temp[i, j] = 0.0
                 self.fields.taoc_old_temp[i, j] = 0.0
@@ -7069,7 +8075,9 @@ class DFSDynamicWaveSolver:
                 self.fields.deposition_gate_temp[i, j] = 0
                 self.fields.rholimit_clamp_temp[i, j] = 0
                 self.fields.erodible_clamp_temp[i, j] = 0
-                self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j]
+                self.fields.sfy_temp[i, j] = 0.0
+                self.fields.sfmanning_temp[i, j] = 0.0
+                self.fields.sfmiu_temp[i, j] = 0.0
                 self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j]
                 for d in ti.static(range(8)):
                     self.fields.absubar_fv_used_temp[i, j, d] = 0.0
@@ -7100,44 +8108,87 @@ class DFSDynamicWaveSolver:
             self.fields.deposition_gate_temp[i, j] = 0
             self.fields.rholimit_clamp_temp[i, j] = 0
             self.fields.erodible_clamp_temp[i, j] = 0
-            self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j]
+            self.fields.sfy_temp[i, j] = 0.0
+            self.fields.sfmanning_temp[i, j] = 0.0
+            self.fields.sfmiu_temp[i, j] = 0.0
+            # dfs.F90:128 seeds `tempinierodithick=inierodithick` once before
+            # the main loop; only the erosion branch below rewrites it.  Do
+            # not re-seed it per step (see D1 in the Chamoli parity audit).
             self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j]
             self.fields.absubar_vorth_temp[i, j] = 0.0
             self.fields.absubar_vcomp_temp[i, j] = 0.0
             self.fields.absubar_velocity_state_scale_temp[i, j] = 0.0
             self.fields.absubar_selected_is_vorth_temp[i, j] = 0
 
-            cv = 0.0
+            cv = ti.cast(0.0, self.fp)
             if rho_sediment > rho_water and self.fields.fhpredi1[i, j] > EPS:
                 cv = (self.fields.frhopredi1[i, j] - rho_water) / (rho_sediment - rho_water)
-            if cv < 0.0:
+            # dfs.F90 normalizes any sub-EPS predicted concentration before
+            # its source/deposition branches.  This is distinct from the
+            # TOL-based double-dry face gate and must not be widened to TOL.
+            if cv < EPS:
                 cv = 0.0
 
-            velocity_state_scale = 1.0
-            if ti.static(self.use_fortran_absubar_velocity_state):
-                # dfs.F90 resets fvpredi before the source-rate branch and
-                # computes fvpredi2=0.5*(fv+fvpredi), so vvmax=1 uses 0.5*fv.
-                velocity_state_scale = 0.5
-
-            fv0 = velocity_state_scale * self.fields.fv_fortran[i, j, 0]
-            fv1 = velocity_state_scale * self.fields.fv_fortran[i, j, 1]
-            fv2 = velocity_state_scale * self.fields.fv_fortran[i, j, 2]
-            fv3 = velocity_state_scale * self.fields.fv_fortran[i, j, 3]
-            fv4 = velocity_state_scale * self.fields.fv_fortran[i, j, 4]
-            fv5 = velocity_state_scale * self.fields.fv_fortran[i, j, 5]
-            fv6 = velocity_state_scale * self.fields.fv_fortran[i, j, 6]
-            fv7 = velocity_state_scale * self.fields.fv_fortran[i, j, 7]
-
-            vorth_x = 0.5 * (ti.abs(fv0) + ti.abs(fv4))
-            vorth_y = 0.5 * (ti.abs(fv2) + ti.abs(fv6))
-            vorth = ti.sqrt(vorth_x * vorth_x + vorth_y * vorth_y)
-
-            vcomp_x = 0.5 * (ti.abs(fv3) + ti.abs(fv7))
-            vcomp_y = 0.5 * (ti.abs(fv1) + ti.abs(fv5))
-            vcomp = ti.sqrt(vcomp_x * vcomp_x + vcomp_y * vcomp_y)
-            absubar = vorth
-            if vcomp > absubar:
-                absubar = vcomp
+            fv0 = self.fields.fv_fortran[i, j, 0]
+            fv1 = self.fields.fv_fortran[i, j, 1]
+            fv2 = self.fields.fv_fortran[i, j, 2]
+            fv3 = self.fields.fv_fortran[i, j, 3]
+            fv4 = self.fields.fv_fortran[i, j, 4]
+            fv5 = self.fields.fv_fortran[i, j, 5]
+            fv6 = self.fields.fv_fortran[i, j, 6]
+            fv7 = self.fields.fv_fortran[i, j, 7]
+            velocity_state_scale = ti.cast(1.0, self.fp)
+            vorth = ti.cast(0.0, self.fp)
+            vcomp = ti.cast(0.0, self.fp)
+            absubar = ti.cast(0.0, self.fp)
+            if ti.static(self.dfs_absubar_variant == "signed_mean_chamoli"):
+                # Chamoli dfs.F90:209-212 reconstructs a signed Cartesian speed
+                # from raw accepted `fv` (no fvpredi2 0.5 scale) with the
+                # dfs.F90 uses the unsuffixed literal ``0.707``. Preserve its
+                # default-REAL rounding before the value participates in the
+                # otherwise double-precision velocity expression.
+                diag = self.absubar_diagonal_literal[None]
+                vx = (fv4 - fv0) * 0.5 + (fv3 - fv7) * 0.5 * diag + (fv5 - fv1) * 0.5 * diag
+                vy = (fv2 - fv6) * 0.5 + (fv3 - fv7) * 0.5 * diag - (fv5 - fv1) * 0.5 * diag
+                absubar = ti.sqrt(vx * vx + vy * vy)
+                vorth = absubar
+            elif ti.static(self.dfs_absubar_variant == "weighted_signed_test31"):
+                # Test31 dfs.F90:210-212. Keep the source operation grouping:
+                # cardinal terms are weighted by 0.4142, each diagonal uses
+                # 0.707, then their signed group is weighted by 0.2929.
+                diag = self.absubar_diagonal_literal[None]
+                cardinal_weight = self.absubar_test31_cardinal_literal[None]
+                diagonal_group_weight = self.absubar_test31_diagonal_group_literal[None]
+                vx = (fv4 - fv0) * 0.5 * cardinal_weight + (
+                    (fv3 - fv7) * 0.5 * diag + (fv5 - fv1) * 0.5 * diag
+                ) * diagonal_group_weight
+                vy = (fv2 - fv6) * 0.5 * cardinal_weight + (
+                    (fv3 - fv7) * 0.5 * diag - (fv5 - fv1) * 0.5 * diag
+                ) * diagonal_group_weight
+                absubar = ti.sqrt(vx * vx + vy * vy)
+                vorth = absubar
+            else:
+                if ti.static(self.use_fortran_absubar_velocity_state):
+                    # dfs.F90 resets fvpredi before the source-rate branch and
+                    # computes fvpredi2=0.5*(fv+fvpredi), so vvmax=1 uses 0.5*fv.
+                    velocity_state_scale = 0.5
+                fv0 = velocity_state_scale * fv0
+                fv1 = velocity_state_scale * fv1
+                fv2 = velocity_state_scale * fv2
+                fv3 = velocity_state_scale * fv3
+                fv4 = velocity_state_scale * fv4
+                fv5 = velocity_state_scale * fv5
+                fv6 = velocity_state_scale * fv6
+                fv7 = velocity_state_scale * fv7
+                vorth_x = 0.5 * (ti.abs(fv0) + ti.abs(fv4))
+                vorth_y = 0.5 * (ti.abs(fv2) + ti.abs(fv6))
+                vorth = ti.sqrt(vorth_x * vorth_x + vorth_y * vorth_y)
+                vcomp_x = 0.5 * (ti.abs(fv3) + ti.abs(fv7))
+                vcomp_y = 0.5 * (ti.abs(fv1) + ti.abs(fv5))
+                vcomp = ti.sqrt(vcomp_x * vcomp_x + vcomp_y * vcomp_y)
+                absubar = vorth
+                if vcomp > absubar:
+                    absubar = vcomp
             self.fields.absubar_temp[i, j] = absubar
             self.fields.absubar_vorth_temp[i, j] = vorth
             self.fields.absubar_vcomp_temp[i, j] = vcomp
@@ -7176,22 +8227,28 @@ class DFSDynamicWaveSolver:
             self.fields.depo_velocity_branch_fvpredi2[i, j, 6] = fv6
             self.fields.depo_velocity_branch_fvpredi2[i, j, 7] = fv7
 
-            fvdepo = 0.0
-            if cv > 0.0:
+            fvdepo = ti.cast(0.0, self.fp)
+            # Original DFS sets this finite fallback before deciding whether
+            # Cv is large enough for the power expression. Keeping the value
+            # explicit avoids introducing an Inf/NaN path for tiny positives.
+            lambdainverse = ti.cast(10000.0, self.fp)
+            if cv >= EPS:
                 # Match dfs.F90 literally: `(cvstar/cv(i))**0.333-1`
                 lambdainverse = ti.pow(cvstar / cv, DFS_LAMBDA_EXP) - 1.0
-                phi_rad = self.fields.phi_field[i, j] * DEG2RAD
-                tanthetae = cv * (rho_sediment - rho_water) * ti.tan(phi_rad) / (cv * (rho_sediment - rho_water) + rho_water)
-                sinthetae = ti.sin(ti.atan2(tanthetae, 1.0))
-                if self.d50 > 0.0:
-                    fvdepo = (
-                        2.0 / 5.0 / self.d50
-                        * ti.sqrt(self.g * sinthetae * self.fields.frhopredi1[i, j] / DFS_ARTIVIS_COEFF / rho_sediment)
-                        * lambdainverse
-                        * ti.pow(self.fields.fhpredi1[i, j], 1.5)
-                    )
+            phi_rad = self.fields.phi_field[i, j] * DEG2RAD
+            tanthetae = cv * (rho_sediment - rho_water) * ti.tan(phi_rad) / (cv * (rho_sediment - rho_water) + rho_water)
+            sinthetae = ti.sin(ti.atan2(tanthetae, 1.0))
+            if self.d50 > 0.0:
+                # Match dfs.F90:380 literally: `2./5./d50*(...)**0.5*...`; the
+                # `2./5.` product is a default-REAL constant fold.
+                fvdepo = (
+                    DFS_TWO_FIFTHS / self.d50
+                    * ti.sqrt(self.g * sinthetae * self.fields.frhopredi1[i, j] / DFS_ARTIVIS_COEFF / rho_sediment)
+                    * lambdainverse
+                    * ti.pow(self.fields.fhpredi1[i, j], 1.5)
+                )
 
-            erorate = 0.0
+            erorate = ti.cast(0.0, self.fp)
             if cv < cvlimit and self.fields.fhpredi1[i, j] > TOL:
                 gammadeb = self.fields.frhopredi1[i, j] * self.g
                 phi_rad = self.fields.phi_field[i, j] * DEG2RAD
@@ -7201,10 +8258,9 @@ class DFSDynamicWaveSolver:
                 slo_dynamic = ti.atan2(self.fields.tanslo_fortran[i, j], 1.0)
                 normfriccoe = ti.cos(slo_dynamic) ** 2 * ti.tan(phi_rad)
 
-                sfy = 0.0
-                sfy_cv = cv
-                if erosion_cvbar_override_enabled != 0:
-                    sfy_cv = erosion_cvbar_override
+                sfy = ti.cast(0.0, self.fp)
+                # Fortran reuses the previous face-flux scalar `cvbar` for sfy.
+                sfy_cv = erosion_cvbar_override
                 if sfy_cv > CVTOL:
                     if slo_dynamic > DFS_SLOPE_BRANCH:
                         sfy = (1.0 - self.cs) * sfy_cv * (rho_sediment - rho_water) / self.fields.frhopredi1[i, j] * normfriccoe
@@ -7228,10 +8284,17 @@ class DFSDynamicWaveSolver:
 
                 manningbar = self.fields.n_manning_field[i, j]
                 if cv > CVTOL:
-                    manningbar = manningbar * self.manningb * ti.exp(self.manningm * cv)
+                    if ti.static(self.dfs_manningbar_variant == "debrisflowmanning_cvtol"):
+                        manningbar = self.debrisflowmanning
+                    else:
+                        manningbar = manningbar * self.manningb * ti.exp(self.manningm * cv)
                 # Match dfs.F90 literally: `manningbar**2./fhpredi1(i)**1.333`
                 coemanning = manningbar * manningbar / ti.pow(self.fields.fhpredi1[i, j], DFS_MANNING_EXP)
                 sfmanning = coemanning * absubar * absubar
+
+                self.fields.sfy_temp[i, j] = sfy
+                self.fields.sfmanning_temp[i, j] = sfmanning
+                self.fields.sfmiu_temp[i, j] = sfmiu
 
                 tao = (sfmanning + sfy + sfmiu) * gammadeb * self.fields.fhpredi1[i, j]
                 taoc_old = self.fields.c_field[i, j] + self.fields.frhopredi1[i, j] * self.g * self.fields.fhpredi1[i, j] * ti.tan(phi_rad)
@@ -7266,6 +8329,12 @@ class DFSDynamicWaveSolver:
                     erorate = self.fields.kero_field[i, j] * (tao - taoc)
                 self.fields.erorate_raw_temp[i, j] = erorate
 
+                # Chamoli dfs.F90:444 rhoero=cvero(zo); BJ dfs.F90:102 rhoero=cvstar.
+                cvero_local = self.fields.cvero_field[i, j]
+                if cvero_local < 0.0:
+                    cvero_local = cvstar
+                rhoero = cvero_local * (rho_sediment - rho_water) + rho_water
+
                 if (self.fields.frhopredi1[i, j] * self.fields.fhpredi1[i, j] + erorate * dt * rhoero) > (rholimit * (self.fields.fhpredi1[i, j] + erorate * dt)):
                     denominator = rhoero - rholimit
                     if denominator != 0.0 and dt != 0.0:
@@ -7273,6 +8342,14 @@ class DFSDynamicWaveSolver:
                         erorate = (rholimit - self.fields.frhopredi1[i, j]) * self.fields.fhpredi1[i, j] / denominator / dt
                 self.fields.erorate_rholimit_clamped_temp[i, j] = erorate
 
+            # dfs.F90:450-455 runs for EVERY cell that passed `cv<cvlimit`
+            # (the `else cycle` at :437-439 is the only exit), including dry or
+            # thin cells whose `erorate` stayed 0.  Those cells therefore
+            # refresh `tempinierodithick(i)=inierodithick(i)` each step, while
+            # `cv>=cvlimit` cells keep the stale value from their last visit.
+            # `erosionsimul=.false.` skips the whole block, so the seed value
+            # persists unchanged for the entire run.
+            if simulate_erosion == 1 and cv < cvlimit:
                 if erorate * dt <= self.fields.erodible_thickness[i, j]:
                     self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j] - erorate * dt
                 else:
@@ -7282,9 +8359,62 @@ class DFSDynamicWaveSolver:
                     self.fields.temp_erodible_thickness[i, j] = 0.0
                 self.fields.erorate_clamped_temp[i, j] = erorate
 
-            deporate = 0.0
-            rhodepo = rhoero
-            if cv > cvlimit and absubar < DFS_TWO_THIRDS * fvdepo:
+            # `dfs.F90` evaluates `taoc` whenever `cv < cvlimit`, including
+            # source states too dry for the rate terms. Its friction terms can
+            # be non-finite in that dry branch because they divide by depth,
+            # but `taoc` itself is well defined. Preserve the production
+            # numerical gate above and capture this diagnostic-only value so a
+            # probe never represents an inapplicable term as a synthetic zero.
+            if cv < cvlimit and self.fields.fhpredi1[i, j] <= TOL:
+                phi_rad_probe = self.fields.phi_field[i, j] * DEG2RAD
+                slo_dynamic_probe = ti.atan2(self.fields.tanslo_fortran[i, j], 1.0)
+                self.fields.taoc_temp[i, j] = (
+                    self.fields.ctao_field[i, j]
+                    + (1.0 - self.cs)
+                    * cv
+                    * (rho_sediment - rho_water)
+                    * self.g
+                    * self.fields.h[i, j]
+                    * ti.cos(slo_dynamic_probe)
+                    * ti.cos(slo_dynamic_probe)
+                    * ti.tan(phi_rad_probe)
+                )
+
+            deporate = ti.cast(0.0, self.fp)
+            # dfs.F90:113 seeds `rhodepo=cvstar*(rhos-rhow)+rhow` once (even
+            # when rhoero uses cvero); the per-step reset at :174 is commented
+            # out.  Start from the persistent per-cell value so an earlier
+            # clamp (:473/:489) keeps lowering the deposit density forever.
+            rhodepo = self.fields.rhodepo[i, j]
+            barrier_cv_high = DFS_BARRIER_CV_HIGH
+            if ti.static(self.dfs_barrier_flux_variant == "bj_barrier_branch"):
+                barrier_cv_high = DFS_BARRIER_CV_HIGH_BJ
+            # dfs.F90:468-479: cells with persistent `barrier(i)>0` take the
+            # barrier deposition branch and skip the ordinary cvlimit law.
+            # Chamoli uses cv>0.4; BJ uses cv>0.65.
+            if self.fields.barrier[i, j] > 0.0:
+                if (self.fields.fhpredi[i, j] + self.fields.z_bed[i, j]) < (
+                    self.fields.barrier[i, j] + self.fields.z_original[i, j]
+                ):
+                    if cv > barrier_cv_high:
+                        self.fields.deposition_gate_temp[i, j] = 1
+                        deporate = -self.fields.fhpredi1[i, j] * cv / cvstar / dt
+                        self.fields.deporate_raw_temp[i, j] = deporate
+                        if ti.abs(deporate * dt) > self.fields.fhpredi1[i, j] and dt > 0.0:
+                            deporate = -self.fields.fhpredi1[i, j] / dt
+                        if ti.abs(deporate * dt * rhodepo) > self.fields.fhpredi1[i, j] * self.fields.frhopredi1[i, j]:
+                            denominator = deporate * dt
+                            if denominator != 0.0:
+                                rhodepo = -self.fields.fhpredi1[i, j] * self.fields.frhopredi1[i, j] / denominator
+                        if (self.fields.frhopredi1[i, j] * self.fields.fhpredi1[i, j] + deporate * dt * rhodepo) < (
+                            rho_water * (self.fields.fhpredi1[i, j] + deporate * dt)
+                        ):
+                            denominator = rhodepo - rho_water
+                            if denominator != 0.0 and dt != 0.0:
+                                deporate = (rho_water - self.fields.frhopredi1[i, j]) * self.fields.fhpredi1[i, j] / denominator / dt
+                        self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j] + ti.abs(deporate * dt)
+                        self.fields.deporate_clamped_temp[i, j] = deporate
+            elif cv > cvlimit and absubar < DFS_TWO_THIRDS * fvdepo:
                 self.fields.deposition_gate_temp[i, j] = 1
                 deporate = self.coedepo * (1.0 - 1.5 * absubar / fvdepo) * (cvlimit - cv) / cvstar * absubar
                 self.fields.deporate_raw_temp[i, j] = deporate
@@ -7301,9 +8431,25 @@ class DFSDynamicWaveSolver:
                 self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j] + ti.abs(deporate * dt)
                 self.fields.deporate_clamped_temp[i, j] = deporate
 
+            if simulate_erosion == 0:
+                erorate = 0.0
+                self.fields.erosion_gate_temp[i, j] = 0
+                self.fields.erorate_raw_temp[i, j] = 0.0
+                self.fields.erorate_rholimit_clamped_temp[i, j] = 0.0
+                self.fields.erorate_clamped_temp[i, j] = 0.0
+            if simulate_separate_deposition == 0:
+                deporate = 0.0
+                self.fields.deposition_gate_temp[i, j] = 0
+                self.fields.deporate_raw_temp[i, j] = 0.0
+                self.fields.deporate_clamped_temp[i, j] = 0.0
+                self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j]
+                # `sepdepositionsimul=.false.` never enters the branch that
+                # mutates `rhodepo(i)`; keep the persistent value untouched.
+                rhodepo = self.fields.rhodepo[i, j]
+
             self.fields.erosion_rate[i, j] = erorate
             self.fields.deposition_rate[i, j] = deporate
-            self.fields.rhodepo_temp[i, j] = rhodepo
+            self.fields.rhodepo[i, j] = rhodepo
 
     @ti.kernel
     def _merge_source_terms(
@@ -7313,8 +8459,6 @@ class DFSDynamicWaveSolver:
         rho_sediment: ti.f64,
         cvstar: ti.f64,
     ):
-        rhoero = cvstar * (rho_sediment - rho_water) + rho_water
-
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 self.fields.tempele[i, j] = self.fields.z_bed[i, j]
@@ -7339,10 +8483,15 @@ class DFSDynamicWaveSolver:
                 self.fields.frhopredi[i, j] = rho_water
             else:
                 self.fields.fhpredi[i, j] = fhpredi
+                # Chamoli dfs.F90:572 uses per-cell cvero for the erosion mass term.
+                cvero_local = self.fields.cvero_field[i, j]
+                if cvero_local < 0.0:
+                    cvero_local = cvstar
+                rhoero = cvero_local * (rho_sediment - rho_water) + rho_water
                 mass = (
                     self.fields.frhopredi1[i, j] * self.fields.fhpredi1[i, j]
                     + self.fields.erosion_rate[i, j] * dt * rhoero
-                    + self.fields.deposition_rate[i, j] * dt * self.fields.rhodepo_temp[i, j]
+                    + self.fields.deposition_rate[i, j] * dt * self.fields.rhodepo[i, j]
                     + self.fields.tempfsh_flow[i, j] * self.fields.tempfsrho_flow[i, j]
                 )
                 self.fields.frhopredi[i, j] = mass / fhpredi
@@ -7397,11 +8546,19 @@ class DFSDynamicWaveSolver:
                         face_owner_active = self.fields.cell_id[i, j] > self.fields.cell_id[ni, nj]
                     if face_owner_active:
                         opp = ti.static(FORTRAN_OPPOSITE_DIR[d])
-                        dt0 = 0.0
+                        dt0 = ti.cast(0.0, ti.f64)
 
                         hi = self.fields.fhpredi[i, j] + self.fields.tempele[i, j]
                         hn = self.fields.fhpredi[ni, nj] + self.fields.tempele[ni, nj]
                         use_both_thin_weighted = ti.static(self.dfs_face_flux_variant == "both_thin_weighted")
+                        use_arithmetic_mean_chamoli = ti.static(
+                            self.dfs_face_flux_variant == "arithmetic_mean_chamoli"
+                        )
+                        use_both_thin_gate = ti.static(use_both_thin_weighted or use_arithmetic_mean_chamoli)
+                        use_weighted_hbar = ti.static(use_both_thin_weighted or use_arithmetic_mean_chamoli)
+                        use_uniform_diagonal_width = ti.static(
+                            use_both_thin_weighted or use_arithmetic_mean_chamoli
+                        )
                         face_gate_tol = TOL + ti.static(self.dfs_face_gate_tol_eps)
 
                         gate_blocks_face = False
@@ -7422,7 +8579,7 @@ class DFSDynamicWaveSolver:
                                 (self.fields.fhpredi[i, j] <= face_gate_tol and hi >= hn)
                                 or (self.fields.fhpredi[ni, nj] <= face_gate_tol and hn >= hi)
                             )
-                        elif ti.static(use_both_thin_weighted):
+                        elif ti.static(use_both_thin_gate):
                             gate_blocks_face = (
                                 self.fields.fhpredi[i, j] <= face_gate_tol
                                 and self.fields.fhpredi[ni, nj] <= face_gate_tol
@@ -7520,7 +8677,7 @@ class DFSDynamicWaveSolver:
                             # dfs.F90. In thin-front cells, even tiny grouping
                             # changes can move a face across the `tol` gate a
                             # step earlier or later.
-                            grad = 0.0
+                            grad = ti.cast(0.0, ti.f64)
                             if d == 0 or d == 2 or d == 4 or d == 6:
                                 grad = (hn - hi) / self.fields.dx
                             else:
@@ -7528,7 +8685,7 @@ class DFSDynamicWaveSolver:
                             area_i = self.fields.cell_area_cal[i, j]
                             area_n = self.fields.cell_area_cal[ni, nj]
                             hbar = 0.5 * (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj])
-                            if ti.static(use_both_thin_weighted):
+                            if ti.static(use_weighted_hbar):
                                 hbar = (
                                     self.fields.fhpredi[i, j] * area_i
                                     + self.fields.fhpredi[ni, nj] * area_n
@@ -7536,34 +8693,40 @@ class DFSDynamicWaveSolver:
                             ybar = hbar
                             self.fields.fybar_fortran[i, j, d] = ybar
 
-                            fvpred = 0.0
-                            frhoflux = rho_water
-                            cv_source = 0.0
-                            cv_neighbor = 0.0
-                            cvbar = 0.0
-                            miubar = 0.0
-                            manningbar = 0.0
-                            frhobar = rho_water
-                            gammadeb = rho_water * self.g
-                            sfy = 0.0
-                            sfmiu = 0.0
-                            sfmanning = 0.0
-                            sf = 0.0
-                            localvdiff = 0.0
-                            artivis = 0.0
-                            vdiff_term = 0.0
-                            dv = 0.0
+                            # These values live across multiple branch arms in
+                            # the Fortran face loop.  Initializing them from
+                            # bare Python literals silently creates f32 Taichi
+                            # locals even for the production f64 field layout.
+                            # That was the first remaining numerical divergence
+                            # after the DEM precision chain was corrected.
+                            fvpred = ti.cast(0.0, ti.f64)
+                            frhoflux = ti.cast(rho_water, ti.f64)
+                            cv_source = ti.cast(0.0, ti.f64)
+                            cv_neighbor = ti.cast(0.0, ti.f64)
+                            cvbar = ti.cast(0.0, ti.f64)
+                            miubar = ti.cast(0.0, ti.f64)
+                            manningbar = ti.cast(0.0, ti.f64)
+                            frhobar = ti.cast(rho_water, ti.f64)
+                            gammadeb = ti.cast(rho_water * self.g, ti.f64)
+                            sfy = ti.cast(0.0, ti.f64)
+                            sfmiu = ti.cast(0.0, ti.f64)
+                            sfmanning = ti.cast(0.0, ti.f64)
+                            sf = ti.cast(0.0, ti.f64)
+                            localvdiff = ti.cast(0.0, ti.f64)
+                            artivis = ti.cast(0.0, ti.f64)
+                            vdiff_term = ti.cast(0.0, ti.f64)
+                            dv = ti.cast(0.0, ti.f64)
                             fv_old = self.fields.fv_fortran[i, j, d]
-                            fvpred_before_clamp = 0.0
+                            fvpred_before_clamp = ti.cast(0.0, ti.f64)
                             clamp_status = 0
                             sign_flip_status = 0
-                            fvlimit = 0.0
-                            yflux = 0.0
-                            width = 0.0
-                            qqt = 0.0
-                            qq = 0.0
-                            qqmass = 0.0
-                            source_depth_rate = 0.0
+                            fvlimit = ti.cast(0.0, ti.f64)
+                            yflux = ti.cast(0.0, ti.f64)
+                            width = ti.cast(0.0, ti.f64)
+                            qqt = ti.cast(0.0, ti.f64)
+                            qq = ti.cast(0.0, ti.f64)
+                            qqmass = ti.cast(0.0, ti.f64)
+                            source_depth_rate = ti.cast(0.0, ti.f64)
                             if ybar != 0.0:
                                 cv_source = (self.fields.frhopredi[i, j] - rho_water) / (rho_sediment - rho_water)
                                 cv_neighbor = (self.fields.frhopredi[ni, nj] - rho_water) / (rho_sediment - rho_water)
@@ -7582,6 +8745,19 @@ class DFSDynamicWaveSolver:
                                     )
                                     if depth_area > 0.0:
                                         cvbar = (parai * area_i + paran * area_n) / depth_area
+                                elif ti.static(use_arithmetic_mean_chamoli):
+                                    # Chamoli dfs.F90:634 — area-mean Cv without depth weighting.
+                                    cvbar = (cv_source * area_i + cv_neighbor * area_n) / (area_i + area_n)
+
+                                # dfs.F90 leaves the local scalar from the last
+                                # executed ``ybar /= 0`` face.  CUDA evaluates
+                                # faces in parallel, so retain just the greatest
+                                # serial Fortran-order key; the host consumes it
+                                # only after this candidate's face pass finishes.
+                                ti.atomic_max(
+                                    self.legacy_cvbar_assignment_fortran_order[None],
+                                    self.fields.cell_id[i, j] * 8 + d,
+                                )
 
                                 miubar = DFS_MIU_BASE + cvbar / CVTOL * (
                                     self.fields.alpha2_field[i, j] * ti.exp(self.fields.beta2_field[i, j] * CVTOL) - DFS_MIU_BASE
@@ -7591,7 +8767,8 @@ class DFSDynamicWaveSolver:
 
                                 manningbar = 0.5 * (ti.abs(self.fields.n_manning_field[i, j]) + ti.abs(self.fields.n_manning_field[ni, nj]))
                                 if cvbar > CVTOL:
-                                    manningbar = manningbar * self.manningb * ti.exp(self.manningm * cvbar)
+                                    if ti.static(self.dfs_manningbar_variant != "debrisflowmanning_cvtol"):
+                                        manningbar = manningbar * self.manningb * ti.exp(self.manningm * cvbar)
 
                                 frhobar = 0.5 * (self.fields.frhopredi[i, j] + self.fields.frhopredi[ni, nj])
                                 if ti.static(use_both_thin_weighted):
@@ -7604,6 +8781,7 @@ class DFSDynamicWaveSolver:
                                             self.fields.frhopredi[i, j] * self.fields.fhpredi[i, j] * area_i
                                             + self.fields.frhopredi[ni, nj] * self.fields.fhpredi[ni, nj] * area_n
                                         ) / depth_area
+                                # arithmetic_mean_chamoli and asymmetric keep 0.5*(ρi+ρnq).
                                 if frhobar < rho_water:
                                     frhobar = rho_water
                                 gammadeb = frhobar * self.g
@@ -7641,7 +8819,7 @@ class DFSDynamicWaveSolver:
                                     localvdiff = 0.5 * (self.fields.fv_fortran[ni, nj, d] + self.fields.fv_fortran[i, j, opp])
                                     artivis = self.fields.fv_fortran[ni, nj, d] - 2.0 * self.fields.fv_fortran[i, j, d] - self.fields.fv_fortran[i, j, opp]
 
-                                    vdiff_term = 0.0
+                                    vdiff_term = ti.cast(0.0, ti.f64)
                                     if d == 0 or d == 2 or d == 4 or d == 6:
                                         vdiff_term = fv_old * localvdiff / self.fields.dx / self.g
                                     else:
@@ -7652,12 +8830,34 @@ class DFSDynamicWaveSolver:
                                         + self.fields.erosion_rate[i, j]
                                         + self.fields.deposition_rate[i, j]
                                     )
+                                    artivis_weight = (
+                                        DFS_ARTIVIS_COEFF
+                                        * ti.abs(self.fields.fhpredi[i, j] - self.fields.fhpredi[ni, nj])
+                                        / (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj])
+                                    )
+                                    if ti.static(self.dfs_artivis_variant == "velocity_ratio_chamoli"):
+                                        fv_neighbor = self.fields.fv_fortran[ni, nj, d]
+                                        artivis_weight = (
+                                            DFS_ARTIVIS_COEFF
+                                            * ti.abs(fv_neighbor - fv_old)
+                                            / (ti.abs(fv_neighbor) + ti.abs(fv_old) + 1.0)
+                                        )
+                                        if not (d == 0 or d == 2 or d == 4 or d == 6):
+                                            artivis_weight = artivis_weight / SQRT2
                                     dv = (
                                         (-grad - sf - vdiff_term) * self.g * dt
-                                        + DFS_ARTIVIS_COEFF * ti.abs(self.fields.fhpredi[i, j] - self.fields.fhpredi[ni, nj]) / (self.fields.fhpredi[i, j] + self.fields.fhpredi[ni, nj]) * artivis
+                                        + artivis_weight * artivis
                                         - fv_old * source_depth_rate * dt / ybar
                                     )
                                     fvpred = dv + fv_old
+
+                                    if ti.static(self.dfs_dry_face_velocity_variant == "zero_dry_face_chamoli"):
+                                        # Chamoli dfs.F90:736-737, after fvpredi=dv+fv and
+                                        # before the sign-reversal check.
+                                        if fvpred < 0.0 and self.fields.fhpredi[ni, nj] <= TOL:
+                                            fvpred = 0.0
+                                        if fvpred > 0.0 and self.fields.fhpredi[i, j] <= TOL:
+                                            fvpred = 0.0
 
                                     if fv_old * fvpred < 0.0:
                                         dt0 = -fv_old / (dv / dt)
@@ -7689,14 +8889,22 @@ class DFSDynamicWaveSolver:
                                     dttest = DFS_CFL_COEFF * self.fields.dx / (vel + ti.sqrt(self.g * ybar))
                                     if dt > dttest:
                                         self.reject_flag[None] = 1
+                                        ti.atomic_min(
+                                            self.cfl_reject_fortran_order[None],
+                                            self.fields.cell_id[i, j] * 8 + d,
+                                        )
                                         self._record_first_reject(FIRST_REJECT_CFL, i, j, ni, nj, d, dt, dttest)
                                 else:
                                     dttest = DFS_CFL_COEFF * self.fields.dx * SQRT2 / (vel + ti.sqrt(self.g * ybar))
                                     if dt > dttest:
                                         self.reject_flag[None] = 1
+                                        ti.atomic_min(
+                                            self.cfl_reject_fortran_order[None],
+                                            self.fields.cell_id[i, j] * 8 + d,
+                                        )
                                         self._record_first_reject(FIRST_REJECT_CFL, i, j, ni, nj, d, dt, dttest)
 
-                                yflux = 0.0
+                                yflux = ti.cast(0.0, ti.f64)
                                 if fvpred >= 0.0:
                                     yflux = ti.min(self.fields.fhpredi[i, j], hbar)
                                     frhoflux = self.fields.frhopredi[i, j]
@@ -7704,11 +8912,132 @@ class DFSDynamicWaveSolver:
                                     yflux = ti.min(self.fields.fhpredi[ni, nj], hbar)
                                     frhoflux = self.fields.frhopredi[ni, nj]
                                 width = _direction_width(self.fields.dx, d)
-                                if ti.static(use_both_thin_weighted):
+                                if ti.static(use_uniform_diagonal_width):
                                     width = self.fields.dx * (SQRT2 - 1.0)
                                 qqt = fvpred * yflux * width
                                 qq = qqt * (dt - dt0)
                                 qqmass = frhoflux * qq
+
+                                if ti.static(self.dfs_barrier_flux_variant == "chamoli_scour_kill_or"):
+                                    # Chamoli dfs.F90:866-921, executed after the
+                                    # flux is formed and before the mirror copy.
+                                    # `barrier(i)` is a persistent array that the
+                                    # deposition branch (:468) reads next step.
+                                    # dfs.F90:866-869 writes flexible then rigid
+                                    # for both cells on every active face, so the
+                                    # serial end state is `rigid if rigid>0 else
+                                    # flexible`.  Write that directly so parallel
+                                    # faces cannot race to a different value.
+                                    if self.fields.rigid[i, j] > 0.0:
+                                        self.fields.barrier[i, j] = self.fields.rigid[i, j]
+                                    elif self.fields.flexible[i, j] > 0.0:
+                                        self.fields.barrier[i, j] = self.fields.flexible[i, j]
+                                    if self.fields.rigid[ni, nj] > 0.0:
+                                        self.fields.barrier[ni, nj] = self.fields.rigid[ni, nj]
+                                    elif self.fields.flexible[ni, nj] > 0.0:
+                                        self.fields.barrier[ni, nj] = self.fields.flexible[ni, nj]
+
+                                    # `cv(i)` here is the this-step array from
+                                    # dfs.F90:357 (frhopredi1-based, eps-floored).
+                                    cv_owner = (self.fields.frhopredi1[i, j] - rho_water) / (rho_sediment - rho_water)
+                                    if cv_owner < EPS:
+                                        cv_owner = 0.0
+                                    surface_i = self.fields.fhpredi[i, j] + self.fields.z_bed[i, j]
+                                    surface_n = self.fields.fhpredi[ni, nj] + self.fields.z_bed[ni, nj]
+
+                                    # Flexible barrier branch (dfs.F90:878-908).
+                                    if fvpred > 0.0 and self.fields.flexible[i, j] > 0.0:
+                                        if surface_i < self.fields.flexible[i, j] + self.fields.z_original[i, j]:
+                                            if cv_owner < DFS_BARRIER_CV_LOW:
+                                                qq = fvpred * yflux * width * (dt - dt0)
+                                                qqmass = frhoflux * qq
+                                            elif cv_owner < DFS_BARRIER_CV_HIGH:
+                                                fvpred = DFS_FLEXIBLE_VELOCITY_FACTOR * fvpred
+                                                qqt = fvpred * yflux * width
+                                                qq = qqt * (dt - dt0)
+                                                qqmass = DFS_FLEXIBLE_MASS_DENSITY * qq
+                                            else:
+                                                fvpred = 0.0
+                                                qqt = 0.0
+                                                qq = 0.0
+                                                qqmass = 0.0
+                                    elif fvpred < 0.0 and self.fields.flexible[ni, nj] > 0.0:
+                                        if surface_n < self.fields.flexible[ni, nj] + self.fields.z_original[ni, nj]:
+                                            if cv_owner < DFS_BARRIER_CV_LOW:
+                                                qq = fvpred * yflux * width * (dt - dt0)
+                                                qqmass = frhoflux * qq
+                                            elif cv_owner < DFS_BARRIER_CV_HIGH:
+                                                fvpred = DFS_FLEXIBLE_VELOCITY_FACTOR * fvpred
+                                                qqt = fvpred * yflux * width
+                                                qq = qqt * (dt - dt0)
+                                                qqmass = DFS_FLEXIBLE_MASS_DENSITY * qq
+                                            else:
+                                                fvpred = 0.0
+                                                qqt = 0.0
+                                                qq = 0.0
+                                                qqmass = 0.0
+
+                                    # Rigid branch (dfs.F90:909-921).  The source
+                                    # literally reads `.or. rigid(nq)>0`, so with
+                                    # no barrier grids every negative-velocity
+                                    # face is killed when the neighbour's free
+                                    # surface sits below its original ground
+                                    # (`fhpredi(nq) < eleori(nq)-ele(nq)`, i.e. the
+                                    # cell's cumulative scour depth).
+                                    if fvpred > 0.0 and self.fields.rigid[i, j] > 0.0:
+                                        if surface_i < self.fields.rigid[i, j] + self.fields.z_original[i, j]:
+                                            fvpred = 0.0
+                                            qqt = 0.0
+                                            qq = 0.0
+                                            qqmass = 0.0
+                                    elif fvpred < 0.0 or self.fields.rigid[ni, nj] > 0.0:
+                                        if surface_n < self.fields.rigid[ni, nj] + self.fields.z_original[ni, nj]:
+                                            fvpred = 0.0
+                                            qqt = 0.0
+                                            qq = 0.0
+                                            qqmass = 0.0
+                                    self.fields.fv_pred_fortran[i, j, d] = fvpred
+                                elif ti.static(self.dfs_barrier_flux_variant == "bj_barrier_branch"):
+                                    # BJ dfs.F90:875-916: `if flexible or neighbor
+                                    # flexible` / `elseif rigid or neighbor rigid`
+                                    # / `else` plain flux.  Without barrier grids
+                                    # the else branch leaves qq untouched.
+                                    if self.fields.rigid[i, j] > 0.0:
+                                        self.fields.barrier[i, j] = self.fields.rigid[i, j]
+                                    elif self.fields.flexible[i, j] > 0.0:
+                                        self.fields.barrier[i, j] = self.fields.flexible[i, j]
+                                    if self.fields.rigid[ni, nj] > 0.0:
+                                        self.fields.barrier[ni, nj] = self.fields.rigid[ni, nj]
+                                    elif self.fields.flexible[ni, nj] > 0.0:
+                                        self.fields.barrier[ni, nj] = self.fields.flexible[ni, nj]
+
+                                    cv_owner = (self.fields.frhopredi1[i, j] - rho_water) / (rho_sediment - rho_water)
+                                    if cv_owner < EPS:
+                                        cv_owner = 0.0
+                                    surface_i = self.fields.fhpredi[i, j] + self.fields.z_bed[i, j]
+
+                                    if self.fields.flexible[i, j] > 0.0 or self.fields.flexible[ni, nj] > 0.0:
+                                        if surface_i < self.fields.flexible[i, j] + self.fields.z_original[i, j]:
+                                            if cv_owner < DFS_BARRIER_CV_LOW:
+                                                qq = fvpred * yflux * width * (dt - dt0)
+                                                qqmass = frhoflux * qq
+                                            elif cv_owner < DFS_BARRIER_CV_HIGH_BJ:
+                                                fvpred = DFS_FLEXIBLE_VELOCITY_FACTOR * fvpred
+                                                qqt = fvpred * yflux * width
+                                                qq = qqt * (dt - dt0)
+                                                qqmass = DFS_FLEXIBLE_MASS_DENSITY * qq
+                                            else:
+                                                fvpred = 0.0
+                                                qqt = 0.0
+                                                qq = 0.0
+                                                qqmass = 0.0
+                                    elif self.fields.rigid[i, j] > 0.0 or self.fields.rigid[ni, nj] > 0.0:
+                                        if surface_i < self.fields.rigid[i, j] + self.fields.z_original[i, j]:
+                                            fvpred = 0.0
+                                            qqt = 0.0
+                                            qq = 0.0
+                                            qqmass = 0.0
+                                    self.fields.fv_pred_fortran[i, j, d] = fvpred
 
                                 if ti.static(probe_enabled and probe_lightweight):
                                     target_cell_id = self.momentum_faceflux_probe_target_cell_id[None]
@@ -7985,9 +9314,9 @@ class DFSDynamicWaveSolver:
                 self.fields.frhopredi2[i, j] = rho_water
                 continue
 
-            qtnet = 0.0
-            qnet = 0.0
-            qmassnet = 0.0
+            qtnet = ti.cast(0.0, ti.f64)
+            qnet = ti.cast(0.0, ti.f64)
+            qmassnet = ti.cast(0.0, ti.f64)
             for d in ti.static(range(8)):
                 qtnet -= self.fields.qqt_fortran[i, j, d]
                 qnet -= self.fields.qq_fortran[i, j, d]
@@ -8074,6 +9403,15 @@ class DFSDynamicWaveSolver:
 
     @ti.kernel
     def _accumulate_volume_balance(self, dt: ti.f64):
+        self.acc_outflowvolume[None] = 0.0
+        self.acc_infilvolume[None] = 0.0
+        self.acc_inflowvolume[None] = 0.0
+        self.acc_rivolume[None] = 0.0
+        self.acc_erosionvolume[None] = 0.0
+        self.acc_fsvolume[None] = 0.0
+        self.acc_depovolume[None] = 0.0
+        self.acc_flowvolume[None] = 0.0
+        self.acc_depositvolume[None] = 0.0
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 continue
@@ -8120,6 +9458,8 @@ class DFSDynamicWaveSolver:
         self.cand_totaldepovolume[None] = tempdepovolume
 
         denominator = temprivolume + tempinflowvolume + temperosionvolume + tempfsvolume
+        volumeerror = ti.cast(0.0, ti.f64)
+        volumerelaerror = ti.cast(0.0, ti.f64)
         if denominator > EPS:
             volumeerror = (
                 temprivolume + tempinflowvolume + temperosionvolume + tempfsvolume
@@ -8142,6 +9482,58 @@ class DFSDynamicWaveSolver:
                 if dt_reject < self.dt_min:
                     dt_reject = self.dt_min
                 self.suggested_dt[None] = dt_reject
+
+        # Keep these values observationally available to the Python lifecycle
+        # and the persisted run diagnostics.  They are not read by any kernel
+        # that changes the accept/reject decision.
+        self.volume_denominator[None] = denominator
+        self.volume_error[None] = volumeerror
+        self.volume_relative_error[None] = volumerelaerror
+
+    @ti.kernel
+    def _classify_sfdf_pre_outflow(self, rho_water: ti.f64, rho_sediment: ti.f64):
+        # Chamoli dfs.F90:184-186 zeros class depths each step, then
+        # :1120-1133 classifies from this-step cv and fhpredi2 BEFORE
+        # outflow is zeroed and BEFORE the volume-conservation reject.
+        # Rejected attempts still update maxsfh/maxdfh/maxffh.
+        # BJ has no SF/DF/FF writers; keep this a no-op there.
+        for i, j in self.fields.h:
+            if ti.static(self.dfs_manningbar_variant != "debrisflowmanning_cvtol"):
+                continue
+            if self.fields.is_nodata[i, j]:
+                continue
+            self.fields.sfh[i, j] = 0.0
+            self.fields.dfh[i, j] = 0.0
+            self.fields.ffh[i, j] = 0.0
+            classify_cv = self.fields.Cv[i, j]
+            if ti.static(self.dfs_sfdf_classify_cv_variant == "predicted_step_cv_chamoli"):
+                classify_cv = (self.fields.frhopredi1[i, j] - rho_water) / (rho_sediment - rho_water)
+            local_h = self.fields.fhpredi2[i, j]
+            if classify_cv >= 0.5:
+                self.fields.sfh[i, j] = local_h
+                self.fields.maxsfh[i, j] = ti.max(self.fields.maxsfh[i, j], local_h)
+            elif classify_cv >= 0.2:
+                self.fields.dfh[i, j] = local_h
+                self.fields.maxdfh[i, j] = ti.max(self.fields.maxdfh[i, j], local_h)
+            else:
+                self.fields.ffh[i, j] = local_h
+                self.fields.maxffh[i, j] = ti.max(self.fields.maxffh[i, j], local_h)
+
+    @ti.kernel
+    def _capture_outflow_candidate_before_clear(self, rho_water: ti.f64):
+        for i, j in self.fields.h:
+            if _is_outflow(self.fields, i, j) == 1:
+                self.outflow_candidate_depth[i, j] = self.fields.fhpredi2[i, j]
+                self.outflow_candidate_density[i, j] = self.fields.frhopredi2[i, j]
+            else:
+                self.outflow_candidate_depth[i, j] = 0.0
+                self.outflow_candidate_density[i, j] = rho_water
+
+    @ti.kernel
+    def _commit_accepted_outflow_candidate(self):
+        for i, j in self.fields.h:
+            self.outflow_accepted_depth[i, j] = self.outflow_candidate_depth[i, j]
+            self.outflow_accepted_density[i, j] = self.outflow_candidate_density[i, j]
 
     @ti.kernel
     def _apply_post_balance_outflow(self, rho_water: ti.f64):
@@ -8171,6 +9563,13 @@ class DFSDynamicWaveSolver:
         rho_sediment: ti.f64,
         cvstar: ti.f64,
     ):
+        self.totaloutflowvolume[None] = self.cand_totaloutflowvolume[None]
+        self.totalinfilvolume[None] = self.cand_totalinfilvolume[None]
+        self.totalinflowvolume[None] = self.cand_totalinflowvolume[None]
+        self.totalrivolume[None] = self.cand_totalrivolume[None]
+        self.totalerosionvolume[None] = self.cand_totalerosionvolume[None]
+        self.totalfsvolume[None] = self.cand_totalfsvolume[None]
+        self.totaldepovolume[None] = self.cand_totaldepovolume[None]
         for i, j in self.fields.h:
             if self.fields.is_nodata[i, j]:
                 continue
@@ -8181,15 +9580,23 @@ class DFSDynamicWaveSolver:
             #   frho=frhopredi2
             #   cv=(frho-rhow)/(rhos-rhow)
             #   where(fh<eps) fh=0.
+            # Chamoli then applies `where(cv<eps) cv=0.` (absent in BJ).
             # frhopredi2 was already set to rhow for fhpredi2<eps in
             # `_apply_post_balance_outflow`, so do not add an extra rho/Cv
             # reset here that the original production path does not have.
             self.fields.Cv[i, j] = (self.fields.rho[i, j] - rho_water) / (rho_sediment - rho_water)
+            if ti.static(self.dfs_commit_cv_eps_variant == "eps_clamp_chamoli"):
+                # Chamoli dfs.F90:1285 `where (cv<eps) cv=0.` (absent in BJ).
+                if self.fields.Cv[i, j] < EPS:
+                    self.fields.Cv[i, j] = 0.0
             if self.fields.h[i, j] < EPS:
                 self.fields.h[i, j] = 0.0
 
             self.fields.z_bed[i, j] = self.fields.tempele[i, j]
-            self.fields.erosion_depth[i, j] += self.fields.erosion_rate[i, j] * dt
+            erodph_dt = dt
+            if ti.static(self.dfs_erodph_dt_variant == "post_dti_dt_chamoli"):
+                erodph_dt = dt_next
+            self.fields.erosion_depth[i, j] += self.fields.erosion_rate[i, j] * erodph_dt
             self.fields.deposition_depth[i, j] += ti.abs(self.fields.deposition_rate[i, j]) * dt
             # Match dfs.F90 literally: after acceptance the solver increments
             # `dt` for the next step, then commits
@@ -8204,6 +9611,10 @@ class DFSDynamicWaveSolver:
 
             self.fields.max_flow_velocity[i, j] = local_max_velocity
             self.fields.max_flow_depth[i, j] = ti.max(self.fields.max_flow_depth[i, j], self.fields.h[i, j])
+            solid_depth = ti.max(self.fields.h[i, j] * self.fields.Cv[i, j], 0.0)
+            self.fields.max_solid_depth[i, j] = ti.max(
+                self.fields.max_solid_depth[i, j], solid_depth
+            )
             self.fields.total_depth[i, j] = self.fields.h[i, j] + self.fields.depo_thickness[i, j]
 
     @ti.kernel

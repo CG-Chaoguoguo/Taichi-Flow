@@ -1,18 +1,22 @@
 # Frontend Exposure Gate
 
-Last updated: 2026-04-18
-Stage: S0 baseline freeze
+Last updated: 2026-09-03
+Stage: S0 historical baseline; current UI gate addendum
+
+> This document preserves the April S0 decision record. The original alignment
+> matrix and repair roadmap were local planning files and are not shipped in a
+> clean checkout. Current exposure is still evidence-gated, with the additions
+> below describing the implemented surface.
 
 ## Purpose
 
 This document prevents frontend integration from outrunning the current backend
 acceptance state.
 
-It is derived from:
-
-- [docs/backend_alignment_matrix.md](backend_alignment_matrix.md)
-- [docs/backend_acceptance_criteria.md](backend_acceptance_criteria.md)
-- [docs/backend_repair_roadmap.md](backend_repair_roadmap.md)
+It is derived from the tracked [backend acceptance criteria](backend_acceptance_criteria.md)
+and the current parameter catalog/runtime evidence. Historical alignment and
+roadmap spreadsheets are local-only and are not required to interpret this
+gate.
 
 The purpose here is not to design UI. The purpose is to define what the frontend
 may safely expose **later**, and what must remain blocked until the backend is
@@ -33,7 +37,7 @@ Baseline mapping:
 
 ## Category 1 — Can Be Safely Exposed Later
 
-At S0, **no broad original-EDDA capability family yet satisfies a full,
+At the S0 baseline, **no broad original-EDDA capability family yet satisfies a full,
 unqualified safe-exposure standard**.
 
 This means:
@@ -43,6 +47,9 @@ This means:
 - existing generic run controls may continue only within the already known
   backend contract, but they must not be marketed as “full original EDDA
   capability coverage”.
+- the current UI may expose case-scoped controls whose catalog evidence is
+  `production_consumed` or `config_fallback_consumed`; all other controls stay
+  read-only or blocked.
 
 ## Category 2 — Gray Exposure Only / Partial Support Label Required
 
@@ -138,8 +145,12 @@ Until the backend roadmap advances beyond the current S0 state:
 
 ## S0 Official Frontend Gate Statement
 
-The official S0 frontend gate is:
+The official S0 frontend gate remains:
 
 - **No broad EDDA-parameter exposure**;
 - **partial exposure only after backend family promotion with evidence**;
 - **helper-only, missing, and high-risk semantic families remain blocked**.
+
+The current Settings page also exposes compute-gate defaults via the server
+contract. That administrative surface does not promote a parameter family to
+full parity and does not override the catalog's runtime-consumer evidence.

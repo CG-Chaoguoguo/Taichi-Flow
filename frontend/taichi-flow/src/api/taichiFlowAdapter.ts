@@ -9,16 +9,18 @@ import type {
   ParameterCatalog,
   ParameterImportPreview,
   ParameterTemplate,
+  ComputeGateDefaults,
   ProjectInfo,
+  ProjectDeleteMode,
+  ProjectDeletePreview,
   RuntimeLock,
   QueueItem,
-  QueueDeletePreview,
-  QueueBatchDeleteResult,
-  QueueStartResult,
   ResultFamily,
+  ResultMetadata,
   Scenario,
   ScenarioConfiguration,
   SimulationRun,
+  SimulationRunOptions,
   DirectoryListing,
   SystemMetrics,
   LegacyMigrationPlan,
@@ -26,6 +28,8 @@ import type {
   MapStateResponse,
   RasterIdentifyResponse,
   RasterProfile,
+  CaseImportPreview,
+  CaseImportCommitResult,
 } from "../types";
 
 type ApiErrorPayload = { code?: string; message?: string; details?: unknown; request_id?: string };
@@ -74,6 +78,8 @@ const json = (payload: unknown): RequestInit => ({ method: "POST", body: JSON.st
 const putJson = (payload: unknown): RequestInit => ({ method: "PATCH", body: JSON.stringify(payload) });
 
 export const projectApi = {
+  previewDelete: (projectId: string, mode: ProjectDeleteMode) => request<ProjectDeletePreview>(`/projects/${encodeURIComponent(projectId)}/delete-preview`, json({ mode })),
+  delete: (projectId: string, payload: { mode: ProjectDeleteMode; confirmation_token: string; confirmed_name: string }) => request<{ deleted: boolean }>(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE", body: JSON.stringify(payload) }),
   list: () => request<{ projects: ProjectInfo[]; count: number }>("/projects"),
   create: (payload: { name: string; root_path: string; description?: string }) => request<ProjectInfo>("/projects", json(payload)),
   import: (payload: { root_path: string; name?: string; description?: string }) => request<ProjectInfo>("/projects/import", json(payload)),
@@ -263,9 +269,19 @@ export const mapStateApi = {
 export const casesApi = {
   parseConfig: (payload: { case_config_file: string; case_base_dir?: string }) =>
     request<CaseConfigInterface>("/cases/parse-config", json(payload)),
+  previewImport: (sourceRoot: string) =>
+    request<CaseImportPreview>("/cases/imports/preview", json({ source_root: sourceRoot })),
+  commitImport: (payload: {
+    source_root: string;
+    destination_root: string;
+    expected_fingerprint: string;
+    name?: string;
+    description?: string;
+  }) => request<CaseImportCommitResult>("/cases/imports/commit", json(payload)),
 };
 
 export const scenarioApi = {
+  getScenario: (projectId: string, scenarioId: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}`),
   listScenarios: async (projectId: string): Promise<Scenario[]> => (await request<{ scenarios: Scenario[] }>(`/projects/${encodeURIComponent(projectId)}/scenarios`)).scenarios,
   createScenario: (projectId: string, name: string, baseScenarioId?: string, inputRevisionId?: string) => request<Scenario>(`/projects/${encodeURIComponent(projectId)}/scenarios`, json({ name, base_scenario_id: baseScenarioId, input_revision_id: inputRevisionId })),
   getConfiguration: (projectId: string, scenarioId: string) => request<ScenarioConfiguration>(`/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/configuration`),
@@ -278,6 +294,7 @@ export const scenarioApi = {
       input_revision_id?: string | null;
       input_bindings?: InputBinding[];
       parameter_template_id?: string | null;
+      control_overrides?: Record<string, unknown>;
       expected_version?: number;
     },
   ) => request<Scenario>(
@@ -328,11 +345,37 @@ export const migrationApi = {
 
 export const queueApi = {
   getQueue: async (projectId: string): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue`)).items,
-  enqueueScenario: (projectId: string, scenarioId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue`, json({ scenario_id: scenarioId })),
-  startQueue: (projectId: string) => request<QueueStartResult>(`/projects/${encodeURIComponent(projectId)}/queue/start`, json({})),
+  enqueueScenario: (
+    projectId: string,
+    scenarioId: string,
+    runtimeProfile?: string,
+    diagnostics?: SimulationRunOptions["diagnostics"],
+  ) =>
+    request<QueueItem>(
+      `/projects/${encodeURIComponent(projectId)}/queue`,
+      json({
+        scenario_id: scenarioId,
+        runtime_profile: runtimeProfile,
+        diagnostics,
+      }),
+    ),
+  probeSuggestions: (
+    projectId: string,
+    scenarioId: string,
+    top = 10,
+  ) =>
+    request<{
+      simulation_id: string;
+      input_revision_id?: string;
+      source_file: string;
+      source_frame_s?: number | null;
+      writer?: string;
+      probe_cells: Array<[number, number]>;
+      top: number;
+    }>(
+      `/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/diagnostics/probe-suggestions?top=${encodeURIComponent(String(top))}`,
+    ),
   reorderQueue: async (projectId: string, itemId: string, newPosition: number): Promise<QueueItem[]> => (await request<{ items: QueueItem[] }>(`/projects/${encodeURIComponent(projectId)}/queue/order`, putJson({ item_id: itemId, new_position: newPosition }))).items,
-  previewDelete: (projectId: string, queueItemIds: string[]) => request<QueueDeletePreview>(`/projects/${encodeURIComponent(projectId)}/queue/delete-preview`, json({ queue_item_ids: queueItemIds })),
-  batchDelete: (projectId: string, queueItemIds: string[]) => request<QueueBatchDeleteResult>(`/projects/${encodeURIComponent(projectId)}/queue/batch-delete`, json({ queue_item_ids: queueItemIds })),
   cancelQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stopRunningItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/stop`, json({})),
   retryQueueItem: (projectId: string, itemId: string) => request<QueueItem>(`/projects/${encodeURIComponent(projectId)}/queue/${encodeURIComponent(itemId)}/retry`, json({})),
@@ -357,7 +400,7 @@ export const resultApi = {
       files: Array.isArray(family.files) ? (family.files as ResultFamily["files"]) : [],
     }));
   },
-  metadata: (projectId: string, simulationId: string) => request<Record<string, unknown>>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
+  metadata: (projectId: string, simulationId: string) => request<ResultMetadata>(`/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/metadata`),
   downloadUrl: (projectId: string, simulationId: string, filename: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/files/${filename.split("/").map(encodeURIComponent).join("/")}`,
   zipUrl: (projectId: string, simulationId: string) => `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/results/${encodeURIComponent(simulationId)}/download.zip`,
 };
@@ -374,6 +417,11 @@ export const systemApi = {
   health: () => request<{ status: string }>("/health"),
   parameterCatalog: () => request<ParameterCatalog>("/parameters/catalog"),
   directories: (path?: string) => request<DirectoryListing>(`/system/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+};
+
+export const settingsApi = {
+  getComputeGates: () => request<ComputeGateDefaults>("/settings/compute-gates"),
+  putComputeGates: (values: Record<string, unknown>) => request<ComputeGateDefaults>("/settings/compute-gates", { method: "PUT", body: JSON.stringify({ values }) }),
 };
 
 export { request };

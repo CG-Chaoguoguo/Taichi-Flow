@@ -7,7 +7,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import rasterio
 
-from edda.io.dem_reader import read_ascii_grid
+from edda.io.dem_reader import is_esri_ascii_grid, read_ascii_grid
 
 
 class SpatialInputLoader:
@@ -20,7 +20,7 @@ class SpatialInputLoader:
 
     def read(self) -> Tuple[np.ndarray, Dict[str, Any]]:
         suffix = self.input_file.suffix.lower()
-        if suffix in {".asc", ".txt"}:
+        if suffix in {".asc", ".txt"} or is_esri_ascii_grid(self.input_file):
             data, metadata = read_ascii_grid(str(self.input_file))
             metadata.setdefault("transform", None)
             metadata.setdefault("crs", None)

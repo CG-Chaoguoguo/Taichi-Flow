@@ -24,90 +24,45 @@ def test_diagnostics_model_fortran_scalar_cvbar_sfy_as_what_if_not_active_formul
     assert record["cvbar_candidates"]["source_note"]
 
 
-def test_experimental_cvbar_erosion_override_is_default_off_and_changes_sfy_only_when_enabled():
+def test_stale_scalar_cvbar_is_the_only_sfy_path():
     solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
     cfg = solver.config
 
-    solver._compute_source_rates(0.25, cfg.rheology.rho_water, cfg.rheology.rho_sediment, cfg.rheology.Cv_max)
-    tau_default = solver.fields.tau_temp.to_numpy().copy()
-    taoc_default = solver.fields.taoc_fortran_temp.to_numpy().copy()
-
-    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
+    solver.legacy_previous_face_cvbar_scalar = 0.0
     solver._compute_source_rates(
         0.25,
         cfg.rheology.rho_water,
         cfg.rheology.rho_sediment,
         cfg.rheology.Cv_max,
-        erosion_cvbar_override_enabled=1,
+        erosion_cvbar_override=0.0,
+    )
+    tau_zero = solver.fields.tau_temp.to_numpy().copy()
+    taoc_zero = solver.fields.taoc_fortran_temp.to_numpy().copy()
+
+    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
+    solver.legacy_previous_face_cvbar_scalar = 0.65
+    solver._compute_source_rates(
+        0.25,
+        cfg.rheology.rho_water,
+        cfg.rheology.rho_sediment,
+        cfg.rheology.Cv_max,
         erosion_cvbar_override=0.65,
     )
-    tau_override = solver.fields.tau_temp.to_numpy()
-    taoc_override = solver.fields.taoc_fortran_temp.to_numpy()
+    tau_scalar = solver.fields.tau_temp.to_numpy()
+    taoc_scalar = solver.fields.taoc_fortran_temp.to_numpy()
 
-    assert np.all(tau_override > tau_default)
-    np.testing.assert_allclose(taoc_override, taoc_default)
-
-
-def test_source_backed_cvbar_erosion_parity_defaults_on(monkeypatch):
-    monkeypatch.delenv("EDDA_LEGACY_PARITY_MODE", raising=False)
-    monkeypatch.delenv("EDDA_LEGACY_CVBAR_EROSION_PARITY", raising=False)
-    monkeypatch.delenv("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY", raising=False)
-
-    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
-
-    assert solver.legacy_parity_mode is False
-    assert solver.legacy_cvbar_erosion_parity is True
-    assert solver.experimental_cvbar_erosion_parity is False
-    assert solver.cvbar_erosion_parity_enabled is True
+    assert np.all(tau_scalar > tau_zero)
+    np.testing.assert_allclose(taoc_scalar, taoc_zero)
+    assert not hasattr(solver, "legacy_cvbar_erosion_parity")
+    assert not hasattr(solver, "experimental_cvbar_erosion_parity")
+    assert not hasattr(solver, "cvbar_erosion_parity_enabled")
 
 
-def test_source_backed_cvbar_erosion_parity_explicit_ablation(monkeypatch):
-    monkeypatch.delenv("EDDA_LEGACY_PARITY_MODE", raising=False)
-    monkeypatch.setenv("EDDA_LEGACY_CVBAR_EROSION_PARITY", "0")
-    monkeypatch.delenv("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY", raising=False)
-
-    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
-
-    assert solver.legacy_parity_mode is False
-    assert solver.legacy_cvbar_erosion_parity is False
-    assert solver.experimental_cvbar_erosion_parity is False
-    assert solver.cvbar_erosion_parity_enabled is False
-
-
-def test_legacy_parity_mode_enables_proven_cvbar_semantic(monkeypatch):
-    monkeypatch.setenv("EDDA_LEGACY_PARITY_MODE", "1")
-    monkeypatch.delenv("EDDA_LEGACY_CVBAR_EROSION_PARITY", raising=False)
-    monkeypatch.delenv("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY", raising=False)
-
-    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
-
-    assert solver.legacy_parity_mode is True
-    assert solver.legacy_cvbar_erosion_parity is True
-    assert solver.experimental_cvbar_erosion_parity is False
-    assert solver.cvbar_erosion_parity_enabled is True
-
-
-def test_legacy_cvbar_flag_can_enable_semantic_without_umbrella(monkeypatch):
-    monkeypatch.delenv("EDDA_LEGACY_PARITY_MODE", raising=False)
-    monkeypatch.setenv("EDDA_LEGACY_CVBAR_EROSION_PARITY", "1")
-    monkeypatch.delenv("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY", raising=False)
-
-    solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
-
-    assert solver.legacy_parity_mode is False
-    assert solver.legacy_cvbar_erosion_parity is True
-    assert solver.experimental_cvbar_erosion_parity is False
-    assert solver.cvbar_erosion_parity_enabled is True
-
-
-def test_experiment_cvbar_flag_remains_separate_from_legacy(monkeypatch):
-    monkeypatch.delenv("EDDA_LEGACY_PARITY_MODE", raising=False)
+def test_cvbar_env_switches_are_removed(monkeypatch):
     monkeypatch.setenv("EDDA_LEGACY_CVBAR_EROSION_PARITY", "0")
     monkeypatch.setenv("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY", "1")
+    monkeypatch.delenv("EDDA_LEGACY_PARITY_MODE", raising=False)
 
     solver = build_two_cell_erosion_solver(cv=0.05, erodible_thickness=10.0)
-
-    assert solver.legacy_parity_mode is False
-    assert solver.legacy_cvbar_erosion_parity is False
-    assert solver.experimental_cvbar_erosion_parity is True
-    assert solver.cvbar_erosion_parity_enabled is True
+    assert not hasattr(solver, "cvbar_erosion_parity_enabled")
+    assert hasattr(solver, "legacy_previous_face_cvbar_scalar")

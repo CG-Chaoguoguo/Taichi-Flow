@@ -118,6 +118,21 @@ class TestResultExporter:
                 assert src.height == 10
                 assert src.width == 10
 
+    def test_export_geotiff_treats_missing_crs_sentinel_as_default(self):
+        """A raster reader's stringified missing CRS must not reach GDAL."""
+        data = np.ones((4, 4))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_file = Path(tmpdir) / "missing-crs.tif"
+
+            exporter = ResultExporter(data, crs="None")
+            exporter.to_geotiff(str(output_file))
+
+            import rasterio
+            with rasterio.open(output_file) as src:
+                assert src.crs is not None
+                assert src.crs.to_epsg() == 4326
+
     def test_export_geotiff_3d(self):
         """Test GeoTIFF export for 3D data."""
         data = np.random.rand(5, 10, 10)

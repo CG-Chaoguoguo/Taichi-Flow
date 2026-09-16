@@ -24,6 +24,8 @@ const smokeMode = process.env.TAICHI_FLOW_DESKTOP_SMOKE === "1";
 const smokeReportPath = process.env.TAICHI_FLOW_DESKTOP_SMOKE_REPORT || path.join(rootDir, "artifacts", "desktop-smoke-report.json");
 const smokeScreenshotPath = process.env.TAICHI_FLOW_DESKTOP_SMOKE_SCREENSHOT || path.join(rootDir, "artifacts", "desktop-smoke.png");
 const desktopExitReportPath = process.env.TAICHI_FLOW_DESKTOP_EXIT_REPORT || "";
+const buildId = process.env.TAICHI_FLOW_BUILD_ID || "";
+const distributionMode = process.env.TAICHI_FLOW_DISTRIBUTION_MODE || "development";
 const runtimeErrors = [];
 
 let mainWindow = null;
@@ -44,6 +46,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.enableSandbox();
+// The workbench's numerical CUDA path is independent of Chromium rendering.
+// Prefer deterministic software composition so the desktop shell also starts
+// on Windows hosts without a compatible Electron GPU DLL/driver.
+app.disableHardwareAcceleration();
 
 function recordRuntimeError(kind, details) {
   const entry = { kind, details, at: new Date().toISOString() };
@@ -209,6 +215,8 @@ async function runSmoke(window) {
       desktopRuntime: Boolean(window.taichiFlowDesktop),
       desktopMode: window.taichiFlowDesktop?.mode || null,
       desktopVersion: window.taichiFlowDesktop?.version || null,
+      buildId: window.taichiFlowDesktop?.buildId || null,
+      distributionMode: window.taichiFlowDesktop?.distributionMode || null,
       apiUrl: window.taichiFlowDesktop?.apiUrl || null,
       apiContractVersion: window.taichiFlowDesktop?.apiContractVersion || null,
       directoryPickerBridge: typeof window.taichiFlowDesktop?.selectDirectory === "function",
@@ -290,6 +298,8 @@ function createWindow() {
         `--taichi-flow-api-url=${apiUrl}`,
         `--taichi-flow-client-version=${packageMetadata.version}`,
         `--taichi-flow-api-contract=${contract.apiContractVersion}`,
+        `--taichi-flow-build-id=${buildId}`,
+        `--taichi-flow-distribution-mode=${distributionMode}`,
       ],
     },
   });
@@ -303,6 +313,16 @@ function createWindow() {
     if (isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
     event.preventDefault();
     if (isAllowedExternalUrl(url)) void shell.openExternal(url);
+  });
+  window.webContents.on("will-redirect", (event, url) => {
+    if (isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
+    event.preventDefault();
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url);
+  });
+  window.webContents.on("will-frame-navigate", (event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame && isTrustedRendererUrl(url, desktopMode, rendererTarget)) return;
+    event.preventDefault();
+    if (isMainFrame && isAllowedExternalUrl(url)) void shell.openExternal(url);
   });
   window.webContents.on("did-fail-load", (_event, code, description, validatedUrl, isMainFrame) => {
     if (isMainFrame) recordRuntimeError("did-fail-load", `${code} ${description} ${validatedUrl}`);

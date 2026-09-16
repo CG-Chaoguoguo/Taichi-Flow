@@ -1,5 +1,5 @@
 """
-Physics modules for EDDA simulation.
+Physics modules for Taichi-Flow simulations.
 
 This package contains the core physics models:
 - hydrology: Green-Ampt infiltration model

@@ -28,7 +28,7 @@ from edda.solver.native_unsfin_provider import (
     run_provider_dry_run,
 )
 from tests.test_native_input_chain import _write_ascii_grid
-from tools.diagnostics.native_unsfin_ledger_diagnostic import LedgerArrays
+from edda.solver.native_unsfin.ledger import LedgerArrays
 
 
 def _fake_generator(_request: NativeUnsfinDryRunRequest):

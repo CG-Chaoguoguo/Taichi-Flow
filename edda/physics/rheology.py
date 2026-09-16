@@ -1,5 +1,5 @@
 """
-Flow rheology models for EDDA simulation.
+Flow rheology models for Taichi-Flow simulations.
 
 This module implements rheology models for both clear water flow
 (Manning formula) and debris flow (quadratic model), with dynamic

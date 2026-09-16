@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from tools.diagnostics.native_unsfin_ledger_diagnostic import LedgerArrays
+from edda.solver.native_unsfin.ledger import LedgerArrays
 
 
 PROVIDER_NAME = "production_native_unsfin"
@@ -415,7 +415,7 @@ def default_rnoff_schedule_generator(
     request: NativeUnsfinDryRunRequest,
     q_rows_by_cell: Mapping[int, Sequence[Mapping[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from tools.diagnostics.native_unsfin_analytic_cell import (
+    from edda.solver.native_unsfin.analytic_cell import (
         build_active_context,
         eligibility_for_cell,
         make_field_pack_for_cell,
@@ -740,8 +740,6 @@ def _base_meta(request: NativeUnsfinDryRunRequest) -> dict[str, Any]:
         "git_head": _git_head(),
         "legacy_parity_flags": {
             "EDDA_LEGACY_PARITY_MODE": os.environ.get("EDDA_LEGACY_PARITY_MODE"),
-            "EDDA_LEGACY_CVBAR_EROSION_PARITY": os.environ.get("EDDA_LEGACY_CVBAR_EROSION_PARITY"),
-            "EDDA_EXPERIMENT_CVBAR_EROSION_PARITY": os.environ.get("EDDA_EXPERIMENT_CVBAR_EROSION_PARITY"),
             "EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT": os.environ.get("EDDA_EXPERIMENT_FIRST_REJECT_SHORT_CIRCUIT"),
         },
     }
@@ -1530,7 +1528,7 @@ def configure_provider_runtime_feed(
 
 
 def default_generator(request: NativeUnsfinDryRunRequest) -> tuple[LedgerArrays, dict[str, Any]]:
-    from tools.diagnostics.native_unsfin_analytic_cell import run_active_order_0_600
+    from edda.solver.native_unsfin.analytic_cell import run_active_order_0_600
 
     ledger, _active_trace, _gate_trace, summary = run_active_order_0_600(
         request.case_dir,

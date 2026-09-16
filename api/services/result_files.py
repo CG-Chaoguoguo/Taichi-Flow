@@ -29,6 +29,12 @@ KNOWN_RESULT_FAMILIES = (
     ("Maxsoliddepth", ("maxsoliddepth", "maxsoliddepthedda", "maxsoliddeptaichi")),
     ("LS_Scar", ("ls_scar", "lsscar")),
     ("faildph", ("faildph",)),
+    ("MaxSFdepth", ("maxsfdepth",)),
+    ("MaxDFdepth", ("maxdfdepth",)),
+    ("MaxFFdepth", ("maxffdepth",)),
+    ("SFdepth", ("sfdepth",)),
+    ("DFdepth", ("dfdepth",)),
+    ("FFdepth", ("ffdepth",)),
     ("FS_min", ("fs_min_", "fs_minedda", "fs_mintaichi")),
     ("z_at_fs_min", ("z_at_fs_min_", "z_at_fs_minedda", "z_at_fs_mintaichi")),
     ("depth_at_fs_min", ("depth_at_fs_min_", "depth_at_fs_minedda", "depth_at_fs_mintaichi")),
@@ -112,6 +118,25 @@ def classify_result_family(relative_path: str) -> str:
         return known
     stripped = _strip_trailing_numeric_tokens(stem)
     return stripped or "other"
+
+
+def classify_result_writer(relative_path: str) -> str:
+    """Identify the concrete writer contract represented by an output name.
+
+    This is deliberately a writer identity rather than a file-extension label:
+    a Top-N erosion probe must not silently switch from the canonical EDDA-text
+    field writer to an unrelated raster with the same family-like filename.
+    """
+    path = _as_posix_path(relative_path)
+    stem = _strip_known_suffix(path.name).lower()
+    suffix = path.suffix.lower()
+    if suffix == ".txt" and ("edda" in stem or "taichi" in stem):
+        return "taichi_edda_text"
+    if suffix in {".tif", ".tiff"}:
+        return "taichi_geotiff"
+    if suffix == ".csv":
+        return "taichi_csv"
+    return "unknown"
 
 
 def is_result_file(path: Path, relative_path: str) -> bool:

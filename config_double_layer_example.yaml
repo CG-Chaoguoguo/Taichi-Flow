@@ -4,7 +4,7 @@ compute:
   chunk_size: null
   num_threads: null
   use_double_precision: false
-dem_file: examples/data/dem.tif
+dem_file: examples/data/dev_tiny_dem.asc
 erosion:
   k_deposition: 0.1
   k_erosion: 1.0e-05
@@ -17,7 +17,7 @@ hydrology:
   theta_s: 0.45
 output_dir: ./output
 output_format: geotiff
-rainfall_file: examples/data/rainfall.csv
+rainfall_file: examples/data/dev_rainfall.csv
 rheology:
   Cv_max: 0.65
   Cv_threshold: 0.2

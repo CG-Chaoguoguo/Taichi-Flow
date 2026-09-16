@@ -1,12 +1,53 @@
 """
 Backend manager for Taichi initialization and configuration.
 """
-import taichi as ti
 import logging
+import os
+import subprocess
 from threading import RLock
-from typing import Optional
+from typing import Any, Optional
+
+import taichi as ti
 
 logger = logging.getLogger(__name__)
+
+_GPU_ONLY_ENV = "EDDA_EXPERIMENT_GPU_ONLY_PRODUCTION_SMOKE"
+
+
+def _gpu_only_env_enabled() -> bool:
+    return str(os.environ.get(_GPU_ONLY_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _query_nvidia_smi() -> dict[str, Any]:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=8,
+        ).strip()
+        line = output.splitlines()[0] if output else ""
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 4:
+            return {"nvidia_smi_raw": output}
+
+        def _num(value: str) -> float | None:
+            try:
+                return float(value)
+            except ValueError:
+                return None
+
+        return {
+            "gpu_name": parts[0],
+            "gpu_memory_total_MB": _num(parts[1]),
+            "gpu_memory_used_MB": _num(parts[2]),
+            "gpu_utilization_percent": _num(parts[3]),
+        }
+    except Exception as exc:
+        return {"nvidia_smi_error": repr(exc)}
 
 _RUNTIME_LOCK = RLock()
 _RUNTIME_SIGNATURE = None
@@ -38,7 +79,7 @@ class BackendManager:
         backend: str = 'auto',
         use_double_precision: bool = False,
         num_threads: Optional[int] = None,
-        device_memory_GB: float = 1.0,
+        device_memory_GB: Optional[float] = None,
         **kwargs
     ):
         """
@@ -48,7 +89,8 @@ class BackendManager:
             backend: Backend name ('auto', 'cuda', 'cpu', 'vulkan', etc.)
             use_double_precision: Use f64 instead of f32
             num_threads: Number of CPU threads (for CPU backend)
-            device_memory_GB: Device memory limit in GB
+            device_memory_GB: Device memory limit in GB. CUDA/auto default 8.0 so
+                Chamoli-scale double-precision fields fit; CPU default 1.0.
             **kwargs: Additional Taichi init arguments
         """
         global _RUNTIME_SIGNATURE
@@ -57,6 +99,9 @@ class BackendManager:
         if backend not in self.SUPPORTED_BACKENDS:
             logger.warning(f"Unknown backend '{backend}', falling back to 'auto'")
             backend = 'auto'
+
+        if device_memory_GB is None:
+            device_memory_GB = 8.0 if backend in ('cuda', 'auto') else 1.0
 
         signature = (backend, bool(use_double_precision), num_threads, float(device_memory_GB), tuple(sorted(kwargs.items())))
         with _RUNTIME_LOCK:
@@ -113,9 +158,12 @@ class BackendManager:
 
             except Exception as e:
                 logger.error(f"Failed to initialize backend '{backend}': {e}")
-
-                # Fallback to CPU
-                if backend != 'cpu':
+                # Explicit CUDA/Vulkan/Metal must not silently become CPU. The
+                # previous fallback made Task Manager look idle on GPU while
+                # the solver kept running on host, which is exactly the
+                # Chamoli "not assigned to CUDA" failure mode.
+                allow_cpu_fallback = backend == 'auto' and not _gpu_only_env_enabled()
+                if allow_cpu_fallback:
                     logger.info("Falling back to CPU backend...")
                     try:
                         ti.init(arch=ti.cpu, **init_args)
@@ -126,12 +174,25 @@ class BackendManager:
                         logger.info("CPU backend initialized successfully")
                     except Exception as e2:
                         logger.error(f"CPU fallback also failed: {e2}")
-                        raise RuntimeError("Failed to initialize any Taichi backend")
+                        raise RuntimeError("Failed to initialize any Taichi backend") from e2
+                    return
+                raise RuntimeError(
+                    f"Failed to initialize requested backend '{backend}' "
+                    f"(CPU fallback disabled). Original error: {e}"
+                ) from e
 
     def _initialize_auto_backend(self, init_args: dict, num_threads: Optional[int]) -> str:
         """Initialize using the project priority order: cuda > vulkan > cpu."""
         available = self.get_available_backends()
-        candidates = [name for name in ('cuda', 'vulkan', 'cpu') if name in available]
+        if _gpu_only_env_enabled():
+            candidates = [name for name in ('cuda',) if name in available]
+            if not candidates:
+                raise RuntimeError(
+                    "GPU-only production smoke is enabled but CUDA is not available. "
+                    "Refusing Vulkan/CPU fallback."
+                )
+        else:
+            candidates = [name for name in ('cuda', 'vulkan', 'cpu') if name in available]
         if not candidates:
             candidates = ['cpu']
 
@@ -175,13 +236,15 @@ class BackendManager:
                 elif default_fp == ti.f32:
                     self.device_info['default_fp'] = 'f32'
 
-            # Try to get GPU info if available
             if self.backend in ['cuda', 'vulkan', 'opengl', 'metal']:
+                self.device_info.update(_query_nvidia_smi())
                 try:
                     import torch
                     if torch.cuda.is_available():
-                        self.device_info['gpu_name'] = torch.cuda.get_device_name(0)
-                        self.device_info['gpu_memory_GB'] = torch.cuda.get_device_properties(0).total_memory / 1e9
+                        self.device_info.setdefault('gpu_name', torch.cuda.get_device_name(0))
+                        self.device_info['torch_gpu_memory_GB'] = (
+                            torch.cuda.get_device_properties(0).total_memory / 1e9
+                        )
                 except ImportError:
                     pass
 
@@ -317,6 +380,58 @@ def initialize_taichi(backend: str = 'auto', **kwargs):
     """
     manager = get_backend_manager()
     manager.initialize(backend=backend, **kwargs)
+
+
+def live_backend_snapshot() -> dict[str, Any]:
+    """Return the live Taichi arch plus nvidia-smi occupancy."""
+    manager = get_backend_manager()
+    snapshot: dict[str, Any] = {
+        "manager_backend": manager.get_backend(),
+        "is_initialized": bool(manager.is_initialized),
+        "is_gpu_backend": bool(manager.is_gpu_backend()),
+        "device_info": dict(manager.device_info or {}),
+    }
+    try:
+        from taichi.lang import impl
+
+        cfg = impl.current_cfg()
+        arch = getattr(cfg, "arch", None)
+        snapshot["live_arch"] = getattr(arch, "name", None) or str(arch)
+        snapshot["default_fp"] = str(getattr(cfg, "default_fp", None))
+    except Exception as exc:
+        snapshot["live_arch_error"] = repr(exc)
+    snapshot.update(_query_nvidia_smi())
+    return snapshot
+
+
+def _run_cuda_launch_probe() -> None:
+    probe = ti.field(dtype=ti.i32, shape=4096)
+
+    @ti.kernel
+    def _fill_cuda_probe():
+        for i in probe:
+            probe[i] = i
+
+    _fill_cuda_probe()
+    ti.sync()
+    if int(probe[4095]) != 4095:
+        raise RuntimeError("CUDA probe kernel did not execute on device")
+
+
+def assert_live_cuda() -> dict[str, Any]:
+    """Fail closed if the process is not actually running Taichi CUDA."""
+    snapshot = live_backend_snapshot()
+    live = str(snapshot.get("live_arch") or "").lower()
+    manager_backend = str(snapshot.get("manager_backend") or "").lower()
+    if manager_backend != "cuda" or "cuda" not in live:
+        raise RuntimeError(
+            "Requested CUDA execution but the live Taichi runtime is not CUDA: "
+            f"{snapshot}"
+        )
+    _run_cuda_launch_probe()
+    snapshot = live_backend_snapshot()
+    snapshot["cuda_probe_kernel"] = "ok"
+    return snapshot
 
 
 def reset_taichi_runtime() -> None:

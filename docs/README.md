@@ -17,13 +17,17 @@
 ## Scientific boundary
 
 The existing alignment and input-chain documents remain research notes. The
-frontend/domain cutover does not modify `edda/` formulas, source timing,
-dry/wet gates, direction order, timestep semantics, or output meaning. No
-Fortran parity claim is made by the UI verification.
+frontend/domain cutover itself does not modify `edda/` formulas, source timing,
+dry/wet gates, direction order, timestep semantics, or output meaning. Later
+solver repairs are documented separately; no Fortran parity claim is made by
+the UI verification.
 
-## Repository hygiene
+## Evidence
 
-Commit stable source, maintained tests, architecture decisions, and user or
-developer documentation only. Generated diagnostics, browser screenshots,
-logs, outputs, local state databases, and temporary comparison material remain
-under ignored local directories.
+Migration, OpenAPI inventory, browser screenshots, and test logs may live under
+the local-only `artifacts/` directory. A clean clone is not expected to contain
+those raw files. All of `docs/audit/`, including Markdown/JSON summaries and
+screenshots, is also local-only and is not distributed with a clean checkout.
+The root `agentlog.md` is local-only and is not a documentation entry point.
+Reusable comparison tools and their usage are documented in
+[`tools/fix3/README.md`](../tools/fix3/README.md); their generated evidence stays local.

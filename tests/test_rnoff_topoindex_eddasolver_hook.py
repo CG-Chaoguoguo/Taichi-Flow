@@ -17,7 +17,7 @@ from edda.solver.native_unsfin_provider import (
     RNOFF_TOPOINDEX_ENV,
     RUNTIME_FEED_ENV,
 )
-from tools.diagnostics.native_unsfin_ledger_diagnostic import LedgerArrays
+from edda.solver.native_unsfin.ledger import LedgerArrays
 
 
 def _write_ascii_dem(path):

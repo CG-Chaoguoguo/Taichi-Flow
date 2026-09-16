@@ -1,5 +1,5 @@
 """
-Green-Ampt infiltration model for EDDA simulation.
+Green-Ampt infiltration model for Taichi-Flow simulations.
 
 This module implements the Green-Ampt infiltration model to calculate
 infiltration rate based on rainfall and soil properties, and updates
