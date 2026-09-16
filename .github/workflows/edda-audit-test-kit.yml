@@ -1,0 +1,25 @@
+name: EDDA audit offline test kit
+on:
+  push:
+    branches: [audit/edda-parity-pro-20260916]
+    paths: [.github/workflows/edda-audit-test-kit.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wheelhouse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download pinned runtime without changing repository
+        run: |
+          python -m pip download --only-binary=:all: --dest wheelhouse taichi==1.7.4 colorama==0.4.6 dill==0.4.0
+          sha256sum wheelhouse/* > wheelhouse/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edda-audit-wheelhouse-${{ github.run_id }}
+          path: wheelhouse/
+          retention-days: 7
