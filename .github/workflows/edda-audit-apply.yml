@@ -20,17 +20,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Verify and apply reviewed patch without executing transport code
+      - name: Verify and apply reviewed patch
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p audit-validation
           python - <<'PY'
-          import base64, gzip, hashlib, pathlib, subprocess
-          encoded = pathlib.Path('.github/audit/edda-parity.patch.gz.b64').read_bytes()
+          import base64, gzip, hashlib, io, pathlib, subprocess
+          encoded = b''.join(pathlib.Path(f'.github/audit/edda-parity.part{i}.b64').read_bytes().strip() for i in range(4))
           if len(encoded) > 100000:
               raise SystemExit('Oversized patch transport')
-          patch = gzip.decompress(base64.b64decode(encoded, validate=False))
+          with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(encoded, validate=True))) as stream:
+              patch = stream.read(100001)
           if hashlib.sha256(patch).hexdigest() != 'b8ecc656328ebf87f81bb34bf11b5caf9dee5252c9c4f8aadc6daa8fa8393395':
               raise SystemExit('Audit patch SHA256 mismatch')
           path = pathlib.Path('audit-validation/edda-numerical-audit.patch')
@@ -39,9 +40,8 @@ jobs:
           subprocess.run(['git', 'apply', '--index', str(path)], check=True)
           actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
           expected = {
-              '.github/workflows/edda-parity-audit.yml',
-              'edda/solver/dfs_dynamic_wave.py', 'edda/solver/edda_solver.py',
-              'edda/solver/restart_metadata.py', 'tests/conftest.py',
+              '.github/workflows/edda-parity-audit.yml', 'edda/solver/dfs_dynamic_wave.py',
+              'edda/solver/edda_solver.py', 'edda/solver/restart_metadata.py', 'tests/conftest.py',
               'tests/test_dfs_retry_state_audit.py', 'tests/fixtures/edda_retry_cv_oracle.f90',
           }
           if actual != expected:
@@ -74,7 +74,7 @@ jobs:
           npm test
           npm run test:desktop
           npm run build
-      - name: Commit only validated audit changes to the same audit branch
+      - name: Commit validated changes only to the same audit branch
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_HEAD: ${{ github.sha }}
@@ -82,9 +82,9 @@ jobs:
         run: |
           set -euo pipefail
           remote_head=$(git ls-remote origin refs/heads/audit/edda-parity-pro-20260916 | cut -f1)
-          test "$remote_head" = "$EXPECTED_HEAD" || { echo 'Audit branch moved; refusing to overwrite concurrent work'; exit 1; }
+          test "$remote_head" = "$EXPECTED_HEAD" || { echo 'Audit branch moved; refusing concurrent overwrite'; exit 1; }
           git add -- frontend/taichi-flow/package.json frontend/taichi-flow/package-lock.json
-          git rm -- .github/workflows/edda-audit-apply.yml .github/audit/edda-parity.patch.gz.b64 .github/workflows/edda-audit-diagnostics.yml
+          git rm -- .github/workflows/edda-audit-apply.yml .github/audit/edda-parity*.b64 .github/workflows/edda-audit-diagnostics.yml
           git diff --cached --check
           git diff --cached --stat > audit-validation/final-diff-stat.txt
           git config user.name 'github-actions[bot]'
