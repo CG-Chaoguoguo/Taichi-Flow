@@ -2,7 +2,7 @@ name: Apply verified EDDA audit patch
 on:
   push:
     branches: [audit/edda-parity-pro-20260916]
-    paths: [.github/audit/edda-parity.patch.gz.b64]
+    paths: [.github/audit/edda-parity.patch.gz.b64, .github/workflows/edda-audit-apply.yml]
 permissions:
   contents: read
 jobs:
@@ -67,14 +67,15 @@ jobs:
       - name: Patch vulnerable development dependencies within existing majors
         working-directory: frontend/taichi-flow
         run: |
-          npm pkg set 'devDependencies.vitest=^4.1.11'
-          npm update vitest nanoid --package-lock-only --ignore-scripts
+          npm ci
+          npm install --save-dev 'vitest@^4.1.11' --ignore-scripts
+          npm audit fix --ignore-scripts
           npm ci
           npm audit --json > ../../audit-validation/npm-audit-after.json
           npm test
           npm run test:desktop
           npm run build
-      - name: Commit validated changes only to the same audit branch
+      - name: Commit validated source changes only to the same audit branch
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_HEAD: ${{ github.sha }}
@@ -84,7 +85,9 @@ jobs:
           remote_head=$(git ls-remote origin refs/heads/audit/edda-parity-pro-20260916 | cut -f1)
           test "$remote_head" = "$EXPECTED_HEAD" || { echo 'Audit branch moved; refusing concurrent overwrite'; exit 1; }
           git add -- frontend/taichi-flow/package.json frontend/taichi-flow/package-lock.json
-          git rm -- .github/workflows/edda-audit-apply.yml .github/audit/edda-parity*.b64 .github/workflows/edda-audit-diagnostics.yml
+          cp .github/workflows/edda-parity-audit.yml audit-validation/final-ci.yml
+          git restore --staged -- .github/workflows/edda-parity-audit.yml
+          git rm -- .github/audit/edda-parity*.b64
           git diff --cached --check
           git diff --cached --stat > audit-validation/final-diff-stat.txt
           git config user.name 'github-actions[bot]'
@@ -94,6 +97,13 @@ jobs:
           git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/audit/edda-parity-pro-20260916
           git rev-parse HEAD > audit-validation/validated-commit.txt
           cp frontend/taichi-flow/package-lock.json audit-validation/package-lock.json
+          cp frontend/taichi-flow/package.json audit-validation/package.json
+      - name: Preserve dependency diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p audit-validation/npm-logs
+          cp -f "$HOME"/.npm/_logs/*debug-0.log audit-validation/npm-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
