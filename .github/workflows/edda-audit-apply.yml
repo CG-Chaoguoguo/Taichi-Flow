@@ -1,0 +1,102 @@
+name: Apply verified EDDA audit patch
+on:
+  push:
+    branches: [audit/edda-parity-pro-20260916]
+    paths: [.github/audit/edda-parity.patch.gz.b64]
+permissions:
+  contents: read
+jobs:
+  validate-and-apply:
+    if: github.repository == 'CG-Chaoguoguo/Taichi-Flow' && github.ref == 'refs/heads/audit/edda-parity-pro-20260916'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      TAICHI_FLOW_STATE_DIR: ${{ github.workspace }}/.runtime/ci-audit-apply
+      TI_CPU_MAX_NUM_THREADS: '2'
+      TQDM_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify and apply reviewed patch without executing transport code
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-validation
+          python - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess
+          encoded = pathlib.Path('.github/audit/edda-parity.patch.gz.b64').read_bytes()
+          if len(encoded) > 100000:
+              raise SystemExit('Oversized patch transport')
+          patch = gzip.decompress(base64.b64decode(encoded, validate=False))
+          if hashlib.sha256(patch).hexdigest() != 'b8ecc656328ebf87f81bb34bf11b5caf9dee5252c9c4f8aadc6daa8fa8393395':
+              raise SystemExit('Audit patch SHA256 mismatch')
+          path = pathlib.Path('audit-validation/edda-numerical-audit.patch')
+          path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', str(path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(path)], check=True)
+          actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          expected = {
+              '.github/workflows/edda-parity-audit.yml',
+              'edda/solver/dfs_dynamic_wave.py', 'edda/solver/edda_solver.py',
+              'edda/solver/restart_metadata.py', 'tests/conftest.py',
+              'tests/test_dfs_retry_state_audit.py', 'tests/fixtures/edda_retry_cv_oracle.f90',
+          }
+          if actual != expected:
+              raise SystemExit(f'Unexpected patch paths: {actual ^ expected}')
+          PY
+          git diff --cached --check
+          git diff --cached --stat > audit-validation/numerical-diff-stat.txt
+          sha256sum audit-validation/edda-numerical-audit.patch > audit-validation/SHA256SUMS
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Compile and execute numerical/restart regressions
+        run: |
+          python -m compileall -q edda api
+          python -m pytest -q tests/test_dfs_retry_state_audit.py tests/test_checkpoint_restart.py --junitxml=audit-validation/numerical-tests.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/taichi-flow/package-lock.json
+      - name: Patch vulnerable development dependencies within existing majors
+        working-directory: frontend/taichi-flow
+        run: |
+          npm pkg set 'devDependencies.vitest=^4.1.11'
+          npm update vitest nanoid --package-lock-only --ignore-scripts
+          npm ci
+          npm audit --json > ../../audit-validation/npm-audit-after.json
+          npm test
+          npm run test:desktop
+          npm run build
+      - name: Commit only validated audit changes to the same audit branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_head=$(git ls-remote origin refs/heads/audit/edda-parity-pro-20260916 | cut -f1)
+          test "$remote_head" = "$EXPECTED_HEAD" || { echo 'Audit branch moved; refusing to overwrite concurrent work'; exit 1; }
+          git add -- frontend/taichi-flow/package.json frontend/taichi-flow/package-lock.json
+          git rm -- .github/workflows/edda-audit-apply.yml .github/audit/edda-parity.patch.gz.b64 .github/workflows/edda-audit-diagnostics.yml
+          git diff --cached --check
+          git diff --cached --stat > audit-validation/final-diff-stat.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: preserve EDDA retry state, validate restart metadata and fail incomplete runs'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/audit/edda-parity-pro-20260916
+          git rev-parse HEAD > audit-validation/validated-commit.txt
+          cp frontend/taichi-flow/package-lock.json audit-validation/package-lock.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edda-audit-validated-patch-${{ github.run_id }}
+          path: audit-validation/
+          retention-days: 14
