@@ -1,0 +1,90 @@
+name: EDDA parity audit
+
+on:
+  pull_request:
+    branches: [Pro-Quick-Chat, gpt-edda-switch-parity]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edda-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: CG-Chaoguoguo/EDDA-Fortran
+          ref: 8b0b7cf4b64266f941ae87daaae7f86eaf7d7630
+          path: .oracle-source
+          persist-credentials: false
+      - name: Freeze source-only audit evidence
+        shell: bash
+        run: |
+          mkdir -p audit-evidence
+          git rev-parse HEAD > audit-evidence/candidate-sha.txt
+          git -C .oracle-source rev-parse HEAD > audit-evidence/oracle-sha.txt
+          git archive --format=tar.gz HEAD > audit-evidence/candidate-source.tar.gz
+          git -C .oracle-source archive --format=tar.gz HEAD > audit-evidence/oracle-source.tar.gz
+          sha256sum audit-evidence/*.tar.gz > audit-evidence/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edda-audit-source-${{ github.run_id }}
+          path: audit-evidence/
+          retention-days: 14
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TAICHI_FLOW_STATE_DIR: ${{ runner.temp }}/taichi-flow-audit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Compile backend
+        run: python -m compileall -q edda api
+      - name: Collect test contracts
+        run: python -m pytest --collect-only -q
+      - name: Run backend and domain regression tests
+        run: python -m pytest -q --maxfail=10 --junitxml=backend-tests.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edda-audit-backend-${{ github.run_id }}
+          path: backend-tests.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend/taichi-flow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/taichi-flow/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:desktop
+      - run: npm run build
