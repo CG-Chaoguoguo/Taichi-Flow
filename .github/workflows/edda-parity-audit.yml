@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      TAICHI_FLOW_STATE_DIR: ${{ runner.temp }}/taichi-flow-audit
+      TAICHI_FLOW_STATE_DIR: ${{ github.workspace }}/.runtime/ci-audit
     steps:
       - uses: actions/checkout@v4
         with:
