@@ -104,7 +104,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      TAICHI_FLOW_STATE_DIR: ${{ runner.temp }}/edda-input-audit
+      TAICHI_FLOW_STATE_DIR: ${{ github.workspace }}/.runtime/edda-input-audit
     steps:
       - uses: actions/checkout@v4
         with:
