@@ -95,6 +95,7 @@ class EDDASolver:
         "absubar_temp",
         "erosion_depth",
         "deposition_depth",
+        "depo_thickness",
         "max_flow_depth",
         "max_flow_velocity",
         "max_solid_depth",
@@ -270,6 +271,7 @@ class EDDASolver:
         self.numerical_dt_min_hits = 0
         self.numerical_nonfinite_counts = {}
         self.numerical_observe_count = 0
+        self.numerical_diagnostics_coverage = "full_run"
 
         # Initialize Taichi backend
         requested_backend = str(self.config.compute.backend).lower()
@@ -1489,11 +1491,22 @@ class EDDASolver:
             "relative_error": 0.0,
             "within_retry_tolerance": True,
         }
+        volume_available = False
+        volume_error: Optional[str] = None
         trigger_inventory = 0.0
         if self.dfs_dynamic_wave is not None:
             try:
-                volume.update(self.dfs_dynamic_wave.get_volume_balance_snapshot())
+                captured_volume = self.dfs_dynamic_wave.get_volume_balance_snapshot()
+                relative = float(captured_volume.get("relative_error"))
+                if not np.isfinite(relative):
+                    raise ValueError("volume relative_error is not finite")
+                volume.update(captured_volume)
+                volume_available = True
             except Exception as exc:
+                volume_error = str(exc)
+                self.numerical_nonfinite_counts["final_volume_snapshot_error"] = (
+                    self.numerical_nonfinite_counts.get("final_volume_snapshot_error", 0) + 1
+                )
                 logger.debug("Unable to capture final numerical volume snapshot: %s", exc)
             try:
                 trigger_grid = np.asarray(self.dfs_dynamic_wave.triggerslide_field.to_numpy(), dtype=np.float64)
@@ -1517,7 +1530,7 @@ class EDDASolver:
                 except Exception:
                     nonfinite_counts[field_name] = -1
 
-        global_relative_error = float(volume.get("relative_error", 0.0) or 0.0)
+        global_relative_error = float(volume.get("relative_error", 0.0) or 0.0) if volume_available else None
         probe_status: Dict[str, Any] | None = None
         if self.dfs_dynamic_wave is not None and hasattr(self.dfs_dynamic_wave, "get_erosion_probe_diagnostics_status"):
             try:
@@ -1534,6 +1547,7 @@ class EDDASolver:
             },
             "backend": dict(self.backend_snapshot),
             "time_integration": {
+                "coverage": str(getattr(self, "numerical_diagnostics_coverage", "full_run")),
                 "accepted_steps": int(self.dfs_accepted_step_id),
                 "candidate_steps": int(self.dfs_candidate_step_id),
                 "rejected_steps": int(time_stepper.rejected_steps) if time_stepper is not None else 0,
@@ -1563,7 +1577,9 @@ class EDDASolver:
             "global_volume_ledger": {
                 **volume,
                 "tolerance": 1.0e-3,
-                "passed": abs(global_relative_error) <= 1.0e-3,
+                "available": volume_available,
+                "capture_error": volume_error,
+                "passed": abs(global_relative_error) <= 1.0e-3 if global_relative_error is not None else None,
                 "trigger_inventory_available_m3": trigger_inventory,
                 "trigger_inventory_role": "input inventory diagnostic; failure_source_m3 is the closure term",
                 "drainage_m3": 0.0,
@@ -1573,7 +1589,7 @@ class EDDASolver:
             "nonfinite_counts": nonfinite_counts,
             "classification": {
                 "functional_e2e": None,
-                "conservation_closure": abs(global_relative_error) <= 1.0e-3,
+                "conservation_closure": abs(global_relative_error) <= 1.0e-3 if global_relative_error is not None else None,
                 "strict_code_parity": None,
                 "discretization_convergence": "not_assessed",
             },
@@ -3299,6 +3315,18 @@ class EDDASolver:
         arrays["time__rejected_steps"] = np.asarray(self.time_stepper.rejected_steps)
         arrays["time__dt_history"] = np.asarray(self.time_stepper.dt_history, dtype=self.numpy_float_dtype)
         arrays["solver__fortran_tempdt"] = np.asarray(self.fortran_tempdt)
+        arrays["diagnostics__json"] = np.asarray(json.dumps({
+            "version": 1,
+            "coverage": str(getattr(self, "numerical_diagnostics_coverage", "full_run")),
+            "dt_history": list(self.numerical_dt_history),
+            "reject_reasons": dict(self.numerical_reject_reasons),
+            "reject_examples": dict(self.numerical_reject_examples),
+            "max_abs_relative_error": float(self.numerical_max_abs_relative_error),
+            "volume_violation_count": int(self.numerical_volume_violation_count),
+            "dt_min_hits": int(self.numerical_dt_min_hits),
+            "nonfinite_counts": dict(self.numerical_nonfinite_counts),
+            "observe_count": int(self.numerical_observe_count),
+        }, ensure_ascii=False, default=str))
 
         np.savez_compressed(output_path, **arrays)
         logger.info(f"Saved restart checkpoint: {output_path}")
@@ -3381,6 +3409,28 @@ class EDDASolver:
                 self.fortran_tempdt = float(np.asarray(checkpoint["solver__fortran_tempdt"]).item())
             else:
                 self.fortran_tempdt = 0.0
+            if "diagnostics__json" in checkpoint:
+                try:
+                    raw_diagnostics = np.asarray(checkpoint["diagnostics__json"]).item()
+                    diagnostics = json.loads(str(raw_diagnostics))
+                    if int(diagnostics.get("version", 0)) != 1:
+                        raise ValueError("unsupported diagnostics checkpoint version")
+                    self.numerical_dt_history = [float(value) for value in diagnostics.get("dt_history", [])]
+                    self.numerical_reject_reasons = {str(key): int(value) for key, value in dict(diagnostics.get("reject_reasons") or {}).items()}
+                    self.numerical_reject_examples = dict(diagnostics.get("reject_examples") or {})
+                    self.numerical_max_abs_relative_error = float(diagnostics.get("max_abs_relative_error", 0.0))
+                    self.numerical_volume_violation_count = int(diagnostics.get("volume_violation_count", 0))
+                    self.numerical_dt_min_hits = int(diagnostics.get("dt_min_hits", 0))
+                    self.numerical_nonfinite_counts = {str(key): int(value) for key, value in dict(diagnostics.get("nonfinite_counts") or {}).items()}
+                    self.numerical_observe_count = int(diagnostics.get("observe_count", 0))
+                    self.numerical_diagnostics_coverage = str(diagnostics.get("coverage") or "full_run")
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"Invalid numerical diagnostics checkpoint: {exc}") from exc
+            else:
+                # Older valid checkpoints did not carry these accumulators.
+                # Continue safely, but never present resumed-only diagnostics
+                # as totals for the restored step counters.
+                self.numerical_diagnostics_coverage = "resumed_segment"
 
         if restored_flow_connectivity:
             mark_changed = getattr(self.fields, "mark_flow_connectivity_changed", None)

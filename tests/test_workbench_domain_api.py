@@ -577,6 +577,51 @@ def test_case_import_restores_removed_empty_destination_when_publish_move_fails(
         assert not any(destination.iterdir())
 
 
+def test_case_import_recovers_catalog_when_publish_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_importable_reference_case(tmp_path / "source")
+        destination = tmp_path / "recover-published-destination"
+        preview = store.preview_case_import(str(edda_in.parent))
+        original_public_scenario = store._public_scenario
+        original_replace = Path.replace
+        failed_after_publish = False
+
+        def fail_after_publish(*args: object, **kwargs: object) -> dict:
+            nonlocal failed_after_publish
+            if destination.exists() and not failed_after_publish:
+                failed_after_publish = True
+                raise OSError("simulated post-publish catalog failure")
+            return original_public_scenario(*args, **kwargs)
+
+        def fail_publish_rollback(self: Path, target: str | Path) -> Path:
+            target_path = Path(target)
+            if self == destination and target_path.name.startswith(f".{destination.name}.import-"):
+                raise OSError("simulated rollback rename failure")
+            return original_replace(self, target)
+
+        monkeypatch.setattr(store, "_public_scenario", fail_after_publish)
+        monkeypatch.setattr(Path, "replace", fail_publish_rollback)
+
+        recovered = store.commit_case_import(
+            str(edda_in.parent),
+            str(destination),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )
+
+        assert recovered["idempotent"] is True
+        assert Path(recovered["project"]["root_path"]) == destination
+        assert not (destination / ".taichi-flow" / "case-import-recovery.json").exists()
+        assert store.commit_case_import(
+            str(edda_in.parent),
+            str(destination),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )["idempotent"] is True
+
+
 def test_batch_delete_reclaims_only_unreferenced_project_blobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
         store = client.app.state.workbench

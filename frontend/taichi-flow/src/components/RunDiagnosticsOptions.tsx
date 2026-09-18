@@ -61,8 +61,9 @@ function parseProbeCells(text: string): { cells: Array<[number, number]>; error:
 }
 
 function validateProbeCells(text: string, enabled: boolean): { cells: Array<[number, number]>; error: string | null } {
+  if (!enabled) return { cells: [], error: null };
   const parsed = parseProbeCells(text);
-  if (parsed.error || !enabled || parsed.cells.length > 0) return parsed;
+  if (parsed.error || parsed.cells.length > 0) return parsed;
   return { cells: parsed.cells, error: "启用侵蚀探针时至少需要一个探针格点" };
 }
 
@@ -156,6 +157,7 @@ export function RunDiagnosticsOptions({
               erosion_probe: {
                 ...value.erosion_probe,
                 enabled,
+                probe_cells: enabled ? value.erosion_probe.probe_cells : [],
               },
             });
           }}

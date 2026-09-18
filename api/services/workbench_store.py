@@ -22,7 +22,7 @@ import shutil
 from api.services.result_files import classify_result_writer
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class WorkbenchError(Exception):
@@ -297,7 +297,8 @@ class ProjectDatabase:
                     finished_at TEXT,
                     progress REAL NOT NULL DEFAULT 0,
                     summary TEXT NOT NULL,
-                    cancel_reason TEXT
+                    cancel_reason TEXT,
+                    deleted_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS result_families (
                     family_id TEXT PRIMARY KEY,
@@ -782,6 +783,38 @@ class ProjectDatabase:
                 connection.execute(
                     "ALTER TABLE simulation_runs ADD COLUMN run_options_json TEXT NOT NULL DEFAULT '{}'"
                 )
+        if version < 12:
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "deleted_at" not in queue_columns:
+                connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
+            # v9 kept unsafe queued records as cancelled audit history but did
+            # not restore their scenarios to an editable state.  Apply this
+            # corrective step once, without disturbing scenarios that now have
+            # a newer active queue record.
+            migration_now = utc_now()
+            connection.execute(
+                """
+                UPDATE scenarios
+                SET status=CASE WHEN input_revision_id IS NULL THEN 'draft' ELSE 'ready' END,
+                    updated_at=?
+                WHERE status IN ('queued', 'waiting')
+                  AND EXISTS (
+                      SELECT 1 FROM queue_items q
+                      WHERE q.scenario_id=scenarios.scenario_id
+                        AND q.cancel_reason='policy_snapshot_missing_after_upgrade'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM queue_items q
+                      WHERE q.scenario_id=scenarios.scenario_id
+                        AND q.deleted_at IS NULL
+                        AND q.status IN ('queued', 'waiting', 'starting', 'running', 'stopping')
+                  )
+                """,
+                (migration_now,),
+            )
 
         from api.services.parameter_templates import builtin_parameter_templates
 
@@ -837,6 +870,8 @@ class ProjectDatabase:
 
 class WorkbenchStore:
     """Deep module for project discovery and per-project stores."""
+
+    CASE_IMPORT_RECOVERY_FILENAME = "case-import-recovery.json"
 
     def __init__(self, state_dir: Optional[Path] = None):
         self.state_dir = Path(state_dir or default_state_dir()).expanduser().resolve()
@@ -931,14 +966,23 @@ class WorkbenchStore:
             current_payload.get("values") if isinstance(current_payload, dict) else {}
         )
         try:
-            cleaned = validate_compute_gate_values(values)
+            validation_values = dict(values)
+            if (
+                str(validation_values.get(POLICY_KEY) or "").strip().lower() == "live"
+                and EXPERIMENTAL_LIVE_KEY not in validation_values
+            ):
+                validation_values[EXPERIMENTAL_LIVE_KEY] = current_values.get(EXPERIMENTAL_LIVE_KEY, False)
+            cleaned = validate_compute_gate_values(validation_values)
+            if EXPERIMENTAL_LIVE_KEY not in values:
+                cleaned.pop(EXPERIMENTAL_LIVE_KEY, None)
             effective_sparse = dict(current_values)
-            if POLICY_KEY in values and str(values[POLICY_KEY]).strip().lower() == "auto":
-                effective_sparse.pop(POLICY_KEY, None)
-            elif POLICY_KEY in cleaned:
-                effective_sparse[POLICY_KEY] = cleaned[POLICY_KEY]
-            if EXPERIMENTAL_LIVE_KEY in cleaned:
-                effective_sparse[EXPERIMENTAL_LIVE_KEY] = cleaned[EXPERIMENTAL_LIVE_KEY]
+            from api.services.compute_gate_defaults import VARIANT_AND_POLICY_AUTO_KEYS
+            for key, value in values.items():
+                key = str(key)
+                if key in VARIANT_AND_POLICY_AUTO_KEYS and isinstance(value, str) and value.strip().lower() == "auto":
+                    effective_sparse.pop(key, None)
+                elif key in cleaned:
+                    effective_sparse[key] = cleaned[key]
             if (
                 effective_sparse.get(POLICY_KEY) == "live"
                 and effective_sparse.get(EXPERIMENTAL_LIVE_KEY) is not True
@@ -951,7 +995,7 @@ class WorkbenchStore:
         except ComputeGateValidationError as exc:
             raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
         payload = {
-            "values": cleaned,
+            "values": effective_sparse,
             "updated_at": utc_now(),
         }
         with self.catalog() as connection:
@@ -1089,6 +1133,74 @@ class WorkbenchStore:
             details={"source_root": str(source_root)},
         )
 
+    @staticmethod
+    def _case_reference_source_files(source_root: Path) -> list[tuple[str, Path]]:
+        """Return the source files consulted by the reference variant parser."""
+        dfs = source_root / "dfs.F90"
+        main = source_root / "edda main program.F90"
+        if not main.is_file():
+            candidates = sorted(
+                path
+                for pattern in ("*main*program*.F90", "*main*program*.f90", "*edda*.F90", "*edda*.f90")
+                for path in source_root.glob(pattern)
+                if path.is_file()
+            )
+            if candidates:
+                main = candidates[0]
+        return [("source:dfs.F90", dfs), ("source:edda-main", main)]
+
+    @staticmethod
+    def _append_precomputed_unsfin_inputs(plan: Dict[str, Any], parsed: Any) -> Dict[str, Any]:
+        """Treat an active original UNSFIN schedule as immutable case input."""
+        if not (
+            bool((getattr(parsed, "flags", {}) or {}).get("simulate_shallow_landslide"))
+            and str(getattr(parsed, "dfs_failure_source_variant", "")) == "precomputed_unsfin_schedule"
+        ):
+            return plan
+        from api.services.native_sidecar_loader import (
+            PRECOMPUTED_UNSFIN_FILENAMES,
+            find_precomputed_unsfin_artifacts,
+            load_precomputed_unsfin_schedule,
+        )
+
+        base_dir = Path(parsed.reference_base_dir)
+        dem_path: Path | None = None
+        dem_reference = (getattr(parsed, "file_inputs", {}) or {}).get("demfil")
+        for raw_path in getattr(dem_reference, "resolved_paths", []) or []:
+            candidate = Path(str(raw_path))
+            if candidate.is_file():
+                dem_path = candidate
+                break
+        locator = find_precomputed_unsfin_artifacts(base_dir)
+        validation = load_precomputed_unsfin_schedule(base_dir, dem_file=dem_path)
+        valid = bool(locator.get("all_required_present")) and bool(validation.get("runtime_arrays"))
+        plan["precomputed_unsfin_validation"] = {
+            "valid": valid,
+            "missing_artifacts": list(locator.get("missing_artifacts") or []),
+            "parse_status": validation.get("parse_status"),
+        }
+        for ordinal, (key, filename) in enumerate(PRECOMPUTED_UNSFIN_FILENAMES.items(), start=1):
+            path = Path(str(locator["artifact_paths"].get(key) or Path(parsed.reference_base_dir) / filename))
+            exists = path.is_file()
+            item = {
+                "native_family": f"precomputed_unsfin_{key}",
+                "family": "precomputed_unsfin",
+                "ordinal": ordinal,
+                "path": str(path),
+                "exists": exists,
+                "active": True,
+                "binding_key": f"precomputed_unsfin.{key}",
+                "role": "precomputed-unsfin",
+                "target_name": filename,
+            }
+            plan.setdefault("file_references", []).append(item)
+            if exists and valid:
+                plan.setdefault("proposed_bindings", []).append(item)
+            else:
+                plan.setdefault("unresolved_active_bindings", []).append(item)
+        plan["unresolved_active_count"] = len(plan.get("unresolved_active_bindings") or [])
+        return plan
+
     @classmethod
     def _case_fingerprint(cls, config_path: Path, plan: Mapping[str, Any]) -> str:
         """Hash config plus active existing inputs without hashing source paths."""
@@ -1100,11 +1212,11 @@ class WorkbenchStore:
         cls,
         config_path: Path,
         plan: Mapping[str, Any],
-    ) -> tuple[str, list[Dict[str, str]]]:
+    ) -> tuple[str, list[Dict[str, Any]]]:
         """Read each fingerprinted source once and retain its content digest."""
         digest = hashlib.sha256()
-        digest.update(b"taichi-flow-reference-case-v1\0")
-        inventory: list[Dict[str, str]] = []
+        digest.update(b"taichi-flow-reference-case-v2\0")
+        inventory: list[Dict[str, Any]] = []
 
         def hash_source(path: Path, label: str, *, message: str) -> str:
             source_digest = hashlib.sha256()
@@ -1122,8 +1234,25 @@ class WorkbenchStore:
                     details={"path": str(path), "error": str(exc)},
                 ) from exc
             source_hash = source_digest.hexdigest()
-            inventory.append({"path": str(path.resolve()), "sha256": source_hash, "label": label.rstrip("\0")})
+            inventory.append({
+                "path": str(path.resolve()),
+                "sha256": source_hash,
+                "label": label.rstrip("\0"),
+                "exists": True,
+                "file_name": path.name,
+            })
             return source_hash
+
+        def hash_missing(path: Path, label: str) -> None:
+            digest.update(label.encode("utf-8"))
+            digest.update(b"<missing>\0")
+            inventory.append({
+                "path": str(path.resolve()),
+                "sha256": None,
+                "label": label.rstrip("\0"),
+                "exists": False,
+                "file_name": path.name,
+            })
 
         hash_source(config_path, "edda_in\0", message=f"无法读取 edda_in.txt：{config_path.name}")
         references = sorted(
@@ -1138,6 +1267,11 @@ class WorkbenchStore:
             label = f"{item.get('native_family')}:{int(item.get('ordinal') or 0)}\0"
             path = Path(str(item["path"]))
             hash_source(path, label, message=f"无法读取活动输入：{path.name}")
+        for label, path in cls._case_reference_source_files(config_path.parent):
+            if path.is_file():
+                hash_source(path, f"{label}\0", message=f"无法读取参考源码：{path.name}")
+            else:
+                hash_missing(path, f"{label}\0")
         return digest.hexdigest(), inventory
 
     @staticmethod
@@ -1187,10 +1321,14 @@ class WorkbenchStore:
             parsed = parse_reference_config_file(str(config_path), str(source))
         except Exception as exc:
             raise WorkbenchError("case_config_parse_failed", f"解析参考案例 edda_in 失败：{exc}", status_code=422) from exc
-        fingerprint_plan = build_legacy_migration_plan(parsed, source_hash="")
+        fingerprint_plan = self._append_precomputed_unsfin_inputs(
+            build_legacy_migration_plan(parsed, source_hash=""), parsed
+        )
         fingerprint, source_inventory = self._case_fingerprint_with_inventory(config_path, fingerprint_plan)
         config_hash = source_inventory[0]["sha256"]
-        plan = build_legacy_migration_plan(parsed, source_hash=config_hash)
+        plan = self._append_precomputed_unsfin_inputs(
+            build_legacy_migration_plan(parsed, source_hash=config_hash), parsed
+        )
         values = normalized_parameter_values(parsed)
         snapshot_values = dict(parsed.switch_snapshot.values)
         run_controls = {
@@ -1221,6 +1359,14 @@ class WorkbenchStore:
             }
             for item in (parsed.unsupported_flags or [])
         )
+        if (plan.get("precomputed_unsfin_validation") or {}).get("valid") is False:
+            details = plan["precomputed_unsfin_validation"]
+            issues.append({
+                "severity": "error",
+                "code": "precomputed_unsfin_invalid",
+                "message": "预计算 UNSFIN 文件缺失或未通过格式/网格校验。",
+                "details": details,
+            })
         references_by_family = {
             family: [item for item in plan.get("file_references", []) if item.get("native_family") == family]
             for family in parsed.file_inputs
@@ -1292,9 +1438,140 @@ class WorkbenchStore:
                 "outflow": self._case_sidecar_summary(sidecar_paths.get("outflow.txt"), "outflow"),
             },
             "issues": issues,
-            "commit_allowed": not unresolved and any(item.get("family") == "dem" for item in active_bindings),
+            "commit_allowed": not unresolved and not any(item.get("severity") == "error" for item in issues) and any(item.get("family") == "dem" for item in active_bindings),
             "plan": plan,
         }
+
+    @classmethod
+    def _case_import_recovery_path(cls, destination: Path) -> Path:
+        return destination / ".taichi-flow" / cls.CASE_IMPORT_RECOVERY_FILENAME
+
+    @staticmethod
+    def _rebase_case_import_paths(database: ProjectDatabase, *, old_root: str, destination: Path) -> None:
+        """Make paths stored before a staging rename point at the published root."""
+        old_normalized = os.path.normcase(os.path.normpath(old_root))
+        destination_root = str(destination)
+
+        def rebase(value: Any) -> Any:
+            if isinstance(value, str):
+                normalized = os.path.normcase(os.path.normpath(value))
+                if normalized == old_normalized:
+                    return destination_root
+                prefix = old_normalized + os.sep
+                if normalized.startswith(prefix):
+                    return destination_root + value[len(old_root):]
+                return value
+            if isinstance(value, list):
+                return [rebase(item) for item in value]
+            if isinstance(value, dict):
+                return {key: rebase(item) for key, item in value.items()}
+            return value
+
+        with database.connect() as connection:
+            upload_rows = connection.execute("SELECT upload_id, blob_path FROM uploads").fetchall()
+            for row in upload_rows:
+                rebased_path = rebase(str(row["blob_path"]))
+                if rebased_path != row["blob_path"]:
+                    connection.execute(
+                        "UPDATE uploads SET blob_path=? WHERE upload_id=?",
+                        (rebased_path, row["upload_id"]),
+                    )
+            revision_rows = connection.execute("SELECT revision_id, manifest_json FROM input_revisions").fetchall()
+            for row in revision_rows:
+                manifest = json_loads(row["manifest_json"], [])
+                rebased_manifest = rebase(manifest)
+                if rebased_manifest != manifest:
+                    connection.execute(
+                        "UPDATE input_revisions SET manifest_json=? WHERE revision_id=?",
+                        (json.dumps(rebased_manifest, ensure_ascii=False), row["revision_id"]),
+                    )
+
+    def _recover_published_case_import(self, destination: Path, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """Finish a published import whose catalog update was interrupted."""
+        recovery_path = self._case_import_recovery_path(destination)
+        if not recovery_path.is_file():
+            return None
+        try:
+            recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+            project_id = str(recovery["project_id"])
+            old_root = str(recovery["staging_root"])
+            recorded_destination = Path(str(recovery["destination_root"])).resolve()
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise WorkbenchError(
+                "case_import_recovery_invalid",
+                "目标目录包含无法验证的中断导入恢复记录，未执行覆盖。",
+                status_code=409,
+                details={"path": str(recovery_path), "error": str(exc)},
+            ) from exc
+        if recorded_destination != destination.resolve() or str(recovery.get("case_fingerprint") or "") != fingerprint:
+            raise WorkbenchError(
+                "case_import_recovery_required",
+                "目标目录保留了另一份中断导入，不能用新的预览结果覆盖。",
+                status_code=409,
+                details={"path": str(destination)},
+            )
+
+        database = ProjectDatabase(destination)
+        metadata = database.metadata()
+        if not metadata or str(metadata.get("project_id") or "") != project_id:
+            raise WorkbenchError(
+                "case_import_recovery_invalid",
+                "中断导入的项目身份无法与目标目录核对，未执行覆盖。",
+                status_code=409,
+                details={"path": str(destination)},
+            )
+        database.ensure_schema()
+        self._rebase_case_import_paths(database, old_root=old_root, destination=destination)
+        with self.catalog() as connection:
+            conflicting = connection.execute(
+                "SELECT project_id FROM projects WHERE root_path=?", (str(destination),)
+            ).fetchone()
+            if conflicting and str(conflicting["project_id"]) != project_id:
+                raise WorkbenchError(
+                    "case_import_recovery_conflict",
+                    "目标目录已被另一项目登记，未执行覆盖。",
+                    status_code=409,
+                    details={"path": str(destination)},
+                )
+            current = connection.execute(
+                "SELECT project_id, root_path FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if current:
+                current_root = Path(str(current["root_path"])).resolve()
+                if current_root not in {Path(old_root).resolve(), destination.resolve()}:
+                    raise WorkbenchError(
+                        "case_import_recovery_conflict",
+                        "中断导入的项目已登记到其他目录，未执行覆盖。",
+                        status_code=409,
+                        details={"path": str(destination)},
+                    )
+                connection.execute(
+                    "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
+                    (str(destination), str(database.database_path), utc_now(), project_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO projects(project_id, name, description, root_path, state_path, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        str(metadata["name"]),
+                        str(metadata["description"]),
+                        str(destination),
+                        str(database.database_path),
+                        str(metadata["created_at"]),
+                        str(metadata["updated_at"]),
+                    ),
+                )
+        try:
+            recovery_path.unlink(missing_ok=True)
+        except OSError:
+            # Registration is already durable. A later identical import will
+            # retry removing this advisory recovery marker.
+            pass
+        return self._existing_reference_import(destination, fingerprint)
 
     def _existing_reference_import(self, destination: Path, fingerprint: str) -> Optional[Dict[str, Any]]:
         database = ProjectDatabase(destination)
@@ -1384,6 +1661,9 @@ class WorkbenchStore:
             return False
 
         if destination.exists():
+            recovered = self._recover_published_case_import(destination, fingerprint) if destination.is_dir() else None
+            if recovered:
+                return recovered
             existing = self._existing_reference_import(destination, fingerprint) if destination.is_dir() else None
             if existing:
                 return existing
@@ -1398,6 +1678,7 @@ class WorkbenchStore:
         source_hashes = {
             os.path.normcase(os.path.normpath(str(Path(item["path"]).resolve()))): str(item["sha256"])
             for item in preview.get("source_inventory", [])
+            if item.get("exists") and item.get("sha256")
         }
 
         def ingest_verified_source(*, family: str, path: str) -> Dict[str, Any]:
@@ -1438,11 +1719,45 @@ class WorkbenchStore:
             config_asset = ingest_verified_source(family="config", path=str(preview["case_config_file"]))
             assets.append(config_asset)
             copied_config_path = self.get_upload_blob_path(project_id, config_asset["asset_id"])
+            reference_source_dir = staging / ".reference-source"
+            reference_source_dir.mkdir(parents=True, exist_ok=True)
+            for source_item in preview.get("source_inventory", []):
+                if not str(source_item.get("label") or "").startswith("source:") or not source_item.get("exists"):
+                    continue
+                source_asset = ingest_verified_source(
+                    family="reference_source",
+                    path=str(source_item["path"]),
+                )
+                assets.append(source_asset)
+                source_name = str(source_item.get("file_name") or Path(str(source_item["path"])).name)
+                shutil.copyfile(
+                    self.get_upload_blob_path(project_id, source_asset["asset_id"]),
+                    reference_source_dir / source_name,
+                )
+                bindings.append({
+                    "binding_key": f"reference.source.{str(source_item.get('label')).replace(':', '.')}",
+                    "asset_id": source_asset["asset_id"],
+                    "family": "reference_source",
+                    "role": "reference-source",
+                    "ordinal": len(bindings) + 1,
+                    "active": False,
+                    "metadata": {
+                        "source_name": source_name,
+                        "source_hash": source_asset["sha256"],
+                        "case_fingerprint": fingerprint,
+                    },
+                })
             try:
-                parsed = parse_reference_config_file(str(copied_config_path), str(source))
+                parsed = parse_reference_config_file(
+                    str(copied_config_path),
+                    str(source),
+                    reference_source_dir=str(reference_source_dir),
+                )
             except Exception as exc:
                 raise WorkbenchError("case_config_parse_failed", f"复制后的 edda_in 无法解析：{exc}", status_code=422) from exc
-            plan = build_legacy_migration_plan(parsed, source_hash=str(config_asset["sha256"]))
+            plan = self._append_precomputed_unsfin_inputs(
+                build_legacy_migration_plan(parsed, source_hash=str(config_asset["sha256"])), parsed
+            )
             bindings.append({
                 "binding_key": "legacy.config",
                 "asset_id": config_asset["asset_id"],
@@ -1469,6 +1784,14 @@ class WorkbenchStore:
                         "case_fingerprint": fingerprint,
                     },
                 })
+                target_name = item.get("target_name")
+                if target_name:
+                    # The native loader searches case-local names; create
+                    # those names from the verified blob, not the source tree.
+                    shutil.copyfile(
+                        self.get_upload_blob_path(project_id, asset["asset_id"]),
+                        staging / str(target_name),
+                    )
             database = self.project_database(project_id)
             with database.connect() as connection:
                 resolved_bindings, manifest = self._resolve_binding_assets(connection, bindings)
@@ -1490,7 +1813,11 @@ class WorkbenchStore:
                 provenance["_compute_policy"] = {
                     "ownership": "reference_case",
                     "source_mode": "reference_case_import",
-                    "source_files": ["edda_in.txt"],
+                    "source_files": [
+                        str(item.get("file_name"))
+                        for item in preview.get("source_inventory", [])
+                        if item.get("exists")
+                    ],
                     "case_fingerprint": fingerprint,
                     "original_fssimul": parsed.flags.get("simulate_shallow_landslide"),
                     "topology": parsed.dfs_failure_source_variant or None,
@@ -1526,6 +1853,20 @@ class WorkbenchStore:
                 control_overrides={},
             )
             old_root = str(staging)
+            recovery_path = self._case_import_recovery_path(staging)
+            recovery_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "project_id": project_id,
+                        "staging_root": old_root,
+                        "destination_root": str(destination),
+                        "case_fingerprint": fingerprint,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
             if destination.exists():
                 if not destination_is_empty():
                     raise WorkbenchError(
@@ -1538,51 +1879,7 @@ class WorkbenchStore:
             staging.replace(destination)
             moved = True
             new_database = ProjectDatabase(destination)
-
-            # Uploaded blobs move with the staging directory.  The uploads
-            # table stores plain paths, but input revision manifests store JSON
-            # strings where Windows separators are escaped; SQL replace() on
-            # the raw prefix therefore leaves stale staging paths behind.
-            # Rebase parsed values instead, preserving reference files outside
-            # the staging root and every non-path manifest field verbatim.
-            old_normalized = os.path.normcase(os.path.normpath(old_root))
-            destination_root = str(destination)
-
-            def rebase_staging_path(value: Any) -> Any:
-                if isinstance(value, str):
-                    normalized = os.path.normcase(os.path.normpath(value))
-                    if normalized == old_normalized:
-                        return destination_root
-                    prefix = old_normalized + os.sep
-                    if normalized.startswith(prefix):
-                        return destination_root + value[len(old_root):]
-                    return value
-                if isinstance(value, list):
-                    return [rebase_staging_path(item) for item in value]
-                if isinstance(value, dict):
-                    return {key: rebase_staging_path(item) for key, item in value.items()}
-                return value
-
-            with new_database.connect() as connection:
-                upload_rows = connection.execute("SELECT upload_id, blob_path FROM uploads").fetchall()
-                for row in upload_rows:
-                    rebased_path = rebase_staging_path(str(row["blob_path"]))
-                    if rebased_path != row["blob_path"]:
-                        connection.execute(
-                            "UPDATE uploads SET blob_path=? WHERE upload_id=?",
-                            (rebased_path, row["upload_id"]),
-                        )
-                revision_rows = connection.execute(
-                    "SELECT revision_id, manifest_json FROM input_revisions"
-                ).fetchall()
-                for row in revision_rows:
-                    manifest = json_loads(row["manifest_json"], [])
-                    rebased_manifest = rebase_staging_path(manifest)
-                    if rebased_manifest != manifest:
-                        connection.execute(
-                            "UPDATE input_revisions SET manifest_json=? WHERE revision_id=?",
-                            (json.dumps(rebased_manifest, ensure_ascii=False), row["revision_id"]),
-                        )
+            self._rebase_case_import_paths(new_database, old_root=old_root, destination=destination)
             with self.catalog() as connection:
                 connection.execute(
                     "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
@@ -1590,6 +1887,12 @@ class WorkbenchStore:
                 )
             project = self.get_project(project_id)
             final_scenario = self._public_scenario(project_id, self._scenario_row(project_id, scenario["scenario_id"]))
+            try:
+                self._case_import_recovery_path(destination).unlink(missing_ok=True)
+            except OSError:
+                # A lingering advisory marker must not turn a completed
+                # project registration into a failed import.
+                pass
             return {
                 "project": project,
                 "scenario": final_scenario,
@@ -1599,6 +1902,25 @@ class WorkbenchStore:
                 "idempotent": False,
             }
         except Exception:
+            # A publish rename is not the end of the transaction: the moved
+            # database still needs rebasing and catalog registration.  Roll it
+            # back while the destination is exclusively ours, so a retry does
+            # not encounter a stranded non-empty directory.
+            if moved and destination.exists() and not staging.exists():
+                try:
+                    destination.replace(staging)
+                    moved = False
+                except OSError:
+                    # A durable marker moved with the staged project.  Finish
+                    # the rebase/catalog update if locks or storage pressure
+                    # have cleared; otherwise leave it for the next identical
+                    # import instead of deleting or overwriting the target.
+                    try:
+                        recovered = self._recover_published_case_import(destination, fingerprint)
+                    except WorkbenchError:
+                        recovered = None
+                    if recovered:
+                        return recovered
             if not moved:
                 if project_id:
                     with self.catalog() as connection:
@@ -2132,6 +2454,8 @@ class WorkbenchStore:
             "slofil",
             "drainage",
             "swmm",
+            "reference_source",
+            "precomputed_unsfin",
         }
         normalized_family = family.strip().lower()
         if normalized_family not in allowed_families:
@@ -3860,7 +4184,7 @@ class WorkbenchStore:
             active_queue_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM queue_items
-                WHERE scenario_id=? AND status IN ('starting', 'running', 'stopping')
+                    WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()[0]
@@ -4062,7 +4386,7 @@ class WorkbenchStore:
         database = self.project_database(project_id)
         with database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM queue_items WHERE queue_item_id=?", (queue_item_id,)
+                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL", (queue_item_id,)
             ).fetchone()
         if not row:
             raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
@@ -4085,7 +4409,7 @@ class WorkbenchStore:
                 waiting_ahead = connection.execute(
                     """
                     SELECT COUNT(*) FROM queue_items
-                    WHERE status='queued' AND (
+                    WHERE status='queued' AND deleted_at IS NULL AND (
                         position < ?
                         OR (position = ? AND (
                             enqueued_at < ?
@@ -4130,7 +4454,7 @@ class WorkbenchStore:
         database = self.project_database(project_id)
         with database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM queue_items ORDER BY position, enqueued_at, queue_item_id"
+                "SELECT * FROM queue_items WHERE deleted_at IS NULL ORDER BY position, enqueued_at, queue_item_id"
             ).fetchall()
         display_positions = {
             row["queue_item_id"]: index
@@ -4403,13 +4727,13 @@ class WorkbenchStore:
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND status IN ('queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
             if duplicate:
                 raise WorkbenchError("scenario_already_queued", "方案已在队列中。", status_code=409)
-            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
+            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items WHERE deleted_at IS NULL AND status='queued'").fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             connection.execute(
@@ -4528,10 +4852,42 @@ class WorkbenchStore:
             current = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not current:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
+            if not has_frozen_policy:
+                # The scenario row, its version and the policy snapshot must
+                # originate under this same write lock.  A pre-transaction
+                # preview is useful for early feedback but must never be what
+                # the queue records after a concurrent editor save.
+                locked_snapshot = self._scenario_compute_snapshot(
+                    connection,
+                    current,
+                    global_gates=enqueue_global_gates,
+                )
+                queue_effective = dict(locked_snapshot.effective_parameters)
+                queue_resolution = dict(locked_snapshot.resolution)
+                locked_revision_id = current["input_revision_id"]
+                if locked_revision_id:
+                    frozen_revision_id = str(locked_revision_id)
+                    locked_revision = connection.execute(
+                        "SELECT * FROM input_revisions WHERE revision_id=?", (frozen_revision_id,)
+                    ).fetchone()
+                    if not locked_revision or locked_revision["status"] != "ready":
+                        raise WorkbenchError("input_revision_invalid", "The current input snapshot is invalid.", status_code=409)
+                    frozen_manifest = json_loads(locked_revision["manifest_json"], [])
+                else:
+                    frozen_revision_id = None
+                    frozen_manifest = None
+                if str(queue_resolution.get("status") or "resolved") != "resolved":
+                    issue = queue_resolution.get("blocking_issue") or {}
+                    raise WorkbenchError(
+                        str(issue.get("code") or "compute_policy_resolution_blocked"),
+                        str(issue.get("message") or "失稳源策略未完成严格解析，不能入队。"),
+                        status_code=422,
+                        details=queue_resolution,
+                    )
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND status IN ('queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
@@ -4565,7 +4921,7 @@ class WorkbenchStore:
                         status_code=409,
                     )
                 frozen_manifest = snapshot_manifest
-            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
+            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items WHERE deleted_at IS NULL AND status='queued'").fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             profile_name = self._resolve_enqueue_runtime_profile(runtime_profile)
@@ -4610,7 +4966,7 @@ class WorkbenchStore:
             raise WorkbenchError("queue_item_not_reorderable", "只有等待中的队列项可以重排。", status_code=409)
         with database.connect() as connection:
             queued = connection.execute(
-                "SELECT queue_item_id FROM queue_items WHERE status='queued' ORDER BY position, enqueued_at"
+                "SELECT queue_item_id FROM queue_items WHERE status='queued' AND deleted_at IS NULL ORDER BY position, enqueued_at"
             ).fetchall()
             ordered_ids = [str(item["queue_item_id"]) for item in queued]
             ordered_ids.remove(queue_item_id)
@@ -4624,18 +4980,24 @@ class WorkbenchStore:
 
     def cancel_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         database = self.project_database(project_id)
-        row = self._queue_row(project_id, queue_item_id)
-        if row["status"] != "queued":
-            raise WorkbenchError("queue_item_not_cancelable", "只有等待中的队列项可以取消。", status_code=409)
         now = utc_now()
         with database.connect() as connection:
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
+                (queue_item_id,),
+            ).fetchone()
+            if not row or row["status"] != "queued":
+                raise WorkbenchError("queue_item_not_cancelable", "只有等待中的队列项可以取消。", status_code=409)
+            updated = connection.execute(
                 """
                 UPDATE queue_items SET status='cancelled', finished_at=?, summary='已取消'
-                WHERE queue_item_id=?
+                WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL
                 """,
                 (now, queue_item_id),
-            )
+            ).rowcount
+            if updated != 1:
+                raise WorkbenchError("queue_item_not_cancelable", "队列项已被调度器接管。", status_code=409)
             connection.execute(
                 "UPDATE scenarios SET status='ready', updated_at=? WHERE scenario_id=?",
                 (now, row["scenario_id"]),
@@ -4707,9 +5069,10 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
+            database.ensure_schema()
             with database.connect() as connection:
                 queue_rows = connection.execute(
-                    "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE status IN ('starting', 'running', 'stopping')"
+                    "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE deleted_at IS NULL AND status IN ('starting', 'running', 'stopping')"
                 ).fetchall()
                 for row in queue_rows:
                     connection.execute(
@@ -4743,7 +5106,7 @@ class WorkbenchStore:
                            s.effective_parameters_json, s.name AS scenario_name
                     FROM queue_items q
                     JOIN scenarios s ON s.scenario_id=q.scenario_id
-                    WHERE q.status='queued'
+                    WHERE q.status='queued' AND q.deleted_at IS NULL
                     ORDER BY q.position, q.enqueued_at, q.queue_item_id
                     LIMIT 1
                     """
@@ -4955,6 +5318,9 @@ class WorkbenchStore:
                 "case_base_dir": self._resolve_case_base_dir(project, active_manifest, config)
                 if reference_case_owned
                 else None,
+                "case_source_dir": str(Path(project["root_path"]) / ".reference-source")
+                if reference_case_owned
+                else None,
                 "case_input_files": case_input_files,
                 "overrides": overrides,
                 "effective_config": effective_parameters,
@@ -4962,7 +5328,9 @@ class WorkbenchStore:
             }
         # Read-only compatibility adapter for pre-v3 revisions. Structured
         # scenarios above never collapse repeated families into one asset.
-        effective_parameters = stored_effective
+        # Legacy scenarios still execute the queue's frozen effective values.
+        # Their stored scenario fields are editable history, not a replacement
+        # for the enqueue-time compute-policy snapshot.
         legacy_by_family = {str(entry["family"]): dict(entry) for entry in manifest}
         case_input_files = self._map_case_input_files(legacy_by_family)
         dem = legacy_by_family.get("dem")
@@ -5009,7 +5377,7 @@ class WorkbenchStore:
             connection.execute(
                 """
                 UPDATE queue_items SET status='starting', simulation_id=?, started_at=?, summary='准备运行'
-                WHERE queue_item_id=? AND status='queued'
+                WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL
                 """,
                 (simulation_id, now, queue_item_id),
             )
@@ -5397,7 +5765,7 @@ def _legacy_claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: s
     now = utc_now()
     with database.connect() as connection:
         claim = connection.execute(
-            "UPDATE queue_items SET status='starting', started_at=?, summary=? WHERE queue_item_id=? AND status='queued'",
+            "UPDATE queue_items SET status='starting', started_at=?, summary=? WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL",
             (now, "Preparing run", queue_item_id),
         )
         if claim.rowcount == 0:
@@ -5460,7 +5828,7 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
         # run snapshot is present and deletion receives a 409 lock response.
         connection.execute("BEGIN IMMEDIATE")
         item = connection.execute(
-            "SELECT * FROM queue_items WHERE queue_item_id=?", (queue_item_id,)
+            "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL", (queue_item_id,)
         ).fetchone()
         if not item or item["status"] != "queued":
             raise WorkbenchError("queue_item_not_claimable", "Queue item is no longer queued.", status_code=409)

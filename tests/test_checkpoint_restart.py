@@ -155,6 +155,14 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     solver_a.time_stepper.t_current = 4.0
     solver_a.time_stepper.dt_current = 0.25
     solver_a.fortran_tempdt = 0.75
+    solver_a.numerical_dt_history = [0.5, 0.25]
+    solver_a.numerical_reject_reasons = {"cfl": 2}
+    solver_a.numerical_reject_examples = {"cfl": {"t_start_s": 3.5}}
+    solver_a.numerical_max_abs_relative_error = 0.0125
+    solver_a.numerical_volume_violation_count = 1
+    solver_a.numerical_dt_min_hits = 3
+    solver_a.numerical_nonfinite_counts = {"volume_relative_error": 1}
+    solver_a.numerical_observe_count = 4
 
     expected_manning = solver_a.rheology.manning.to_numpy().copy()
     expected_manning_ori = solver_a.rheology.manning_ori.to_numpy().copy()
@@ -187,3 +195,11 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     assert solver_b.time_stepper.t_current == 4.0
     assert solver_b.time_stepper.dt_current == 0.25
     assert solver_b.fortran_tempdt == 0.75
+    assert solver_b.numerical_dt_history == [0.5, 0.25]
+    assert solver_b.numerical_reject_reasons == {"cfl": 2}
+    assert solver_b.numerical_reject_examples == {"cfl": {"t_start_s": 3.5}}
+    assert solver_b.numerical_max_abs_relative_error == 0.0125
+    assert solver_b.numerical_volume_violation_count == 1
+    assert solver_b.numerical_dt_min_hits == 3
+    assert solver_b.numerical_nonfinite_counts == {"volume_relative_error": 1}
+    assert solver_b.numerical_observe_count == 4

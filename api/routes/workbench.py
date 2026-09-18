@@ -160,12 +160,15 @@ async def get_project(request: Request, project_id: str):
 
 @router.post("/projects/{project_id}/delete-preview")
 async def preview_project_delete(request: Request, project_id: str, payload: ProjectDeletePreviewRequest):
-    return request.app.state.workbench.project_lifecycle.preview(project_id, payload.mode)
+    # Preview walks the project directory for permanent deletion, which may be
+    # substantial.  Keep the ASGI event loop available while it runs.
+    return await run_in_threadpool(request.app.state.workbench.project_lifecycle.preview, project_id, payload.mode)
 
 
 @router.delete("/projects/{project_id}")
 async def delete_project(request: Request, project_id: str, payload: ProjectDeleteRequest):
-    return request.app.state.workbench.project_lifecycle.execute(
+    return await run_in_threadpool(
+        request.app.state.workbench.project_lifecycle.execute,
         project_id, payload.mode, payload.confirmation_token, payload.confirmed_name,
     )
 

@@ -49,9 +49,11 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
   const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
   const settings = useScenarioSettings();
 
-  const item = scenario.latest_simulation_id
+  const item = [...queue].reverse().find(
+    (q) => q.scenario_id === scenario.scenario_id && ["queued", "waiting", "starting", "running", "stopping"].includes(q.status),
+  ) || (scenario.latest_simulation_id
     ? queue.find((q) => q.simulation_id === scenario.latest_simulation_id)
-    : [...queue].reverse().find((q) => q.scenario_id === scenario.scenario_id);
+    : [...queue].reverse().find((q) => q.scenario_id === scenario.scenario_id));
   const policyResolution = scenarioConfiguration?.compute_policy_resolution;
   const policyBlocked = policyResolution?.status === "blocked";
   const policyResolved = policyResolution?.status === "resolved";

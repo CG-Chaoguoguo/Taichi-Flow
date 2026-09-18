@@ -390,7 +390,9 @@ export type NumericalDiagnostics = {
     residual_m3?: number;
     relative_error?: number;
     tolerance?: number;
-    passed?: boolean;
+    passed?: boolean | null;
+    available?: boolean;
+    capture_error?: string | null;
     trigger_inventory_available_m3?: number;
     drainage_m3?: number;
     [key: string]: unknown;

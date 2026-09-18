@@ -237,7 +237,12 @@ def resolve_scenario_compute_snapshot(
             patch,
             scenario_gate_overrides(gates),
         )
-        resolver_parameters = baseline_values
+        # The resolver owns the shallow-landslide switch too.  Carry an
+        # explicit scenario control into resolver input, without turning a
+        # fallback baseline into evidence for an imported missing control.
+        resolver_parameters = dict(baseline_values)
+        if FSSIMUL_PATH in owned_controls:
+            resolver_parameters[FSSIMUL_PATH] = owned_controls[FSSIMUL_PATH]
         resolver_gates = gates
     try:
         resolution = resolve_compute_policy(
@@ -337,7 +342,7 @@ def validate_compute_gate_values(values: Mapping[str, Any]) -> Dict[str, Any]:
 
     cleaned: Dict[str, Any] = {}
     for key, value in payload.items():
-        if key == POLICY_KEY and str(value).strip().lower() == "auto":
+        if key in VARIANT_AND_POLICY_AUTO_KEYS and str(value).strip().lower() == "auto":
             continue
         if key == "edda.registry_version":
             text = str(value)

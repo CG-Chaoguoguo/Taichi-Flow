@@ -194,7 +194,27 @@ class RuntimeRunExecutor:
         self._lock = Lock()
 
     def signature(self, context: Dict[str, Any]) -> str:
-        return str(context.get("runtime_profile") or "cuda_production_default")
+        # Taichi is process-global.  BackendManager rejects a second init with
+        # different precision/thread/memory arguments, so admission must use
+        # the same init contract rather than only the user-facing profile.
+        effective = context.get("effective_config") or {}
+        compute = effective.get("compute") if isinstance(effective, dict) else None
+        if not isinstance(compute, dict):
+            compute = {}
+
+        def value(name: str, default: Any = None) -> Any:
+            return compute.get(name, effective.get(f"compute.{name}", default)) if isinstance(effective, dict) else default
+
+        profile = str(context.get("runtime_profile") or "cuda_production_default")
+        backend = str(value("backend") or ("cpu" if profile == "compat_default_off" else "cuda")).lower()
+        contract = {
+            "profile": profile,
+            "backend": backend,
+            "use_double_precision": bool(value("use_double_precision", False)),
+            "num_threads": value("num_threads"),
+            "device_memory_GB": value("device_memory_GB", 8.0 if backend in {"cuda", "auto"} else 1.0),
+        }
+        return json.dumps(contract, sort_keys=True, separators=(",", ":"), default=str)
 
     def request_stop(self, simulation_id: str) -> None:
         with self._lock:
@@ -229,6 +249,7 @@ class RuntimeRunExecutor:
                 overrides=context.get("overrides") or {},
                 case_config_file=context.get("case_config_file"),
                 case_base_dir=context.get("case_base_dir"),
+                case_source_dir=context.get("case_source_dir"),
                 case_input_files=context.get("case_input_files") or {},
                 runtime_profile_name=context.get("runtime_profile"),
                 session_id=simulation_id,

@@ -12,7 +12,7 @@ export function QueueDockPanel() {
   const retryQueueItem = useTaichiFlowStore((state) => state.retryQueueItem);
   const setEditorSelection = useTaichiFlowStore((state) => state.setEditorSelection);
 
-  const running = queue.filter((item) => item.status === "running");
+  const running = queue.filter((item) => ["starting", "running", "stopping"].includes(item.status));
   const waiting = queue.filter((item) => item.status === "waiting" || item.status === "queued").sort((a, b) => a.position - b.position);
   const completed = queue.filter((item) =>
     ["completed", "failed", "interrupted", "canceled", "cancelled", "stopped"].includes(item.status),
@@ -86,10 +86,10 @@ function QueueRow({
             <IconButton size="small" icon={<X size={14} />} label="取消" className="tf-text-error" onClick={onCancel} />
           </>
         )}
-        {item.status === "running" && (
+        {(item.status === "starting" || item.status === "running") && (
           <IconButton size="small" icon={<Square size={14} />} label="停止" className="tf-text-error" onClick={onStop} />
         )}
-        {(item.status === "failed" || item.status === "interrupted" || item.status === "canceled" || item.status === "cancelled") && (
+        {(item.status === "failed" || item.status === "interrupted" || item.status === "canceled" || item.status === "cancelled" || item.status === "stopped") && (
           <IconButton size="small" icon={<RotateCcw size={14} />} label="重新排队" className="tf-text-brand" onClick={onRetry} />
         )}
       </div>

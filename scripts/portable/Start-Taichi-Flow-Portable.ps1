@@ -104,6 +104,10 @@ function Invoke-PortableFocus {
     param([Parameter(Mandatory = $true)]$Existing)
     $electronRecord = @($Existing.processes | Where-Object { $_.name -eq "electron" }) | Select-Object -Last 1
     if ($null -eq $electronRecord -or -not (Test-PortableOwnedRecord $electronRecord)) { return $false }
+    if (-not (Test-PortableApi -Port ([int]$Existing.api_port))) {
+        Write-PortableLog "Existing Electron belongs to this bundle but its API health contract failed; starting recovery."
+        return $false
+    }
     $apiUrl = [string]$Existing.api_url
     $environment = @{
         TAICHI_FLOW_DESKTOP_MODE = "preview"
@@ -217,6 +221,13 @@ try {
     $script:PortableState.api_instance_id = $apiInstanceId
     $script:PublishActive = $true
     Save-PortableState
+    # Startup serialization protects publication only.  Holding it until the
+    # window exits turns every second launcher into a false startup timeout.
+    if ($null -ne $startupMutex) {
+        try { $startupMutex.ReleaseMutex() } catch { }
+        try { $startupMutex.Dispose() } catch { }
+        $startupMutex = $null
+    }
 
     $electronStdout = Join-Path $sessionRoot "electron.stdout.log"
     $electronStderr = Join-Path $sessionRoot "electron.stderr.log"

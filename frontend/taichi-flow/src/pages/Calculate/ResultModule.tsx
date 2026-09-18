@@ -30,8 +30,6 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
   const updateEditorLayout = useTaichiFlowStore((state) => state.updateEditorLayout);
   const catalog = useTaichiFlowStore((state) => state.parameterCatalog);
   const fetchParameterCatalog = useTaichiFlowStore((state) => state.fetchParameterCatalog);
-  const fetchScenarioConfiguration = useTaichiFlowStore((state) => state.fetchScenarioConfiguration);
-  const configuration = useTaichiFlowStore((state) => state.scenarioConfigurations[scenario.scenario_id]);
   const [selectedFamily, setSelectedFamily] = useState<string | null>(null);
   const simulationId = scenario.latest_simulation_id;
 
@@ -46,12 +44,11 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
     if (!catalog) void fetchParameterCatalog();
   }, [catalog, fetchParameterCatalog]);
 
-  useEffect(() => {
-    if (!readOnly) void fetchScenarioConfiguration(scenario.scenario_id);
-  }, [fetchScenarioConfiguration, readOnly, scenario.scenario_id, scenario.version]);
-
   const families = simulationId ? resultFamilies[simulationId] || [] : [];
   const diagnostics = simulationId ? resultMetadata[simulationId]?.numerical_diagnostics : null;
+  const runResolution = simulationId
+    ? (resultMetadata[simulationId]?.simulation as { compute_policy_resolution?: unknown } | undefined)?.compute_policy_resolution
+    : undefined;
 
   if (readOnly) {
     return (
@@ -132,7 +129,7 @@ export function ResultModule({ scenario, readOnly = false }: { scenario: Scenari
       ) : null}
       {diagnostics ? <NumericalDiagnosticsCard diagnostics={diagnostics} /> : null}
       <NumericVariantSummary
-        resolution={configuration?.compute_policy_resolution}
+        resolution={runResolution as Parameters<typeof NumericVariantSummary>[0]["resolution"]}
         catalogEntries={catalog?.parameters}
       />
 

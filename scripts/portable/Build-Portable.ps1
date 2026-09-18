@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [string]$PythonEmbedZip = "",
     [string]$PythonSitePackages = "",
+    [string]$DemoProjectPath = "",
     [switch]$Force
 )
 
@@ -35,6 +36,21 @@ $portableScriptRoot = Join-Path $SourceRoot "scripts\portable"
 $pythonVersion = "3.11.9"
 $electronVersion = "43.2.0"
 $portableRuntimeLock = Join-Path $portableScriptRoot "portable-runtime.lock.txt"
+$projectRelative = "data\projects\chamoli-reference-e2e-20260828-v4"
+if ([string]::IsNullOrWhiteSpace($DemoProjectPath)) {
+    $DemoProjectPath = Join-Path $SourceRoot "artifacts\e2e\chamoli-reference-e2e-20260828-v4"
+}
+$projectSource = [System.IO.Path]::GetFullPath($DemoProjectPath)
+$projectDatabase = Join-Path $projectSource ".taichi-flow\state.sqlite3"
+if (-not (Test-Path -LiteralPath $projectSource -PathType Container)) {
+    throw "Compact demonstration project is missing: $projectSource. Supply -DemoProjectPath with a prepared project directory."
+}
+if (-not (Test-Path -LiteralPath $projectDatabase -PathType Leaf)) {
+    throw "Demonstration project is not a portable Taichi-Flow project (state database missing): $projectDatabase"
+}
+if ($OutputRoot.StartsWith($projectSource, [System.StringComparison]::OrdinalIgnoreCase) -or $projectSource.StartsWith($OutputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputRoot and DemoProjectPath must not contain one another."
+}
 
 foreach ($required in @(
     (Join-Path $SourceRoot "api\app.py"),
@@ -190,9 +206,6 @@ $probeOutput = @(& $portablePython -c $probeCode 2>&1)
 if ($LASTEXITCODE -ne 0) { throw "Portable Python import probe failed: $($probeOutput -join [Environment]::NewLine)" }
 Write-Host "[portable] Python probe passed: $($probeOutput -join ' ')"
 
-$projectSource = Join-Path $SourceRoot "artifacts\e2e\chamoli-reference-e2e-20260828-v4"
-if (-not (Test-Path -LiteralPath $projectSource -PathType Container)) { throw "Compact demonstration project is missing: $projectSource" }
-$projectRelative = "data\projects\chamoli-reference-e2e-20260828-v4"
 $projectDestination = Join-Path $OutputRoot $projectRelative
 New-Item -ItemType Directory -Path (Split-Path -Parent $projectDestination) -Force | Out-Null
 Write-Host "[portable] copying compact demonstration project"

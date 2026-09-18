@@ -299,6 +299,7 @@ def prepare_runtime_from_payload(
     config: Optional[Dict[str, Any]] = None,
     case_config_file: Optional[str] = None,
     case_base_dir: Optional[str] = None,
+    case_source_dir: Optional[str] = None,
     case_input_files: Optional[Dict[str, str]] = None,
     runtime_profile_name: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -362,6 +363,7 @@ def prepare_runtime_from_payload(
         "overrides": raw_overrides,
         "case_config_file": case_config_file,
         "case_base_dir": case_base_dir,
+        "case_source_dir": case_source_dir,
         "case_input_files": case_input_files,
         "runtime_profile": profile.name,
         "session_id": session_id,
@@ -403,6 +405,7 @@ def prepare_runtime_from_payload(
             case_config_file,
             case_base_dir,
             native_file_overrides=reference_file_overrides,
+            reference_source_dir=case_source_dir,
         )
         flow_config, effective_config, runtime_input_manifest, provenance = build_reference_runtime_metadata(
             parsed_reference,

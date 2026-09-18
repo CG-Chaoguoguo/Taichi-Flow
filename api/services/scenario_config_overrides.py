@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from api.services.reference_config_parser import (
@@ -254,10 +255,24 @@ def _coerce_zone_id(key: Any, row: Any) -> Optional[int]:
         source = row.get("zone_id")
     else:
         source = key
-    try:
-        return int(source)
-    except (TypeError, ValueError):
+    if isinstance(source, bool):
         return None
+    if isinstance(source, int):
+        return source
+    if isinstance(source, float):
+        return int(source) if math.isfinite(source) and source.is_integer() else None
+    if isinstance(source, str):
+        text = source.strip()
+        if not text:
+            return None
+        unsigned = text[1:] if text[0] in "+-" else text
+        if not unsigned.isdigit():
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    return None
 
 
 def _apply_zone_layer_value(layer: Any, attr: str, value: Any) -> None:
@@ -285,12 +300,14 @@ def _apply_spatial_zone_overrides(parsed: ReferenceConfigParseResult, overrides:
             continue
         zone = parsed.zones[zone_id]
         for field_name, value in row.items():
-            if field_name in ZONE_PATCH_PASSTHROUGH_KEYS or value is None:
+            if field_name in ZONE_PATCH_PASSTHROUGH_KEYS:
                 continue
             mapped = ZONE_LAYER_FIELD_MAP.get(str(field_name))
             if mapped is None:
                 continue
             layer_name, attr = mapped
+            if value is None and attr != "cvero":
+                continue
             layer = zone.top if layer_name == "top" else zone.bottom
             try:
                 _apply_zone_layer_value(layer, attr, value)

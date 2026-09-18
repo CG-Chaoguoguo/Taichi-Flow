@@ -2092,12 +2092,17 @@ def parse_reference_config_file(
     reference_base_dir: Optional[str] = None,
     *,
     native_file_overrides: Optional[Mapping[str, str]] = None,
+    reference_source_dir: Optional[str] = None,
 ) -> ReferenceConfigParseResult:
     reference_path = Path(reference_config_file)
     if not reference_path.exists():
         raise FileNotFoundError(f"Reference config file not found: {reference_config_file}")
 
     base_dir = Path(reference_base_dir) if reference_base_dir else reference_path.parent
+    # Input paths remain relative to the original case directory.  Imported
+    # cases keep their source-derived variant evidence in a separate frozen
+    # directory, so parsing must not fall back to a mutable source checkout.
+    source_dir = Path(reference_source_dir) if reference_source_dir else base_dir
     with reference_path.open("r", encoding="utf-8", errors="ignore") as handle:
         lines = [line.strip() for line in handle if line.strip()]
 
@@ -2178,41 +2183,41 @@ def parse_reference_config_file(
         rifil_ref.resolved_paths = rifil_ref.resolved_paths[: len(cri_mps)]
         rifil_ref.exists = rifil_ref.exists[: len(cri_mps)]
     recognized_file_families.extend(_discover_case_sidecar_inputs(base_dir, file_inputs))
-    dfs_infiltration_variant, dfs_infiltration_variant_source, dfs_infiltration_variant_basis = _detect_dfs_infiltration_variant(base_dir)
-    dfs_face_flux_variant, dfs_face_flux_variant_source, dfs_face_flux_variant_basis = _detect_dfs_face_flux_variant(base_dir)
+    dfs_infiltration_variant, dfs_infiltration_variant_source, dfs_infiltration_variant_basis = _detect_dfs_infiltration_variant(source_dir)
+    dfs_face_flux_variant, dfs_face_flux_variant_source, dfs_face_flux_variant_basis = _detect_dfs_face_flux_variant(source_dir)
     (
         dfs_failure_source_variant,
         dfs_failure_source_variant_source,
         dfs_failure_source_variant_basis,
         dfs_failure_source_evidence,
         dfs_failure_source_topology_status,
-    ) = _detect_dfs_failure_source_variant(base_dir)
-    dfs_manningbar_variant, dfs_manningbar_variant_source, dfs_manningbar_variant_basis = _detect_dfs_manningbar_variant(base_dir)
+    ) = _detect_dfs_failure_source_variant(source_dir)
+    dfs_manningbar_variant, dfs_manningbar_variant_source, dfs_manningbar_variant_basis = _detect_dfs_manningbar_variant(source_dir)
     dfs_dry_face_velocity_variant, dfs_dry_face_velocity_variant_source, dfs_dry_face_velocity_variant_basis = (
-        _detect_dfs_dry_face_velocity_variant(base_dir)
+        _detect_dfs_dry_face_velocity_variant(source_dir)
     )
-    dfs_artivis_variant, dfs_artivis_variant_source, dfs_artivis_variant_basis = _detect_dfs_artivis_variant(base_dir)
-    dfs_absubar_variant, dfs_absubar_variant_source, dfs_absubar_variant_basis = _detect_dfs_absubar_variant(base_dir)
+    dfs_artivis_variant, dfs_artivis_variant_source, dfs_artivis_variant_basis = _detect_dfs_artivis_variant(source_dir)
+    dfs_absubar_variant, dfs_absubar_variant_source, dfs_absubar_variant_basis = _detect_dfs_absubar_variant(source_dir)
     (
         dfs_flow_velocity_writer_variant,
         dfs_flow_velocity_writer_variant_source,
         dfs_flow_velocity_writer_variant_basis,
-    ) = _detect_dfs_flow_velocity_writer_variant(base_dir)
+    ) = _detect_dfs_flow_velocity_writer_variant(source_dir)
     (
         dfs_erosion_depth_writer_variant,
         dfs_erosion_depth_writer_variant_source,
         dfs_erosion_depth_writer_variant_basis,
-    ) = _detect_dfs_erosion_depth_writer_variant(base_dir)
+    ) = _detect_dfs_erosion_depth_writer_variant(source_dir)
     (
         dfs_sfdf_classify_cv_variant,
         dfs_sfdf_classify_cv_variant_source,
         dfs_sfdf_classify_cv_variant_basis,
-    ) = _detect_dfs_sfdf_classify_cv_variant(base_dir)
-    dfs_cvlimit_variant, dfs_cvlimit_variant_source, dfs_cvlimit_variant_basis = _detect_dfs_cvlimit_variant(base_dir)
-    dfs_erodph_dt_variant, dfs_erodph_dt_variant_source, dfs_erodph_dt_variant_basis = _detect_dfs_erodph_dt_variant(base_dir)
-    dfs_barrier_flux_variant, dfs_barrier_flux_variant_source, dfs_barrier_flux_variant_basis = _detect_dfs_barrier_flux_variant(base_dir)
-    dfs_commit_cv_eps_variant, dfs_commit_cv_eps_variant_source, dfs_commit_cv_eps_variant_basis = _detect_dfs_commit_cv_eps_variant(base_dir)
-    manningb, manningm, manning_coefficient_source, manning_coefficient_basis = _detect_dfs_manning_coefficients(base_dir)
+    ) = _detect_dfs_sfdf_classify_cv_variant(source_dir)
+    dfs_cvlimit_variant, dfs_cvlimit_variant_source, dfs_cvlimit_variant_basis = _detect_dfs_cvlimit_variant(source_dir)
+    dfs_erodph_dt_variant, dfs_erodph_dt_variant_source, dfs_erodph_dt_variant_basis = _detect_dfs_erodph_dt_variant(source_dir)
+    dfs_barrier_flux_variant, dfs_barrier_flux_variant_source, dfs_barrier_flux_variant_basis = _detect_dfs_barrier_flux_variant(source_dir)
+    dfs_commit_cv_eps_variant, dfs_commit_cv_eps_variant_source, dfs_commit_cv_eps_variant_basis = _detect_dfs_commit_cv_eps_variant(source_dir)
+    manningb, manningm, manning_coefficient_source, manning_coefficient_basis = _detect_dfs_manning_coefficients(source_dir)
     if debrisflowmanning is not None:
         dfs_manningbar_variant = "debrisflowmanning_cvtol"
         dfs_manningbar_variant_source = str(reference_path.resolve())
@@ -2226,7 +2231,7 @@ def parse_reference_config_file(
         inflow_denominator_variant_basis,
         inflow_denominator_direction,
         inflow_denominator_fv_value,
-    ) = _detect_inflow_denominator_variant(base_dir)
+    ) = _detect_inflow_denominator_variant(source_dir)
     rainfall_mode, rainfall_period_sources, period_source_map = _build_rainfall_period_sources(
         cri_mps,
         capt_s,

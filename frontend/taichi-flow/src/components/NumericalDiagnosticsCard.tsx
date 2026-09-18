@@ -31,6 +31,7 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
   const cudaOk = String(backend.live_arch || "").toLowerCase().includes("cuda")
     && backend.fallback_active !== true;
   const closure = statusLabel(classification.conservation_closure ?? ledger.passed);
+  const ledgerUnavailable = ledger.available === false;
   const nonfinite = Object.values(diagnostics.nonfinite_counts || {}).reduce(
     (sum, count) => sum + (typeof count === "number" && count > 0 ? count : 0),
     0,
@@ -78,10 +79,12 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
         <div className="tf-diagnostic-item">
           <div className="tf-diagnostic-label"><ShieldCheck size={14} />全局体积账本</div>
           <div className={`tf-diagnostic-value${closure.ok ? " is-ok" : " is-warning"}`}>
-            {closure.text} · {scientific(ledger.relative_error)}
+            {ledgerUnavailable ? "未取得诊断" : `${closure.text} · ${scientific(ledger.relative_error)}`}
           </div>
           <div className="tf-caption tf-text-tertiary">
-            源项 {number(ledger.source_total_m3)} m³ · 存储/汇 {number(ledger.sink_and_storage_total_m3)} m³
+            {ledgerUnavailable
+              ? String(ledger.capture_error || "体积账本捕获失败，不能作为守恒通过证据。")
+              : `源项 ${number(ledger.source_total_m3)} m³ · 存储/汇 ${number(ledger.sink_and_storage_total_m3)} m³`}
           </div>
         </div>
       </div>
