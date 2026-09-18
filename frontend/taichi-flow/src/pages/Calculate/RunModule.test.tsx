@@ -165,6 +165,27 @@ describe("RunModule runtime profile", () => {
     });
   });
 
+  it("blocks an enabled erosion probe until it has at least one cell", () => {
+    render(
+      <MemoryRouter>
+        <RunModule scenario={scenario} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId("run-erosion-probe-enabled"));
+    expect(screen.getByRole("alert")).toHaveTextContent("至少需要一个探针格点");
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId("run-erosion-probe-cells"), {
+      target: { value: "415,630" },
+    });
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("run-erosion-probe-enabled"));
+    fireEvent.change(screen.getByTestId("run-erosion-probe-cells"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeEnabled();
+  });
+
   it("keeps an invalid raw probe draft scoped to its scenario instead of restoring stale valid cells", () => {
     function ScenarioSwitchHarness() {
       const [selected, setSelected] = useState<Scenario>(scenario);

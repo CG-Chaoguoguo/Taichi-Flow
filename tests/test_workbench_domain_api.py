@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
 from api.services.runtime_session import prepare_runtime_from_payload
+from api.services.workbench_store import WorkbenchError
 from tests.test_native_input_chain import _make_reference_case
 
 
@@ -47,6 +50,15 @@ def _create_ready_scenario(client: TestClient, project: dict, name: str) -> dict
     )
     assert scenario.status_code == 201
     return scenario.json()
+
+
+def _make_importable_reference_case(root: Path) -> Path:
+    edda_in = _make_reference_case(root)
+    text = edda_in.read_text(encoding="utf-8")
+    marker = "Simulate shallow landslide? Enter T (.true.) or F (.false.)\nT\nSimulate debris flow?"
+    assert marker in text
+    edda_in.write_text(text.replace(marker, marker.replace("\nT\n", "\nF\n")), encoding="utf-8")
+    return edda_in
 
 
 def test_project_catalog_survives_application_restart(tmp_path: Path) -> None:
@@ -214,11 +226,16 @@ def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> Non
         assert retried.status_code == 201
         assert retried.json()["retry_of"] == first.json()["queue_item_id"]
         assert retried.json()["status"] == "queued"
+        assert retried.json()["position"] == 2
+
+        current_queue = client.get(queue_url).json()["items"]
+        assert [item["position"] for item in current_queue if item["status"] == "queued"] == [1, 2]
 
     with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
         persisted = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
         assert {item["status"] for item in persisted} == {"queued", "cancelled"}
         assert any(item["retry_of"] == first.json()["queue_item_id"] for item in persisted)
+        assert [item["position"] for item in persisted if item["status"] == "queued"] == [1, 2]
 
 
 def test_queue_freezes_policy_and_retry_reuses_original_snapshot(tmp_path: Path) -> None:
@@ -255,6 +272,16 @@ def test_queue_rejects_invalid_erosion_probe_payload_and_freezes_valid_options(t
         project = _create_project(client, tmp_path / "probe-project")
         scenario = _create_ready_scenario(client, project, "Probe validation")
         queue_url = f"/api/projects/{project['project_id']}/queue"
+
+        empty_enabled = client.post(
+            queue_url,
+            json={
+                "scenario_id": scenario["scenario_id"],
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": []}},
+            },
+        )
+        assert empty_enabled.status_code == 422
+        assert empty_enabled.json()["code"] == "erosion_probe_invalid"
 
         malformed = client.post(
             queue_url,
@@ -441,6 +468,178 @@ def test_claim_copies_queue_policy_into_simulation_and_runtime_payload(tmp_path:
             store.simulation_row(project["project_id"], context["simulation_id"]),
         )
         assert simulation["compute_policy_resolution"] == expected
+
+
+def test_case_import_replaces_an_existing_empty_destination(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_importable_reference_case(tmp_path / "source")
+        destination = tmp_path / "existing-empty-destination"
+        destination.mkdir()
+        preview = store.preview_case_import(str(edda_in.parent))
+
+        imported = store.commit_case_import(
+            str(edda_in.parent),
+            str(destination),
+            expected_fingerprint=str(preview["case_fingerprint"]),
+        )
+
+        assert Path(imported["project"]["root_path"]) == destination
+        assert (destination / ".taichi-flow" / "state.sqlite3").is_file()
+
+
+def test_case_import_aborts_when_a_fingerprinted_source_changes_during_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_importable_reference_case(tmp_path / "source")
+        destination = tmp_path / "fingerprint-destination"
+        preview = store.preview_case_import(str(edda_in.parent))
+        original_ingest = store.ingest_upload_from_path
+        changed = False
+
+        def mutate_before_ingest(project_id: str, *, family: str, path: str) -> dict:
+            nonlocal changed
+            if family == "dem" and not changed:
+                changed = True
+                source = Path(path)
+                source.write_bytes(source.read_bytes() + b"\n")
+            return original_ingest(project_id, family=family, path=path)
+
+        monkeypatch.setattr(store, "ingest_upload_from_path", mutate_before_ingest)
+
+        with pytest.raises(WorkbenchError) as error:
+            store.commit_case_import(
+                str(edda_in.parent),
+                str(destination),
+                expected_fingerprint=str(preview["case_fingerprint"]),
+            )
+
+        assert error.value.code == "case_fingerprint_mismatch"
+        assert changed
+        assert not destination.exists()
+        assert all(Path(project["root_path"]) != destination for project in store.list_projects())
+
+
+def test_case_import_refuses_a_destination_that_changes_before_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_importable_reference_case(tmp_path / "source")
+        destination = tmp_path / "changing-destination"
+        preview = store.preview_case_import(str(edda_in.parent))
+        original_create_scenario = store.create_scenario
+
+        def create_scenario_then_change_destination(*args: object, **kwargs: object) -> dict:
+            result = original_create_scenario(*args, **kwargs)
+            destination.mkdir()
+            (destination / "arrived-during-import.txt").write_text("preserve me", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(store, "create_scenario", create_scenario_then_change_destination)
+
+        with pytest.raises(WorkbenchError) as error:
+            store.commit_case_import(
+                str(edda_in.parent),
+                str(destination),
+                expected_fingerprint=str(preview["case_fingerprint"]),
+            )
+
+        assert error.value.code == "case_destination_not_empty"
+        assert (destination / "arrived-during-import.txt").read_text(encoding="utf-8") == "preserve me"
+
+
+def test_case_import_restores_removed_empty_destination_when_publish_move_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        edda_in = _make_importable_reference_case(tmp_path / "source")
+        destination = tmp_path / "restore-empty-destination"
+        destination.mkdir()
+        preview = store.preview_case_import(str(edda_in.parent))
+        original_replace = Path.replace
+
+        def fail_only_final_publish(self: Path, target: str | Path) -> Path:
+            if self.name.startswith(f".{destination.name}.import-") and Path(target) == destination:
+                raise OSError("simulated publish move failure")
+            return original_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", fail_only_final_publish)
+
+        with pytest.raises(OSError, match="simulated publish move failure"):
+            store.commit_case_import(
+                str(edda_in.parent),
+                str(destination),
+                expected_fingerprint=str(preview["case_fingerprint"]),
+            )
+
+        assert destination.is_dir()
+        assert not any(destination.iterdir())
+
+
+def test_batch_delete_reclaims_only_unreferenced_project_blobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        store = client.app.state.workbench
+        project = store.create_or_open_project(name="Asset lifecycle", root_path=str(tmp_path / "project"), description="")
+        project_id = project["project_id"]
+
+        def upload(name: str, contents: bytes) -> dict:
+            return store.ingest_upload(
+                project_id,
+                family="dem",
+                filename=name,
+                stream=BytesIO(contents),
+            )
+
+        shared_live = upload("shared-live.asc", b"shared contents")
+        shared_archived = upload("shared-archived.asc", b"shared contents")
+        revision_owned = upload("revision-owned.asc", b"revision contents")
+        orphaned = upload("orphaned.asc", b"orphaned contents")
+        cleanup_failure = upload("cleanup-failure.asc", b"cleanup failure contents")
+        shared_path = store.get_upload_blob_path(project_id, shared_live["asset_id"])
+        revision_path = store.get_upload_blob_path(project_id, revision_owned["asset_id"])
+        orphaned_path = store.get_upload_blob_path(project_id, orphaned["asset_id"])
+        failure_path = store.get_upload_blob_path(project_id, cleanup_failure["asset_id"])
+        store.archive_asset(project_id, shared_archived["asset_id"])
+        store.create_input_revision(
+            project_id,
+            version_tag=None,
+            upload_ids=[revision_owned["asset_id"]],
+            parent_revision_id=None,
+        )
+
+        first = store.batch_delete_assets(
+            project_id,
+            [shared_live["asset_id"], revision_owned["asset_id"], orphaned["asset_id"]],
+        )
+
+        assert first["deleted_blob_count"] == 1
+        assert first["retained_upload_blob_count"] == 1
+        assert first["retained_snapshot_blob_count"] == 1
+        assert first["orphaned_blob_cleanup_failures"] == []
+        assert shared_path.is_file()
+        assert revision_path.is_file()
+        assert not orphaned_path.exists()
+
+        original_unlink = Path.unlink
+
+        def fail_only_orphan_cleanup(self: Path, *args: object, **kwargs: object) -> None:
+            if self == failure_path:
+                raise OSError("simulated blob cleanup failure")
+            original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_only_orphan_cleanup)
+        failed_cleanup = store.batch_delete_assets(project_id, [cleanup_failure["asset_id"]])
+
+        assert failed_cleanup["deleted_ids"] == [cleanup_failure["asset_id"]]
+        assert failed_cleanup["orphaned_blob_cleanup_failures"] == [
+            {
+                "sha256": cleanup_failure["sha256"],
+                "path": str(failure_path.resolve()),
+                "error": "simulated blob cleanup failure",
+            }
+        ]
+        assert failure_path.is_file()
 
 
 def test_reference_case_claim_preserves_edda_config_mapping(tmp_path: Path) -> None:

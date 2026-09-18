@@ -58,6 +58,21 @@ def _geometry(header: Mapping[str, float], path: Path) -> tuple[int, int, float,
     return int(nrows), int(ncols), *origin, size
 
 
+def _same_geometry(reference: tuple[int, int, float, float, float], candidate: tuple[int, int, float, float, float]) -> bool:
+    """Compare normalized grid geometry without turning binary round-off into a remap."""
+    if reference[:2] != candidate[:2]:
+        return False
+    # Grid spacing sets a strict, scale-aware absolute bound.  Eight ULPs
+    # covers center-to-corner normalization such as 0.15 - 0.1 / 2 while
+    # keeping any meaningful spatial displacement fail-closed.
+    scale = min(reference[4], candidate[4])
+    for expected, actual in zip(reference[2:], candidate[2:]):
+        tolerance = max(scale * 1.0e-12, 8.0 * math.ulp(expected), 8.0 * math.ulp(actual))
+        if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=tolerance):
+            return False
+    return True
+
+
 def read_ascii_active_values(path: Path, *, integer: bool = False) -> tuple[list[float], list[tuple[int, int]], dict[str, Any]]:
     """Read finite rectangular ESRI ASCII; return Fortran's one-based row order."""
     path = Path(path)
@@ -109,7 +124,7 @@ def load_aligned_active_inputs(case_dir: Path, paths: Mapping[str, str]):
         if reference_mapping is None:
             reference_geometry, reference_mapping = geometry, mapping
         else:
-            if geometry != reference_geometry:
+            if not _same_geometry(reference_geometry, geometry):
                 raise ValueError(f"Grid geometry mismatch: slope vs {family}: {path}")
             if mapping != reference_mapping:
                 raise ValueError(f"Active-cell mapping mismatch: slope vs {family}: {path}")

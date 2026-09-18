@@ -217,6 +217,9 @@ export type AssetBatchDeleteResult = {
   detached_binding_count: number;
   cancelled_queue_item_ids: string[];
   retained_snapshot_blob_count: number;
+  retained_upload_blob_count: number;
+  deleted_blob_count: number;
+  orphaned_blob_cleanup_failures: Array<{ sha256: string; path: string; error: string }>;
 };
 
 export type ScenarioStatus = "draft" | "ready" | "queued" | "running" | "completed" | "failed" | "stopped" | "interrupted" | "archived";

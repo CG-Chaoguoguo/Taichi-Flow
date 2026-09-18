@@ -1089,38 +1089,43 @@ class WorkbenchStore:
             details={"source_root": str(source_root)},
         )
 
-    @staticmethod
-    def _sha256_file(path: Path) -> str:
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except OSError as exc:
-            raise WorkbenchError(
-                "case_file_unreadable",
-                f"无法读取兼容算例文件：{path.name}",
-                status_code=422,
-                details={"path": str(path), "error": str(exc)},
-            ) from exc
-        return digest.hexdigest()
-
     @classmethod
     def _case_fingerprint(cls, config_path: Path, plan: Mapping[str, Any]) -> str:
         """Hash config plus active existing inputs without hashing source paths."""
+        fingerprint, _ = cls._case_fingerprint_with_inventory(config_path, plan)
+        return fingerprint
+
+    @classmethod
+    def _case_fingerprint_with_inventory(
+        cls,
+        config_path: Path,
+        plan: Mapping[str, Any],
+    ) -> tuple[str, list[Dict[str, str]]]:
+        """Read each fingerprinted source once and retain its content digest."""
         digest = hashlib.sha256()
         digest.update(b"taichi-flow-reference-case-v1\0")
-        digest.update(b"edda_in\0")
-        try:
-            with config_path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except OSError as exc:
-            raise WorkbenchError(
-                "case_file_unreadable",
-                f"无法读取 edda_in.txt：{exc}",
-                status_code=422,
-            ) from exc
+        inventory: list[Dict[str, str]] = []
+
+        def hash_source(path: Path, label: str, *, message: str) -> str:
+            source_digest = hashlib.sha256()
+            digest.update(label.encode("utf-8"))
+            try:
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        source_digest.update(chunk)
+            except OSError as exc:
+                raise WorkbenchError(
+                    "case_file_unreadable",
+                    message,
+                    status_code=422,
+                    details={"path": str(path), "error": str(exc)},
+                ) from exc
+            source_hash = source_digest.hexdigest()
+            inventory.append({"path": str(path.resolve()), "sha256": source_hash, "label": label.rstrip("\0")})
+            return source_hash
+
+        hash_source(config_path, "edda_in\0", message=f"无法读取 edda_in.txt：{config_path.name}")
         references = sorted(
             (
                 item
@@ -1130,21 +1135,10 @@ class WorkbenchStore:
             key=lambda item: (str(item.get("native_family")), int(item.get("ordinal") or 0)),
         )
         for item in references:
-            label = f"{item.get('native_family')}:{int(item.get('ordinal') or 0)}\0".encode("utf-8")
-            digest.update(label)
+            label = f"{item.get('native_family')}:{int(item.get('ordinal') or 0)}\0"
             path = Path(str(item["path"]))
-            try:
-                with path.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(chunk)
-            except OSError as exc:
-                raise WorkbenchError(
-                    "case_file_unreadable",
-                    f"无法读取活动输入：{path.name}",
-                    status_code=422,
-                    details={"path": str(path), "error": str(exc)},
-                ) from exc
-        return digest.hexdigest()
+            hash_source(path, label, message=f"无法读取活动输入：{path.name}")
+        return digest.hexdigest(), inventory
 
     @staticmethod
     def _case_dimensions(config_path: Path) -> Dict[str, Any]:
@@ -1193,9 +1187,10 @@ class WorkbenchStore:
             parsed = parse_reference_config_file(str(config_path), str(source))
         except Exception as exc:
             raise WorkbenchError("case_config_parse_failed", f"解析参考案例 edda_in 失败：{exc}", status_code=422) from exc
-        config_hash = self._sha256_file(config_path)
+        fingerprint_plan = build_legacy_migration_plan(parsed, source_hash="")
+        fingerprint, source_inventory = self._case_fingerprint_with_inventory(config_path, fingerprint_plan)
+        config_hash = source_inventory[0]["sha256"]
         plan = build_legacy_migration_plan(parsed, source_hash=config_hash)
-        fingerprint = self._case_fingerprint(config_path, plan)
         values = normalized_parameter_values(parsed)
         snapshot_values = dict(parsed.switch_snapshot.values)
         run_controls = {
@@ -1241,6 +1236,7 @@ class WorkbenchStore:
             "case_name": source.name,
             "config_sha256": config_hash,
             "case_fingerprint": fingerprint,
+            "source_inventory": source_inventory,
             "case_summary": {
                 "dimensions": self._case_dimensions(config_path),
                 "nzon": int(parsed.nzon),
@@ -1370,20 +1366,65 @@ class WorkbenchStore:
         destination = Path(destination_root).expanduser().resolve()
         if destination == source or source in destination.parents:
             raise WorkbenchError("case_destination_invalid", "目标目录必须独立于原始算例目录。", status_code=422)
-        existing = self._existing_reference_import(destination, fingerprint) if destination.exists() else None
-        if existing:
-            return existing
-        if destination.exists():
+
+        def destination_is_empty() -> bool:
+            if not destination.is_dir() or destination.is_symlink():
+                raise WorkbenchError("case_destination_invalid", "目标目录必须是普通目录。", status_code=422)
             try:
                 next(destination.iterdir())
             except StopIteration:
-                pass
-            else:
+                return True
+            except OSError as exc:
+                raise WorkbenchError(
+                    "case_destination_invalid",
+                    "目标目录不可访问。",
+                    status_code=422,
+                    details={"path": str(destination), "error": str(exc)},
+                ) from exc
+            return False
+
+        if destination.exists():
+            existing = self._existing_reference_import(destination, fingerprint) if destination.is_dir() else None
+            if existing:
+                return existing
+            if not destination_is_empty():
                 raise WorkbenchError("case_destination_not_empty", "目标目录必须为空，避免覆盖现有项目。", status_code=409)
+
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = destination.parent / f".{destination.name}.import-{uuid4().hex}"
         project_id: Optional[str] = None
         moved = False
+        removed_empty_destination = False
+        source_hashes = {
+            os.path.normcase(os.path.normpath(str(Path(item["path"]).resolve()))): str(item["sha256"])
+            for item in preview.get("source_inventory", [])
+        }
+
+        def ingest_verified_source(*, family: str, path: str) -> Dict[str, Any]:
+            source_path = Path(path).resolve()
+            source_key = os.path.normcase(os.path.normpath(str(source_path)))
+            expected_hash = source_hashes.get(source_key)
+            if not expected_hash:
+                raise WorkbenchError(
+                    "case_fingerprint_mismatch",
+                    "导入计划包含未预览的源文件，请重新预览。",
+                    status_code=409,
+                    details={"path": str(source_path)},
+                )
+            asset = self.ingest_upload_from_path(project_id or "", family=family, path=str(source_path))
+            if asset["sha256"] != expected_hash:
+                raise WorkbenchError(
+                    "case_fingerprint_mismatch",
+                    "源算例在复制期间发生变化，请重新预览。",
+                    status_code=409,
+                    details={
+                        "path": str(source_path),
+                        "expected_sha256": expected_hash,
+                        "actual_sha256": asset["sha256"],
+                    },
+                )
+            return asset
+
         try:
             staged_project = self.create_or_open_project(
                 name=(name or "").strip() or str(preview["case_name"]),
@@ -1391,13 +1432,17 @@ class WorkbenchStore:
                 description=description,
             )
             project_id = str(staged_project["project_id"])
-            parsed = parse_reference_config_file(str(preview["case_config_file"]), str(source))
-            plan = build_legacy_migration_plan(parsed, source_hash=str(preview["config_sha256"]))
             assets: list[Dict[str, Any]] = []
             bindings: list[Dict[str, Any]] = []
 
-            config_asset = self.ingest_upload_from_path(project_id, family="config", path=str(preview["case_config_file"]))
+            config_asset = ingest_verified_source(family="config", path=str(preview["case_config_file"]))
             assets.append(config_asset)
+            copied_config_path = self.get_upload_blob_path(project_id, config_asset["asset_id"])
+            try:
+                parsed = parse_reference_config_file(str(copied_config_path), str(source))
+            except Exception as exc:
+                raise WorkbenchError("case_config_parse_failed", f"复制后的 edda_in 无法解析：{exc}", status_code=422) from exc
+            plan = build_legacy_migration_plan(parsed, source_hash=str(config_asset["sha256"]))
             bindings.append({
                 "binding_key": "legacy.config",
                 "asset_id": config_asset["asset_id"],
@@ -1408,7 +1453,7 @@ class WorkbenchStore:
                 "metadata": {"case_fingerprint": fingerprint, "source_kind": "reference_case"},
             })
             for item in plan["proposed_bindings"]:
-                asset = self.ingest_upload_from_path(project_id, family=str(item["family"]), path=str(item["path"]))
+                asset = ingest_verified_source(family=str(item["family"]), path=str(item["path"]))
                 assets.append(asset)
                 bindings.append({
                     "binding_key": item["binding_key"],
@@ -1439,7 +1484,7 @@ class WorkbenchStore:
                 values = normalized_parameter_values(parsed)
                 template_id = f"pt-reference-{fingerprint[:24]}"
                 provenance = {
-                    key: {"source": "Chamoli/edda_in.txt", "source_hash": str(preview["config_sha256"])}
+                    key: {"source": "Chamoli/edda_in.txt", "source_hash": config_asset["sha256"]}
                     for key in values
                 }
                 provenance["_compute_policy"] = {
@@ -1465,7 +1510,7 @@ class WorkbenchStore:
                         template_id,
                         f"Chamoli reference {fingerprint[:8]}",
                         "由原始 Chamoli edda_in 导入；控制快照归方案所有，未注入 BJ 全局默认。",
-                        str(preview["config_sha256"]),
+                        config_asset["sha256"],
                         json.dumps(values, ensure_ascii=False),
                         json.dumps(provenance, ensure_ascii=False),
                         now,
@@ -1481,6 +1526,15 @@ class WorkbenchStore:
                 control_overrides={},
             )
             old_root = str(staging)
+            if destination.exists():
+                if not destination_is_empty():
+                    raise WorkbenchError(
+                        "case_destination_not_empty",
+                        "发布前目标目录发生变化，已取消导入以避免覆盖现有文件。",
+                        status_code=409,
+                    )
+                destination.rmdir()
+                removed_empty_destination = True
             staging.replace(destination)
             moved = True
             new_database = ProjectDatabase(destination)
@@ -1551,6 +1605,11 @@ class WorkbenchStore:
                         connection.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
+                if removed_empty_destination and not destination.exists():
+                    try:
+                        destination.mkdir()
+                    except OSError:
+                        pass
             raise
 
     def update_project(self, project_id: str, *, name: Optional[str], description: Optional[str]) -> Dict[str, Any]:
@@ -2107,19 +2166,13 @@ class WorkbenchStore:
         # asset.  Repeated rainfall periods may contain identical bytes yet must
         # remain independently bindable and deletable files.
         blob_path = database.blob_dir / sha256[:2] / sha256
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-        deduplicated = blob_path.exists()
-        if deduplicated:
-            staged_path.unlink(missing_ok=True)
-        else:
-            staged_path.replace(blob_path)
 
         summary = "内容校验完成"
         warnings: list[str] = []
         asset_roles = list(roles or [ASSET_ROLE_BY_FAMILY.get(normalized_family, normalized_family)])
         raster_metadata: Dict[str, Any] = {}
         if normalized_family in RASTER_ASSET_FAMILIES:
-            metadata_path = blob_path
+            metadata_path = staged_path
             metadata_probe: Optional[Path] = None
             source_suffix = Path(safe_name).suffix.lower()
             # Content-addressed blobs intentionally have no filename suffix.
@@ -2127,9 +2180,9 @@ class WorkbenchStore:
             # AAIGrid driver reads xllcorner/yllcorner instead of falling back
             # to an origin of (0, 0). This keeps draft and revision manifests
             # geometrically equivalent after a scenario is duplicated.
-            if source_suffix in {".asc", ".tif", ".tiff", ".img", ".dem"} and blob_path.suffix.lower() != source_suffix:
+            if source_suffix in {".asc", ".tif", ".tiff", ".img", ".dem"} and staged_path.suffix.lower() != source_suffix:
                 metadata_probe = database.staging_dir / f"{upload_id}{source_suffix}"
-                shutil.copyfile(blob_path, metadata_probe)
+                shutil.copyfile(staged_path, metadata_probe)
                 metadata_path = metadata_probe
             try:
                 from edda.io.spatial_input_loader import SpatialInputLoader
@@ -2163,13 +2216,23 @@ class WorkbenchStore:
                     metadata_probe.unlink(missing_ok=True)
         parse_summary: Optional[Dict[str, Any]] = None
         if normalized_family == "config":
-            parse_summary = self._try_parse_config_upload(project_id, blob_path)
+            parse_summary = self._try_parse_config_upload(project_id, staged_path)
             if parse_summary:
                 summary = parse_summary.get("summary") or summary
                 warnings = list(parse_summary.get("warnings") or [])
 
         created_at = utc_now()
         with database.connect() as connection:
+            # The logical record and final content placement share this write
+            # lock with batch deletion. A delete can therefore never observe an
+            # uploaded blob before it has a durable owner row.
+            connection.execute("BEGIN IMMEDIATE")
+            blob_path.parent.mkdir(parents=True, exist_ok=True)
+            deduplicated = blob_path.exists()
+            if deduplicated:
+                staged_path.unlink(missing_ok=True)
+            else:
+                staged_path.replace(blob_path)
             connection.execute(
                 """
                 INSERT INTO uploads(
@@ -2484,7 +2547,7 @@ class WorkbenchStore:
             normalized = impact["asset_ids"]
             placeholders = ",".join("?" for _ in normalized)
             removed_rows = connection.execute(
-                f"SELECT sha256 FROM uploads WHERE upload_id IN ({placeholders})",
+                f"SELECT sha256, blob_path FROM uploads WHERE upload_id IN ({placeholders})",
                 tuple(normalized),
             ).fetchall()
             now = utc_now()
@@ -2518,20 +2581,62 @@ class WorkbenchStore:
                 f"DELETE FROM uploads WHERE upload_id IN ({placeholders})",
                 tuple(normalized),
             )
+            # Commit the logical deletion before touching content files. A
+            # fresh write lock below rechecks every reference so a concurrent
+            # upload that publishes the same digest cannot lose its blob.
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
             manifests = connection.execute("SELECT manifest_json FROM input_revisions").fetchall()
-            retained_snapshot_blob_count = sum(
-                1
+            retained_snapshot_hashes = {
+                str(entry.get("sha256") or "")
+                for manifest in manifests
+                for entry in json_loads(manifest["manifest_json"], [])
+                if entry.get("sha256")
+            }
+            candidate_blobs = {
+                str(row["sha256"]): str(row["blob_path"])
                 for row in removed_rows
-                if any(
-                    any(str(entry.get("sha256") or "") == str(row["sha256"]) for entry in json_loads(manifest["manifest_json"], []))
-                    for manifest in manifests
-                )
+            }
+            retained_snapshot_blob_count = sum(
+                sha256 in retained_snapshot_hashes for sha256 in candidate_blobs
             )
+            retained_upload_blob_count = 0
+            deleted_blob_count = 0
+            cleanup_failures: list[Dict[str, str]] = []
+            blob_root = database.blob_dir.resolve()
+            for sha256, stored_path in candidate_blobs.items():
+                if sha256 in retained_snapshot_hashes:
+                    continue
+                remaining_upload = connection.execute(
+                    "SELECT 1 FROM uploads WHERE sha256=? LIMIT 1",
+                    (sha256,),
+                ).fetchone()
+                if remaining_upload:
+                    retained_upload_blob_count += 1
+                    continue
+                blob_path = Path(stored_path).resolve()
+                expected_path = (blob_root / sha256[:2] / sha256).resolve()
+                try:
+                    blob_path.relative_to(blob_root)
+                    if blob_path != expected_path:
+                        raise ValueError("content path does not match its digest")
+                except ValueError as exc:
+                    cleanup_failures.append({"sha256": sha256, "path": str(blob_path), "error": str(exc)})
+                    continue
+                try:
+                    if blob_path.is_file():
+                        blob_path.unlink()
+                        deleted_blob_count += 1
+                except OSError as exc:
+                    cleanup_failures.append({"sha256": sha256, "path": str(blob_path), "error": str(exc)})
         return {
             "deleted_ids": impact["asset_ids"],
             "detached_binding_count": impact["detached_binding_count"],
             "cancelled_queue_item_ids": impact["cancelled_queue_item_ids"],
             "retained_snapshot_blob_count": retained_snapshot_blob_count,
+            "retained_upload_blob_count": retained_upload_blob_count,
+            "deleted_blob_count": deleted_blob_count,
+            "orphaned_blob_cleanup_failures": cleanup_failures,
         }
 
     def delete_asset(self, project_id: str, asset_id: str) -> None:
@@ -3963,19 +4068,47 @@ class WorkbenchStore:
             raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
         return row
 
-    def _public_queue_item(self, project_id: str, row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    def _public_queue_item(
+        self,
+        project_id: str,
+        row: sqlite3.Row | Dict[str, Any],
+        *,
+        display_position: Optional[int] = None,
+    ) -> Dict[str, Any]:
         database = self.project_database(project_id)
         data = dict(row)
         with database.connect() as connection:
             scenario = connection.execute(
                 "SELECT name FROM scenarios WHERE scenario_id=?", (data["scenario_id"],)
             ).fetchone()
+            if data["status"] == "queued" and display_position is None:
+                waiting_ahead = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM queue_items
+                    WHERE status='queued' AND (
+                        position < ?
+                        OR (position = ? AND (
+                            enqueued_at < ?
+                            OR (enqueued_at = ? AND queue_item_id < ?)
+                        ))
+                    )
+                    """,
+                    (
+                        data["position"],
+                        data["position"],
+                        data["enqueued_at"],
+                        data["enqueued_at"],
+                        data["queue_item_id"],
+                    ),
+                ).fetchone()[0]
+                display_position = int(waiting_ahead) + 1
+        position = display_position if data["status"] == "queued" else int(data["position"])
         return {
             "queue_item_id": data["queue_item_id"],
             "project_id": project_id,
             "scenario_id": data["scenario_id"],
             "scenario_name": scenario["name"] if scenario else data["scenario_id"],
-            "position": data["position"],
+            "position": position,
             "status": data["status"],
             "simulation_id": data.get("simulation_id"),
             "scenario_version": int(data["scenario_version"]) if data.get("scenario_version") is not None else None,
@@ -3999,7 +4132,14 @@ class WorkbenchStore:
             rows = connection.execute(
                 "SELECT * FROM queue_items ORDER BY position, enqueued_at, queue_item_id"
             ).fetchall()
-        return [self._public_queue_item(project_id, row) for row in rows]
+        display_positions = {
+            row["queue_item_id"]: index
+            for index, row in enumerate((row for row in rows if row["status"] == "queued"), start=1)
+        }
+        return [
+            self._public_queue_item(project_id, row, display_position=display_positions.get(row["queue_item_id"]))
+            for row in rows
+        ]
 
 
     def _normalize_run_options(
@@ -4084,6 +4224,12 @@ class WorkbenchStore:
                 )
             seen.add(coordinate)
             cells.append([row, col])
+        if enabled_value and not cells:
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "启用侵蚀探针时至少需要一个探针格点。",
+                status_code=422,
+            )
         if cells:
             self._validate_erosion_probe_cells_against_frozen_dem(cells, frozen_manifest or [])
         payload["diagnostics"]["erosion_probe"] = {

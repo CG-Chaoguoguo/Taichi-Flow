@@ -7,10 +7,10 @@ import pytest
 from edda.solver.native_unsfin import analytic_cell as analytic
 
 
-def _grid(path, values, *, x=0, cellsize=30, center=False, bom=False):
+def _grid(path, values, *, x=0, y=0, cellsize=30, center=False, bom=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     values = np.asarray(values)
-    origin = f"xllcenter {x + cellsize / 2}\nyllcenter {cellsize / 2}" if center else f"xllcorner {x}\nyllcorner 0"
+    origin = f"xllcenter {x + cellsize / 2}\nyllcenter {y + cellsize / 2}" if center else f"xllcorner {x}\nyllcorner {y}"
     text = f"ncols {values.shape[1]}\nnrows {values.shape[0]}\n{origin}\ncellsize {cellsize}\nNODATA_value -9999\n"
     text += "\n".join(" ".join(map(str, row)) for row in values) + "\n"
     path.write_text(text, encoding="utf-8-sig" if bom else "utf-8")
@@ -71,6 +71,20 @@ def test_reader_validates_declared_shape_and_preserves_one_based_active_order(tm
 def test_equivalent_center_origin_and_utf8_bom_are_not_misregistered(tmp_path, monkeypatch):
     paths = _case(tmp_path, monkeypatch)
     _grid(tmp_path / paths["zone"], [[1, 1], [2, 2]], center=True, bom=True)
+    assert analytic.build_active_context(tmp_path).zone_values == [1., 1., 2., 2.]
+
+
+def test_equivalent_decimal_center_and_corner_origins_are_not_misregistered(tmp_path, monkeypatch):
+    paths = _case(tmp_path, monkeypatch)
+    for family, values in (("slope", [[10, 20], [30, 40]]), ("zone", [[1, 1], [2, 2]]), ("ltstar", [[2, 2], [3, 3]])):
+        _grid(
+            tmp_path / paths[family],
+            values,
+            x=0.1,
+            y=0.1,
+            cellsize=0.1,
+            center=family == "zone",
+        )
     assert analytic.build_active_context(tmp_path).zone_values == [1., 1., 2., 2.]
 
 

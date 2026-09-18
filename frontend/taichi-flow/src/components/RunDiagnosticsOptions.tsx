@@ -60,6 +60,12 @@ function parseProbeCells(text: string): { cells: Array<[number, number]>; error:
   return { cells, error: null };
 }
 
+function validateProbeCells(text: string, enabled: boolean): { cells: Array<[number, number]>; error: string | null } {
+  const parsed = parseProbeCells(text);
+  if (parsed.error || !enabled || parsed.cells.length > 0) return parsed;
+  return { cells: parsed.cells, error: "启用侵蚀探针时至少需要一个探针格点" };
+}
+
 export function formatProbeCells(cells: Array<[number, number] | number[]>): string {
   return cells.map((cell) => `${cell[0]},${cell[1]}`).join("\n");
 }
@@ -89,7 +95,7 @@ export function RunDiagnosticsOptions({
 }: Props) {
   const [uncontrolledProbeDraft, setUncontrolledProbeDraft] = useState<ErosionProbeDraftState>(() => ({
     rawText: formatProbeCells(value.erosion_probe.probe_cells),
-    error: null,
+    error: validateProbeCells(formatProbeCells(value.erosion_probe.probe_cells), value.erosion_probe.enabled).error,
   }));
   const [filling, setFilling] = useState(false);
   const [fillError, setFillError] = useState<string | null>(null);
@@ -112,7 +118,7 @@ export function RunDiagnosticsOptions({
   }, [value.erosion_probe.enabled, value.erosion_probe.probe_cells.length]);
 
   const commitText = (text: string) => {
-    const parsed = parseProbeCells(text);
+    const parsed = validateProbeCells(text, value.erosion_probe.enabled);
     updateProbeDraft({ rawText: text, error: parsed.error });
     onValidationChange?.(!parsed.error);
     if (parsed.error) return;
@@ -140,15 +146,19 @@ export function RunDiagnosticsOptions({
           data-testid="run-erosion-probe-enabled"
           checked={value.erosion_probe.enabled}
           disabled={disabled}
-          onChange={(event) =>
+          onChange={(event) => {
+            const enabled = event.target.checked;
+            const parsed = validateProbeCells(currentProbeDraft.rawText, enabled);
+            updateProbeDraft({ rawText: currentProbeDraft.rawText, error: parsed.error });
+            onValidationChange?.(!parsed.error);
             onChange({
               ...value,
               erosion_probe: {
                 ...value.erosion_probe,
-                enabled: event.target.checked,
+                enabled,
               },
-            })
-          }
+            });
+          }}
         />
         <span className="tf-body">侵蚀分项诊断（仅本次运行）</span>
       </label>
@@ -183,7 +193,7 @@ export function RunDiagnosticsOptions({
             try {
               const suggestion = normalizeSuggestion(await onFillTopN());
               const normalizedText = formatProbeCells(suggestion.probe_cells);
-              const parsed = parseProbeCells(normalizedText);
+              const parsed = validateProbeCells(normalizedText, true);
               if (parsed.error) throw new Error(parsed.error);
               updateProbeDraft({ rawText: normalizedText, error: null });
               onValidationChange?.(true);

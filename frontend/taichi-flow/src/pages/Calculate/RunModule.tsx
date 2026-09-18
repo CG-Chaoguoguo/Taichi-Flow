@@ -26,7 +26,13 @@ type ScopedDiagnosticsState = {
 };
 
 function initialProbeDraft(payload: RunDiagnosticsPayload): ErosionProbeDraftState {
-  return { rawText: formatProbeCells(payload.erosion_probe.probe_cells), error: null };
+  const rawText = formatProbeCells(payload.erosion_probe.probe_cells);
+  return {
+    rawText,
+    error: payload.erosion_probe.enabled && payload.erosion_probe.probe_cells.length === 0
+      ? "启用侵蚀探针时至少需要一个探针格点"
+      : null,
+  };
 }
 
 export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; readOnly?: boolean }) {
@@ -261,7 +267,7 @@ export function RunModule({ scenario, readOnly = false }: { scenario: Scenario; 
             #{item.position}
           </div>
           <p className="tf-body tf-text-secondary">
-            当前队列并发数限制为 1，前面还有 {item.position - 1} 个任务。
+            当前队列并发数限制为 1，前面还有 {item.position - 1} 个等待任务。
           </p>
            <p className="tf-caption tf-text-info">入队时已冻结输入修订与计算策略；如需使用新的 Settings，请重新加入队列。</p>
            {queuedDiagnosticsLabel ? (
