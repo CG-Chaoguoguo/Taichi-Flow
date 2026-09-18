@@ -20,21 +20,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: CG-Chaoguoguo/EDDA-Fortran
-          ref: 8b0b7cf4b64266f941ae87daaae7f86eaf7d7630
-          path: .oracle-source
-          persist-credentials: false
       - name: Freeze source-only audit evidence
         shell: bash
         run: |
+          # This job records only the Taichi-Flow source checked out by this workflow.
           mkdir -p audit-evidence
           git rev-parse HEAD > audit-evidence/candidate-sha.txt
-          git -C .oracle-source rev-parse HEAD > audit-evidence/oracle-sha.txt
           git archive --format=tar.gz HEAD > audit-evidence/candidate-source.tar.gz
-          git -C .oracle-source archive --format=tar.gz HEAD > audit-evidence/oracle-source.tar.gz
-          sha256sum audit-evidence/*.tar.gz > audit-evidence/SHA256SUMS
+          sha256sum audit-evidence/candidate-source.tar.gz > audit-evidence/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: edda-audit-source-${{ github.run_id }}
