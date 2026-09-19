@@ -21,7 +21,6 @@ METADATA_FILENAMES = {
     "effective_config.json",
     "input_source_registry.json",
     "job_metadata.json",
-    "output_manifest.json",
     "output_frame_events.json",
     "parameter_audit.json",
     "numerical_diagnostics.json",

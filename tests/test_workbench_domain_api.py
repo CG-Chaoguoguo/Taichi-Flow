@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from api.services.runtime_session import prepare_runtime_from_payload
-from api.services.workbench_store import WorkbenchError
+from api.services.workbench_store import WorkbenchError, WorkbenchStore
 from tests.test_native_input_chain import _make_reference_case
 
 
@@ -102,6 +102,42 @@ def _make_importable_reference_case(root: Path) -> Path:
     assert marker in text
     edda_in.write_text(text.replace(marker, marker.replace("\nT\n", "\nF\n")), encoding="utf-8")
     return edda_in
+
+
+def test_case_preview_reports_unsfin_loader_failures_as_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _make_reference_case(tmp_path / "source")
+    (source.parent / "dfs.F90").write_text(
+        "\n".join(
+            [
+                "        !if (fssimul) then",
+                "        !    if (tnow<60.) tnow=60.",
+                "        !    call doublelayer(imx1,kper,tnow,tempfsh,tempfsrho,gindx,eroindx,u)",
+                "        !end if",
+                "        if (tnow<=tfail(i) .and. tnext>tfail(i)) then",
+                "            tempfsh(i)=fsdepth(i)",
+                "            tempfsrho(i)=(rhos-rhow)*cvstar+rhow",
+                "        end if",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (source.parent / "edda main program.F90").write_text(
+        "if (fssimul) call unsfin(imx1,u(19),u(2),profil)\n",
+        encoding="utf-8",
+    )
+
+    def fail_loader(*args: object, **kwargs: object) -> dict:
+        raise ValueError("malformed numeric UNSFIN fixture")
+
+    monkeypatch.setattr("api.services.native_sidecar_loader.load_precomputed_unsfin_schedule", fail_loader)
+    preview = WorkbenchStore(tmp_path / "state").preview_case_import(str(source.parent))
+
+    validation = preview["plan"]["precomputed_unsfin_validation"]
+    assert validation["valid"] is False
+    assert validation["parse_status"] == "invalid"
+    assert validation["error"] == "malformed numeric UNSFIN fixture"
+    assert preview["plan"]["unresolved_active_count"] >= 1
 
 
 def test_project_catalog_survives_application_restart(tmp_path: Path) -> None:

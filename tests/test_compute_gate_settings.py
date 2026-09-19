@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +12,7 @@ from api.services.compute_gate_defaults import (
     merge_compute_gate_defaults,
     strip_gate_parameters,
 )
+from api.services.workbench_store import WorkbenchStore
 from tests.test_workbench_domain_api import _create_project
 
 
@@ -33,6 +36,28 @@ def test_merge_compute_gate_defaults_prefers_global_gates_then_non_gate_patch() 
     assert merged["edda.run_controls.simulate_rainfall"] is False
     assert merged["hydrology.dfs_face_flux_variant"] == "arithmetic_mean_chamoli"
     assert "edda.run_controls.simulate_rainfall" not in strip_gate_parameters(patch)
+
+
+def test_concurrent_sparse_compute_gate_updates_preserve_both_changes(tmp_path: Path) -> None:
+    store = WorkbenchStore(tmp_path / "state")
+    barrier = Barrier(2)
+
+    def update(values: dict[str, object]) -> None:
+        barrier.wait(timeout=5)
+        store.put_compute_gate_defaults(values)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(update, {"boundary_conditions.default_type": "wall"}),
+            executor.submit(update, {"hydrology.dfs_face_flux_variant": "arithmetic_mean_chamoli"}),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert store.get_compute_gate_values() == {
+        "boundary_conditions.default_type": "wall",
+        "hydrology.dfs_face_flux_variant": "arithmetic_mean_chamoli",
+    }
 
 
 def test_compute_gates_settings_round_trip_and_scenario_merge(tmp_path: Path) -> None:

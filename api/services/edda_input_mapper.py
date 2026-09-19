@@ -1796,6 +1796,17 @@ def apply_native_runtime_inputs(solver: Any, runtime_input_manifest: Dict[str, A
             continue
         path = Path(entry["path"])
         if not path.exists():
+            if family == "triggerslide":
+                _mark_manifest_entry(
+                    runtime_input_manifest,
+                    family,
+                    consumed=False,
+                    missing_on_disk=True,
+                    default_substitution_used=False,
+                    current_backend_branch_active=False,
+                    blocked_reason="The declared triggering-slide raster is missing from the frozen input revision.",
+                )
+                raise FileNotFoundError(f"Declared triggering-slide raster is missing: {path}")
             if family == "manningfil":
                 _mark_manifest_entry(
                     runtime_input_manifest,

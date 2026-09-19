@@ -100,12 +100,29 @@ function Test-PortableOwnedRecord {
     } catch { return $false }
 }
 
+function Stop-PortableOwnedSession {
+    param([Parameter(Mandatory = $true)]$Existing)
+    $records = @($Existing.processes | Sort-Object @{Expression={ if ($_.name -eq "electron") { 0 } else { 1 } }})
+    foreach ($record in $records) {
+        if (-not (Test-PortableOwnedRecord $record)) {
+            Write-PortableLog "Recovery skipped '$($record.name)' PID $($record.pid): identity no longer matches."
+            continue
+        }
+        $result = Stop-TaichiFlowOwnedProcess -Record $record
+        if (-not $result.Stopped) {
+            throw "Recovery could not stop owned process '$($record.name)' PID $($record.pid): $($result.Reason)"
+        }
+        Write-PortableLog "Recovery stopped owned process '$($record.name)' PID $($record.pid)."
+    }
+}
+
 function Invoke-PortableFocus {
     param([Parameter(Mandatory = $true)]$Existing)
     $electronRecord = @($Existing.processes | Where-Object { $_.name -eq "electron" }) | Select-Object -Last 1
     if ($null -eq $electronRecord -or -not (Test-PortableOwnedRecord $electronRecord)) { return $false }
     if (-not (Test-PortableApi -Port ([int]$Existing.api_port))) {
-        Write-PortableLog "Existing Electron belongs to this bundle but its API health contract failed; starting recovery."
+        Write-PortableLog "Existing Electron belongs to this bundle but its API health contract failed; stopping the owned session before recovery."
+        Stop-PortableOwnedSession -Existing $Existing
         return $false
     }
     $apiUrl = [string]$Existing.api_url

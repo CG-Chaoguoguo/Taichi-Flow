@@ -24,6 +24,7 @@ from api.services import (
     write_runmode_capabilities_file,
     write_runtime_metadata_files,
 )
+from api.services.runtime_audit import build_output_manifest
 from api.services.parameter_catalog import build_parameter_catalog
 from api.services.edda_semantic_gate import validate_runtime_control_plan
 from api.services.compute_policy_resolver import (
@@ -813,7 +814,10 @@ class RuntimeSession:
                 # Diagnostics are additive observability.  A failure to write
                 # them must not alter the solver result lifecycle.
                 self._latest_numerical_diagnostics = None
-        output_manifest = write_output_manifest_file(
+        # Build an in-memory inventory for the dependent audit documents.  The
+        # final manifest is written only after those documents are complete so
+        # its checksums describe the bytes that remain on disk.
+        output_manifest = build_output_manifest(
             self.output_dir,
             reference_output_expectations=self.prepared.provenance.get("reference_output_expectations"),
         )
@@ -840,6 +844,11 @@ class RuntimeSession:
         _write_json(self.output_dir / "parameter_catalog.json", parameter_catalog)
         _write_json(self.output_dir / "request_payload.json", self.prepared.request_payload)
         _write_json(self.output_dir / "job_metadata.json", self.prepared.job_metadata)
+
+        output_manifest = write_output_manifest_file(
+            self.output_dir,
+            reference_output_expectations=self.prepared.provenance.get("reference_output_expectations"),
+        )
 
         self._latest_output_manifest = output_manifest
         self._latest_parameter_audit = parameter_audit

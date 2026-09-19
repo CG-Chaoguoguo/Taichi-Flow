@@ -953,52 +953,52 @@ class WorkbenchStore:
             validate_compute_gate_values,
         )
 
-        # PUT carries a sparse override map.  Validate the submitted map and
-        # the resulting effective sparse state together so a caller cannot
-        # bypass the live-experiment lock by sending only the unlock field.
+        # PUT carries a sparse override map.  Keep the read/merge/write cycle
+        # under one write transaction so concurrent sparse updates cannot
+        # erase each other.
         with self.catalog() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             current_row = connection.execute(
                 "SELECT value_json FROM settings WHERE key=?",
                 (COMPUTE_GATE_SETTINGS_KEY,),
             ).fetchone()
-        current_payload = json_loads(current_row["value_json"], {}) if current_row else {}
-        current_values = extract_gate_parameters(
-            current_payload.get("values") if isinstance(current_payload, dict) else {}
-        )
-        try:
-            validation_values = dict(values)
-            if (
-                str(validation_values.get(POLICY_KEY) or "").strip().lower() == "live"
-                and EXPERIMENTAL_LIVE_KEY not in validation_values
-            ):
-                validation_values[EXPERIMENTAL_LIVE_KEY] = current_values.get(EXPERIMENTAL_LIVE_KEY, False)
-            cleaned = validate_compute_gate_values(validation_values)
-            if EXPERIMENTAL_LIVE_KEY not in values:
-                cleaned.pop(EXPERIMENTAL_LIVE_KEY, None)
-            effective_sparse = dict(current_values)
-            from api.services.compute_gate_defaults import VARIANT_AND_POLICY_AUTO_KEYS
-            for key, value in values.items():
-                key = str(key)
-                if key in VARIANT_AND_POLICY_AUTO_KEYS and isinstance(value, str) and value.strip().lower() == "auto":
-                    effective_sparse.pop(key, None)
-                elif key in cleaned:
-                    effective_sparse[key] = cleaned[key]
-            if (
-                effective_sparse.get(POLICY_KEY) == "live"
-                and effective_sparse.get(EXPERIMENTAL_LIVE_KEY) is not True
-            ):
-                raise ComputeGateValidationError(
-                    "live_unlock_required",
-                    "当前策略为实时双层时不能关闭实验解锁，请先切换失稳源策略。",
-                    {"key": EXPERIMENTAL_LIVE_KEY},
-                )
-        except ComputeGateValidationError as exc:
-            raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
-        payload = {
-            "values": effective_sparse,
-            "updated_at": utc_now(),
-        }
-        with self.catalog() as connection:
+            current_payload = json_loads(current_row["value_json"], {}) if current_row else {}
+            current_values = extract_gate_parameters(
+                current_payload.get("values") if isinstance(current_payload, dict) else {}
+            )
+            try:
+                validation_values = dict(values)
+                if (
+                    str(validation_values.get(POLICY_KEY) or "").strip().lower() == "live"
+                    and EXPERIMENTAL_LIVE_KEY not in validation_values
+                ):
+                    validation_values[EXPERIMENTAL_LIVE_KEY] = current_values.get(EXPERIMENTAL_LIVE_KEY, False)
+                cleaned = validate_compute_gate_values(validation_values)
+                if EXPERIMENTAL_LIVE_KEY not in values:
+                    cleaned.pop(EXPERIMENTAL_LIVE_KEY, None)
+                effective_sparse = dict(current_values)
+                from api.services.compute_gate_defaults import VARIANT_AND_POLICY_AUTO_KEYS
+                for key, value in values.items():
+                    key = str(key)
+                    if key in VARIANT_AND_POLICY_AUTO_KEYS and isinstance(value, str) and value.strip().lower() == "auto":
+                        effective_sparse.pop(key, None)
+                    elif key in cleaned:
+                        effective_sparse[key] = cleaned[key]
+                if (
+                    effective_sparse.get(POLICY_KEY) == "live"
+                    and effective_sparse.get(EXPERIMENTAL_LIVE_KEY) is not True
+                ):
+                    raise ComputeGateValidationError(
+                        "live_unlock_required",
+                        "当前策略为实时双层时不能关闭实验解锁，请先切换失稳源策略。",
+                        {"key": EXPERIMENTAL_LIVE_KEY},
+                    )
+            except ComputeGateValidationError as exc:
+                raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
+            payload = {
+                "values": effective_sparse,
+                "updated_at": utc_now(),
+            }
             connection.execute(
                 "INSERT OR REPLACE INTO settings(key, value_json) VALUES(?, ?)",
                 (COMPUTE_GATE_SETTINGS_KEY, json.dumps(payload, ensure_ascii=False)),
@@ -1172,12 +1172,20 @@ class WorkbenchStore:
                 dem_path = candidate
                 break
         locator = find_precomputed_unsfin_artifacts(base_dir)
-        validation = load_precomputed_unsfin_schedule(base_dir, dem_file=dem_path)
+        try:
+            validation = load_precomputed_unsfin_schedule(base_dir, dem_file=dem_path)
+        except Exception as exc:
+            validation = {
+                "parse_status": "invalid",
+                "runtime_arrays": None,
+                "error": str(exc),
+            }
         valid = bool(locator.get("all_required_present")) and bool(validation.get("runtime_arrays"))
         plan["precomputed_unsfin_validation"] = {
             "valid": valid,
             "missing_artifacts": list(locator.get("missing_artifacts") or []),
             "parse_status": validation.get("parse_status"),
+            "error": validation.get("error"),
         }
         for ordinal, (key, filename) in enumerate(PRECOMPUTED_UNSFIN_FILENAMES.items(), start=1):
             path = Path(str(locator["artifact_paths"].get(key) or Path(parsed.reference_base_dir) / filename))

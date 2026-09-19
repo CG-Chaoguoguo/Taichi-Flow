@@ -809,6 +809,25 @@ def test_reference_mapping_uses_global_manning_when_declared_grid_is_missing(tmp
     assert runtime_input_manifest["input_source_registry"]["manning_source"]["selected_source"] == "global_manning"
 
 
+def test_reference_mapping_fails_when_declared_triggerslide_disappears(tmp_path):
+    edda_in = _make_reference_case(tmp_path)
+    parsed = parse_reference_config_file(str(edda_in))
+    _, _, runtime_input_manifest, _ = build_reference_runtime_metadata(parsed, tmp_path / "output")
+    trigger_entry = {
+        "family": "triggerslide",
+        "path": str(tmp_path / "frozen" / "triggerslide.asc"),
+        "original_branch_active": True,
+        "current_backend_branch_active": True,
+    }
+    runtime_input_manifest["inputs"].insert(0, trigger_entry)
+
+    with pytest.raises(FileNotFoundError, match="Declared triggering-slide raster is missing"):
+        apply_native_runtime_inputs(_FakeSolver(), runtime_input_manifest)
+
+    assert trigger_entry["missing_on_disk"] is True
+    assert trigger_entry["default_substitution_used"] is False
+
+
 def test_reference_mapping_consumes_depfil_and_rizerofil_when_original_branches_are_active(tmp_path):
     edda_in = _make_reference_case(tmp_path)
     text = edda_in.read_text(encoding="utf-8")

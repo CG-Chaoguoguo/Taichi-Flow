@@ -1,5 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
+from hashlib import sha256
+import json
 
 from copy import deepcopy
 
@@ -64,6 +66,11 @@ def test_runtime_session_releases_solver_after_completed_run(tmp_path):
     assert sim_data["resource_summary"]["active_sessions"] == 0
     assert (prepared.output_dir / "parameter_catalog.json").exists()
     assert (prepared.output_dir / "final_depth.tif").exists()
+    manifest = json.loads((prepared.output_dir / "output_manifest.json").read_text(encoding="utf-8"))
+    metadata = {entry["relative_path"]: entry for entry in manifest["metadata_files"]}
+    assert "output_manifest.json" not in metadata
+    for relative_path, entry in metadata.items():
+        assert entry["sha256"] == sha256((prepared.output_dir / relative_path).read_bytes()).hexdigest()
 
 
 def test_runtime_session_applies_frozen_fp64_compute_override(tmp_path):

@@ -86,3 +86,14 @@ def test_portable_build_and_verifier_both_enforce_shared_lock_helper() -> None:
         assert "verify_runtime_lock.py" in script
         assert "TAICHI_FLOW_RUNTIME_LOCK=" in script
         assert "portable-runtime.lock.txt" in script
+
+
+def test_portable_recovery_stops_owned_stale_session_before_relaunch() -> None:
+    root = Path(__file__).parent.parent
+    launcher = (root / "scripts" / "portable" / "Start-Taichi-Flow-Portable.ps1").read_text(encoding="utf-8")
+    failed_health = launcher.index('if (-not (Test-PortableApi -Port ([int]$Existing.api_port)))')
+    stop_call = launcher.index("Stop-PortableOwnedSession -Existing $Existing", failed_health)
+    recovery_return = launcher.index("return $false", stop_call)
+
+    assert "function Stop-PortableOwnedSession" in launcher
+    assert failed_health < stop_call < recovery_return
