@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+from io import StringIO
 from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
 
@@ -75,10 +76,16 @@ def _same_geometry(reference: tuple[int, int, float, float, float], candidate: t
     return True
 
 
-def read_ascii_active_values(path: Path, *, integer: bool = False) -> tuple[list[float], list[tuple[int, int]], dict[str, Any]]:
+def read_ascii_active_values(
+    path: Path,
+    *,
+    integer: bool = False,
+    content: bytes | None = None,
+) -> tuple[list[float], list[tuple[int, int]], dict[str, Any]]:
     """Read finite rectangular ESRI ASCII; return Fortran's one-based row order."""
     path = Path(path)
-    with path.open(encoding="utf-8-sig", errors="strict") as handle:
+    handle = path.open(encoding="utf-8-sig", errors="strict") if content is None else StringIO(content.decode("utf-8-sig", errors="strict"))
+    with handle:
         header: dict[str, float] = {}
         for _ in range(6):
             parts = handle.readline().split()
@@ -115,13 +122,22 @@ def read_ascii_active_values(path: Path, *, integer: bool = False) -> tuple[list
     return values, mapping, header
 
 
-def load_aligned_active_inputs(case_dir: Path, paths: Mapping[str, str]):
+def load_aligned_active_inputs(
+    case_dir: Path,
+    paths: Mapping[str, str],
+    *,
+    contents: Mapping[str, bytes] | None = None,
+):
     """Fail closed unless geometry AND ordered active coordinates agree."""
     grids = {}
     reference_geometry = reference_mapping = None
     for family in ("slope", "zone", "ltstar"):
         path = resolve_native_input_path(case_dir, paths[family])
-        values, mapping, header = read_ascii_active_values(path, integer=family == "zone")
+        values, mapping, header = read_ascii_active_values(
+            path,
+            integer=family == "zone",
+            content=contents[family] if contents is not None else None,
+        )
         geometry = _geometry(header, path)
         if reference_mapping is None:
             reference_geometry, reference_mapping = geometry, mapping

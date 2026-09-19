@@ -13,16 +13,18 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 import numpy as np
 
 from .ledger import LedgerArrays, load_original_oracle
-from .input_grid import load_aligned_active_inputs, read_ascii_active_values
+from .input_grid import load_aligned_active_inputs, read_ascii_active_values, resolve_native_input_path
 
 
 TARGET_CELLS = (90008, 90001, 51509, 21846)
@@ -35,6 +37,9 @@ FORTRAN_MAIN_DG2RAD = FORTRAN_MAIN_PI_DEFAULT_REAL / 180.0
 # `rootc.F90` assigns `deltamiu=0.01` without a double-precision suffix.
 # The widened default-real value is active at 0-10800 fsmin boundaries.
 FORTRAN_ROOTC_DELTAMIU_DEFAULT_REAL = 0.009999999776482582
+ACTIVE_ORDER_CHECKPOINT_FORMAT = "native_unsfin_active_order_v2"
+ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION = "native_unsfin_active_inputs_v2"
+_SOURCE_NOT_SUPPLIED = object()
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,8 @@ class ActiveContext:
     ltstar_values: list[float]
     active_mapping: list[tuple[int, int]]
     shape: tuple[int, int]
+    input_fingerprint: str = ""
+    input_inventory: tuple[dict[str, Any], ...] = ()
 
 
 def _profile_add(profile_stats: dict[str, float] | None, key: str, seconds: float) -> None:
@@ -116,9 +123,21 @@ def _profile_add(profile_stats: dict[str, float] | None, key: str, seconds: floa
         profile_stats[key] = profile_stats.get(key, 0.0) + seconds
 
 
-def _sha256_json(data: dict[str, Any]) -> str:
+def _sha256_json(data: Any) -> str:
     payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _fingerprint_jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return _fingerprint_jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _fingerprint_jsonable(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_jsonable(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _f_root_a(x: float, beta: float, lt: float, lb: float, kst: float, ksb: float) -> tuple[float, float]:
@@ -750,6 +769,10 @@ def _nonempty_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
 
 
+def _nonempty_text(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
 def _zone_from_records(bottom: list[float], top: list[float]) -> ZoneParams:
     dg2rad = FORTRAN_MAIN_DG2RAD
     return ZoneParams(
@@ -810,12 +833,18 @@ def _numbers_after_label(lines: list[str], pattern: str, *, start: int = 0) -> l
     return numbers
 
 
-def _ltstar_upper_gate_from_source(case_dir: Path) -> tuple[float, str]:
+def _ltstar_upper_gate_from_source(
+    case_dir: Path,
+    source_text: str | None | object = _SOURCE_NOT_SUPPLIED,
+) -> tuple[float, str]:
     unsfin_path = case_dir / "unsfin.F90"
-    if not unsfin_path.exists():
+    if source_text is _SOURCE_NOT_SUPPLIED:
+        if not unsfin_path.exists():
+            return 5.0, "DEFAULT_NO_UNSFIN_SOURCE"
+        source_text = unsfin_path.read_text(encoding="utf-8", errors="replace")
+    if source_text is None:
         return 5.0, "DEFAULT_NO_UNSFIN_SOURCE"
-    text = unsfin_path.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r"if\s*\(\s*ltstar\s*\(\s*i\s*\)\s*>\s*([-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)\s*\)\s*cycle", text, flags=re.IGNORECASE)
+    match = re.search(r"if\s*\(\s*ltstar\s*\(\s*i\s*\)\s*>\s*([-+]?\d*\.?\d+(?:[eEdD][-+]?\d+)?)\s*\)\s*cycle", source_text, flags=re.IGNORECASE)
     if match is None:
         return 5.0, "DEFAULT_UNSFIN_GATE_NOT_FOUND"
     return float(match.group(1).replace("D", "E").replace("d", "e")), str(unsfin_path)
@@ -832,14 +861,19 @@ def _zone_for_config(config: dict[str, Any], zone_id: int, *, cell: int | None =
     return zone
 
 
-def parse_edda_in(case_dir: Path) -> dict[str, Any]:
-    lines = _nonempty_lines(case_dir / "edda_in.txt")
+def parse_edda_in(
+    case_dir: Path,
+    *,
+    source_text: str | None = None,
+    unsfin_source_text: str | None | object = _SOURCE_NOT_SUPPLIED,
+) -> dict[str, Any]:
+    lines = _nonempty_lines(case_dir / "edda_in.txt") if source_text is None else _nonempty_text(source_text)
     # `trini.f90` reads these records positionally after comment/title lines.
     dims = _numbers_from_line(lines[3])
     model = _numbers_from_line(lines[5])
     defaults = _numbers_from_line(lines[7])
     zones = _parse_zone_blocks(lines)
-    ltstar_upper_gate, ltstar_upper_gate_source = _ltstar_upper_gate_from_source(case_dir)
+    ltstar_upper_gate, ltstar_upper_gate_source = _ltstar_upper_gate_from_source(case_dir, unsfin_source_text)
     first_zone_id = min(zones)
     first_zone_index = next(idx for idx, line in enumerate(lines) if re.match(r"^zone\s*,", line, flags=re.IGNORECASE))
     cri = _numbers_after_label(lines, r"\bcri\s*\(", start=first_zone_index)
@@ -953,18 +987,97 @@ def build_cell_field_packs(
 
 
 def build_active_context(case_dir: Path) -> ActiveContext:
-    config = parse_edda_in(case_dir)
-    grids = load_aligned_active_inputs(case_dir, config["paths"])
+    case_dir = Path(case_dir)
+    edda_in_path = case_dir / "edda_in.txt"
+    edda_in_bytes = edda_in_path.read_bytes() if edda_in_path.is_file() else None
+    unsfin_path = case_dir / "unsfin.F90"
+    unsfin_bytes = unsfin_path.read_bytes() if unsfin_path.is_file() else None
+    if edda_in_bytes is None:
+        # Preserve the existing injectable parser seam used by input-boundary
+        # tests. The production parser itself still fails when edda_in is absent.
+        config = parse_edda_in(case_dir)
+    else:
+        config = parse_edda_in(
+            case_dir,
+            source_text=edda_in_bytes.decode("utf-8", errors="replace"),
+            unsfin_source_text=None if unsfin_bytes is None else unsfin_bytes.decode("utf-8", errors="replace"),
+        )
+    grid_paths = {
+        family: resolve_native_input_path(case_dir, config["paths"][family])
+        for family in ("slope", "zone", "ltstar")
+    }
+    grid_contents = {family: path.read_bytes() for family, path in grid_paths.items()}
+    grids = load_aligned_active_inputs(case_dir, config["paths"], contents=grid_contents)
     slope_values, active_mapping, slope_header = grids["slope"]
     zone_values, zone_mapping, _zone_header = grids["zone"]
     ltstar_values, ltstar_mapping, _lt_header = grids["ltstar"]
+    shape = (int(slope_header.get("nrows", 0)), int(slope_header.get("ncols", 0)))
+    inventory = [
+        {
+            "family": "edda_in",
+            "present": edda_in_bytes is not None,
+            "sha256": hashlib.sha256(edda_in_bytes).hexdigest() if edda_in_bytes is not None else None,
+        },
+        {
+            "family": "unsfin_source",
+            "present": unsfin_bytes is not None,
+            "sha256": hashlib.sha256(unsfin_bytes).hexdigest() if unsfin_bytes is not None else None,
+        },
+    ]
+    inventory.extend(
+        {"family": family, "present": True, "sha256": hashlib.sha256(grid_contents[family]).hexdigest()}
+        for family in ("slope", "zone", "ltstar")
+    )
+    scientific_config = {
+        key: value
+        for key, value in config.items()
+        if key not in {"paths", "ltstar_upper_gate_source"}
+    }
+    fingerprint = _sha256_json(
+        {
+            "version": ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+            "algorithm_constants": {
+                "main_dg2rad": FORTRAN_MAIN_DG2RAD,
+                "rootc_deltamiu": FORTRAN_ROOTC_DELTAMIU_DEFAULT_REAL,
+            },
+            "files": inventory,
+            "parsed_config": _fingerprint_jsonable(scientific_config),
+            "slope_values_deg": slope_values,
+            "zone_values": zone_values,
+            "ltstar_values": ltstar_values,
+            "active_mapping": active_mapping,
+            "shape": shape,
+        }
+    )
     return ActiveContext(
         config=config,
         slope_values_deg=slope_values,
         zone_values=zone_values,
         ltstar_values=ltstar_values,
         active_mapping=active_mapping,
-        shape=(int(slope_header.get("nrows", 0)), int(slope_header.get("ncols", 0))),
+        shape=shape,
+        input_fingerprint=fingerprint,
+        input_inventory=tuple(inventory),
+    )
+
+
+def _active_context_fingerprint(context: ActiveContext) -> str:
+    if context.input_fingerprint:
+        return context.input_fingerprint
+    return _sha256_json(
+        {
+            "version": ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+            "algorithm_constants": {
+                "main_dg2rad": FORTRAN_MAIN_DG2RAD,
+                "rootc_deltamiu": FORTRAN_ROOTC_DELTAMIU_DEFAULT_REAL,
+            },
+            "parsed_config": _fingerprint_jsonable(context.config),
+            "slope_values_deg": context.slope_values_deg,
+            "zone_values": context.zone_values,
+            "ltstar_values": context.ltstar_values,
+            "active_mapping": context.active_mapping,
+            "shape": context.shape,
+        }
     )
 
 
@@ -1779,24 +1892,34 @@ def _write_active_order_checkpoint(
 ) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     npz_path, json_path = _active_order_checkpoint_paths(checkpoint_dir)
-    tmp_npz = npz_path.with_suffix(".npz.tmp")
-    tmp_json = json_path.with_suffix(".json.tmp")
-    np.savez_compressed(tmp_npz, gindx=gindx, tfail_s=tfail, fdepth_m=fdepth)
-    if tmp_npz.exists() and not npz_path.exists():
-        pass
-    elif not tmp_npz.exists():
-        generated = tmp_npz.with_suffix(tmp_npz.suffix + ".npz")
-        if generated.exists():
-            generated.replace(tmp_npz)
+    attempt = uuid4().hex
+    tmp_npz = checkpoint_dir / f".{npz_path.name}.{attempt}.tmp"
+    tmp_json = checkpoint_dir / f".{json_path.name}.{attempt}.tmp"
     checkpoint_meta = {
         **meta,
         "candidate_list": candidates,
         "profile_stats": profile_stats,
-        "checkpoint_format": "native_unsfin_active_order_v1",
+        "checkpoint_format": ACTIVE_ORDER_CHECKPOINT_FORMAT,
+        "checkpoint_id": attempt,
     }
-    tmp_json.write_text(json.dumps(checkpoint_meta, indent=2), encoding="utf-8")
-    tmp_npz.replace(npz_path)
-    tmp_json.replace(json_path)
+    metadata_json = json.dumps(checkpoint_meta, sort_keys=True, separators=(",", ":"))
+    try:
+        with tmp_npz.open("xb") as handle:
+            np.savez_compressed(
+                handle,
+                gindx=gindx,
+                tfail_s=tfail,
+                fdepth_m=fdepth,
+                checkpoint_meta_json=np.asarray(metadata_json),
+            )
+        tmp_json.write_text(json.dumps(checkpoint_meta, indent=2), encoding="utf-8")
+        # The archive is the authoritative commit point: its arrays and restore
+        # metadata are one atomic unit. The JSON file is a readable report only.
+        tmp_npz.replace(npz_path)
+        tmp_json.replace(json_path)
+    finally:
+        tmp_npz.unlink(missing_ok=True)
+        tmp_json.unlink(missing_ok=True)
     last_processed = meta.get("last_processed_active_index")
     stop_index = meta.get("target_stop_index")
     eligible = meta.get("processed_eligible_cells")
@@ -1807,20 +1930,76 @@ def _write_active_order_checkpoint(
     )
 
 
-def _load_active_order_checkpoint(checkpoint_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    npz_path, json_path = _active_order_checkpoint_paths(checkpoint_dir)
-    if not npz_path.exists() or not json_path.exists():
+def _load_active_order_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    expected_config_hash: str,
+    active_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    npz_path, _json_path = _active_order_checkpoint_paths(checkpoint_dir)
+    if not npz_path.exists():
         raise FileNotFoundError(f"missing active-order checkpoint in {checkpoint_dir}")
-    arrays = np.load(npz_path)
-    meta = json.loads(json_path.read_text(encoding="utf-8"))
+    with np.load(npz_path, allow_pickle=False) as arrays:
+        if "checkpoint_meta_json" not in arrays.files:
+            raise ValueError(
+                "legacy active-order checkpoint lacks a complete input fingerprint; "
+                "rerun without resume to generate a v2 checkpoint"
+            )
+        try:
+            meta = json.loads(str(np.asarray(arrays["checkpoint_meta_json"]).item()))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("active-order checkpoint contains invalid embedded metadata") from exc
+        if meta.get("checkpoint_format") != ACTIVE_ORDER_CHECKPOINT_FORMAT:
+            raise ValueError(f"unsupported active-order checkpoint format: {meta.get('checkpoint_format')!r}")
+        missing = {name for name in ("gindx", "tfail_s", "fdepth_m") if name not in arrays.files}
+        if missing:
+            raise ValueError(f"active-order checkpoint is missing arrays: {sorted(missing)}")
+        raw_gindx = np.asarray(arrays["gindx"])
+        raw_tfail = np.asarray(arrays["tfail_s"])
+        raw_fdepth = np.asarray(arrays["fdepth_m"])
+        expected_shape = (active_count,)
+        if raw_gindx.shape != expected_shape or raw_tfail.shape != expected_shape or raw_fdepth.shape != expected_shape:
+            raise ValueError("checkpoint array shape does not match active-cell count")
+        if not np.all(np.isfinite(raw_gindx)) or np.any(raw_gindx != np.floor(raw_gindx)) or np.any(raw_gindx < 0):
+            raise ValueError("checkpoint gindx array is invalid")
+        if np.any(np.isinf(raw_tfail)) or np.any(~np.isfinite(raw_fdepth)):
+            raise ValueError("checkpoint result arrays contain nonfinite values")
+        gindx = np.asarray(raw_gindx, dtype=np.int32)
+        tfail = np.asarray(raw_tfail, dtype=np.float64)
+        fdepth = np.asarray(raw_fdepth, dtype=np.float64)
     if not meta.get("active_order_mode") or meta.get("per_cell_fitted_ts"):
         raise ValueError("checkpoint does not preserve active-order/non-fitted ts semantics")
-    return (
-        np.asarray(arrays["gindx"], dtype=np.int32),
-        np.asarray(arrays["tfail_s"], dtype=np.float64),
-        np.asarray(arrays["fdepth_m"], dtype=np.float64),
-        meta,
-    )
+    if meta.get("input_fingerprint_version") != ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION:
+        raise ValueError("checkpoint input fingerprint version is missing or unsupported; rerun without resume")
+    if not secrets.compare_digest(str(meta.get("config_hash", "")), expected_config_hash):
+        raise ValueError("checkpoint input fingerprint does not match the current scientific input snapshot")
+    try:
+        next_cell = int(meta["next_active_index"])
+        last_processed = int(meta["last_processed_active_index"])
+        processed = int(meta["processed_eligible_cells"])
+        eligible = int(meta["eligible_cells_in_evaluated_range"])
+        checkpoint_active_count = int(meta["active_count"])
+        target_stop_index = int(meta["target_stop_index"])
+        ts_carry = float(meta["ts_carry"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("checkpoint restore metadata is incomplete or invalid") from exc
+    if not 1 <= next_cell <= active_count + 1 or last_processed != next_cell - 1:
+        raise ValueError("checkpoint progress range is invalid")
+    if checkpoint_active_count != active_count or not 0 <= target_stop_index <= active_count or next_cell > target_stop_index + 1:
+        raise ValueError("checkpoint active-count or target range is invalid")
+    if processed < 0 or eligible < processed or eligible > last_processed:
+        raise ValueError("checkpoint processed-cell counts are invalid")
+    if not math.isfinite(ts_carry) or ts_carry <= 0.0:
+        raise ValueError("checkpoint ts_carry is nonfinite or nonpositive")
+    skip_counts = meta.get("skip_counts", {})
+    if not isinstance(skip_counts, dict) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in skip_counts.values()
+    ):
+        raise ValueError("checkpoint skip counts are invalid")
+    if sum(skip_counts.values()) + eligible != last_processed:
+        raise ValueError("checkpoint progress accounting is inconsistent")
+    return gindx, tfail, fdepth, meta
 
 
 def run_active_order_0_600(
@@ -1839,15 +2018,7 @@ def run_active_order_0_600(
     context = build_active_context(case_dir)
     active_count = len(context.slope_values_deg)
     stop_index = min(max_active_index or active_count, active_count)
-    config_hash = _sha256_json(
-        {
-            "case_dir": str(case_dir.resolve()),
-            "active_count": active_count,
-            "shape": context.shape,
-            "ledger_window_s": "tfail_search_to_tsimul_window_filtered",
-            "source_provenance": "production_native_unsfin_ledger_only",
-        }
-    )
+    config_hash = _active_context_fingerprint(context)
     profile_stats: dict[str, float] = {
         "eligibility_seconds": 0.0,
         "field_pack_seconds": 0.0,
@@ -1862,9 +2033,11 @@ def run_active_order_0_600(
     if resume:
         if checkpoint_dir is None:
             raise ValueError("resume=True requires checkpoint_dir")
-        gindx, tfail, fdepth, checkpoint_meta = _load_active_order_checkpoint(checkpoint_dir)
-        if gindx.shape[0] != active_count or tfail.shape[0] != active_count or fdepth.shape[0] != active_count:
-            raise ValueError("checkpoint array shape does not match active-cell count")
+        gindx, tfail, fdepth, checkpoint_meta = _load_active_order_checkpoint(
+            checkpoint_dir,
+            expected_config_hash=config_hash,
+            active_count=active_count,
+        )
         ts_carry = float(checkpoint_meta["ts_carry"])
         next_cell = int(checkpoint_meta["next_active_index"])
         processed = int(checkpoint_meta["processed_eligible_cells"])
@@ -1930,6 +2103,8 @@ def run_active_order_0_600(
                     "ledger_window_s": ledger_window_s,
                     "active_count": active_count,
                     "config_hash": config_hash,
+                    "input_fingerprint_version": ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+                    "input_inventory": list(context.input_inventory),
                     "last_processed_active_index": last_processed,
                     "next_active_index": cell + 1,
                     "ts_carry": ts_carry,
@@ -2036,6 +2211,8 @@ def run_active_order_0_600(
                 "ledger_window_s": ledger_window_s,
                 "active_count": active_count,
                 "config_hash": config_hash,
+                "input_fingerprint_version": ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+                "input_inventory": list(context.input_inventory),
                 "last_processed_active_index": last_processed,
                 "next_active_index": cell + 1,
                 "ts_carry": ts_carry,
@@ -2088,6 +2265,8 @@ def run_active_order_0_600(
         "checkpoint_dir": str(checkpoint_dir) if checkpoint_dir is not None else None,
         "checkpoint_interval": checkpoint_interval if checkpoint_dir is not None else None,
         "config_hash": config_hash,
+        "input_fingerprint_version": ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+        "input_inventory": list(context.input_inventory),
         "wall_seconds": time.perf_counter() - start_clock,
         "profile_stats": profile_stats,
         "notes": "Ledger-only active-order diagnostic; DFS runtime and production provider are untouched.",

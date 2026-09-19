@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import threading
 import pytest
 from api.services.workbench_store import WorkbenchStore, WorkbenchError
 
@@ -160,3 +161,79 @@ def test_delete_and_enqueue_are_serialized(tmp_path):
             return await asyncio.gather(deletion, enqueue)
     deleted, queued = asyncio.run(race())
     assert (deleted.status_code, queued.status_code) in {(200, 404), (409, 201)}
+
+
+def test_concurrent_previews_do_not_discard_another_project_token(project):
+    store, _root, _pid = project
+    lifecycle = store.project_lifecycle
+    first_snapshot = threading.Event()
+    release_first = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+
+    class PausedSnapshot(dict):
+        def items(self):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                call = calls
+            snapshot = list(super().items())
+            if call == 1:
+                first_snapshot.set()
+                assert release_first.wait(timeout=5)
+            return snapshot
+
+    lifecycle._previews = PausedSnapshot()
+    lifecycle.inspect = lambda project_id, mode: {
+        "project_id": project_id,
+        "name": project_id,
+        "root_path": str(Path("C:/preview") / project_id),
+        "mode": mode,
+        "scenario_count": 0,
+        "run_count": 0,
+        "staging_path": None,
+        "last_error": None,
+        "blocked_reasons": [],
+        "retry": False,
+        "identity": None,
+    }
+    previews = {}
+
+    def make_preview(project_id):
+        previews[project_id] = lifecycle.preview(project_id, "unregister")
+
+    first = threading.Thread(target=make_preview, args=("first",))
+    second = threading.Thread(target=make_preview, args=("second",))
+    first.start()
+    assert first_snapshot.wait(timeout=5)
+    second.start()
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert {preview["confirmation_token"] for preview in previews.values()} <= set(lifecycle._previews)
+
+
+def test_preview_token_is_consumed_once_under_concurrent_execute(project):
+    store, _root, pid = project
+    lifecycle = store.project_lifecycle
+    preview = lifecycle.preview(pid, "unregister")
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def consume_with_wrong_target():
+        barrier.wait(timeout=5)
+        try:
+            lifecycle.execute("different-project", "unregister", preview["confirmation_token"], "")
+        except WorkbenchError as error:
+            errors.append(error.code)
+
+    threads = [threading.Thread(target=consume_with_wrong_target) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(errors) == ["project_delete_preview_expired", "project_delete_target_mismatch"]

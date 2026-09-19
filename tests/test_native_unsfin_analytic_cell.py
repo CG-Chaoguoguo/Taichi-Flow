@@ -1,4 +1,8 @@
+import json
 import math
+
+import numpy as np
+import pytest
 
 from edda.solver.native_unsfin import analytic_cell as analytic
 from edda.solver.native_unsfin.analytic_cell import (
@@ -566,3 +570,199 @@ def test_active_order_checkpoint_resume_matches_uninterrupted_prefix(tmp_path, m
     assert direct.tfail_s[1] == resumed.tfail_s[1] == 102.0
     assert direct.tfail_s[3] == resumed.tfail_s[3] == 104.0
     assert direct_summary["ts_carry"] == resumed_summary["ts_carry"] == 75.0
+
+
+def _valid_checkpoint_meta(context, *, next_active_index=2):
+    return {
+        "active_order_mode": True,
+        "per_cell_fitted_ts": False,
+        "active_count": len(context.slope_values_deg),
+        "config_hash": analytic._active_context_fingerprint(context),
+        "input_fingerprint_version": analytic.ACTIVE_ORDER_INPUT_FINGERPRINT_VERSION,
+        "last_processed_active_index": next_active_index - 1,
+        "next_active_index": next_active_index,
+        "ts_carry": 60.0,
+        "processed_eligible_cells": 0,
+        "eligible_cells_in_evaluated_range": 0,
+        "skip_counts": {"test": next_active_index - 1},
+        "target_stop_index": next_active_index - 1,
+    }
+
+
+def _write_small_checkpoint_case(case_dir):
+    case_dir.mkdir()
+    _write_case_grids(case_dir, zones=[1, 1])
+    (case_dir / "edda_in.txt").write_text(
+        _edda_in_text(_zone_block(1, "material", 1.0e-6)),
+        encoding="utf-8",
+    )
+    (case_dir / "unsfin.F90").write_text("if (ltstar(i)>5) cycle\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "old", "new"),
+    [
+        ("edda_in.txt", "1.0e-6 2.0e-6", "1.1e-6 2.0e-6"),
+        ("Data/tutorial/slope.asc", "20 20", "21 20"),
+        ("Data/tutorial/zones.asc", "1 1", "1  1"),
+        ("Data/tutorial/glacier.asc", "3.0 3.0", "3.1 3.0"),
+        ("unsfin.F90", ">5", ">6"),
+    ],
+)
+def test_active_order_checkpoint_rejects_changed_input_snapshot(tmp_path, relative_path, old, new):
+    case_dir = tmp_path / "case"
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_small_checkpoint_case(case_dir)
+    original = analytic.build_active_context(case_dir)
+    count = len(original.slope_values_deg)
+    analytic._write_active_order_checkpoint(
+        checkpoint_dir,
+        gindx=np.zeros(count, dtype=np.int32),
+        tfail=np.full(count, np.nan),
+        fdepth=np.zeros(count),
+        meta=_valid_checkpoint_meta(original),
+        candidates=[],
+        profile_stats={},
+    )
+    changed_path = case_dir / relative_path
+    changed_path.write_text(changed_path.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
+    changed = analytic.build_active_context(case_dir)
+
+    assert changed.input_fingerprint != original.input_fingerprint
+    with pytest.raises(ValueError, match="input fingerprint does not match"):
+        analytic._load_active_order_checkpoint(
+            checkpoint_dir,
+            expected_config_hash=changed.input_fingerprint,
+            active_count=count,
+        )
+
+
+def test_active_order_checkpoint_rejects_source_presence_change(tmp_path):
+    case_dir = tmp_path / "case"
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_small_checkpoint_case(case_dir)
+    original = analytic.build_active_context(case_dir)
+    count = len(original.slope_values_deg)
+    analytic._write_active_order_checkpoint(
+        checkpoint_dir,
+        gindx=np.zeros(count, dtype=np.int32),
+        tfail=np.full(count, np.nan),
+        fdepth=np.zeros(count),
+        meta=_valid_checkpoint_meta(original),
+        candidates=[],
+        profile_stats={},
+    )
+    (case_dir / "unsfin.F90").unlink()
+    changed = analytic.build_active_context(case_dir)
+
+    with pytest.raises(ValueError, match="input fingerprint does not match"):
+        analytic._load_active_order_checkpoint(
+            checkpoint_dir,
+            expected_config_hash=changed.input_fingerprint,
+            active_count=count,
+        )
+
+
+def test_active_order_checkpoint_ignores_stale_legacy_temporaries(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    np.savez_compressed(
+        checkpoint_dir / "active_order_checkpoint.npz.tmp",
+        gindx=np.asarray([1], dtype=np.int32),
+        tfail_s=np.asarray([10.0]),
+        fdepth_m=np.asarray([1.0]),
+    )
+    (checkpoint_dir / "active_order_checkpoint.npz.tmp").write_bytes(b"stale")
+    (checkpoint_dir / "active_order_checkpoint.npz.tmp.npz").write_bytes(b"stale generated archive")
+    context = ActiveContext({}, [10.0], [1.0], [3.0], [(1, 1)], (1, 1))
+    fingerprint = analytic._active_context_fingerprint(context)
+    meta = _valid_checkpoint_meta(context)
+    analytic._write_active_order_checkpoint(
+        checkpoint_dir,
+        gindx=np.asarray([2], dtype=np.int32),
+        tfail=np.asarray([20.0]),
+        fdepth=np.asarray([2.0]),
+        meta=meta,
+        candidates=[],
+        profile_stats={"marker": 2.0},
+    )
+
+    gindx, tfail, fdepth, restored = analytic._load_active_order_checkpoint(
+        checkpoint_dir,
+        expected_config_hash=fingerprint,
+        active_count=1,
+    )
+    assert (gindx.tolist(), tfail.tolist(), fdepth.tolist()) == ([2], [20.0], [2.0])
+    assert restored["checkpoint_format"] == analytic.ACTIVE_ORDER_CHECKPOINT_FORMAT
+    with np.load(checkpoint_dir / "active_order_checkpoint.npz", allow_pickle=False) as archive:
+        embedded = json.loads(str(archive["checkpoint_meta_json"].item()))
+    assert embedded["checkpoint_id"] == restored["checkpoint_id"]
+
+
+def test_active_order_checkpoint_rejects_legacy_and_invalid_restore_metadata(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    np.savez_compressed(
+        checkpoint_dir / "active_order_checkpoint.npz",
+        gindx=np.asarray([0], dtype=np.int32),
+        tfail_s=np.asarray([np.nan]),
+        fdepth_m=np.asarray([0.0]),
+    )
+    with pytest.raises(ValueError, match="legacy active-order checkpoint"):
+        analytic._load_active_order_checkpoint(checkpoint_dir, expected_config_hash="x", active_count=1)
+
+    context = ActiveContext({}, [10.0], [1.0], [3.0], [(1, 1)], (1, 1))
+    meta = _valid_checkpoint_meta(context)
+    meta["ts_carry"] = float("nan")
+    analytic._write_active_order_checkpoint(
+        checkpoint_dir,
+        gindx=np.asarray([0], dtype=np.int32),
+        tfail=np.asarray([np.nan]),
+        fdepth=np.asarray([0.0]),
+        meta=meta,
+        candidates=[],
+        profile_stats={},
+    )
+    with pytest.raises(ValueError, match="ts_carry"):
+        analytic._load_active_order_checkpoint(
+            checkpoint_dir,
+            expected_config_hash=meta["config_hash"],
+            active_count=1,
+        )
+
+
+def test_active_order_checkpoint_failed_publish_preserves_previous_archive(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "checkpoint"
+    context = ActiveContext({}, [10.0], [1.0], [3.0], [(1, 1)], (1, 1))
+    meta = _valid_checkpoint_meta(context)
+    analytic._write_active_order_checkpoint(
+        checkpoint_dir,
+        gindx=np.asarray([1], dtype=np.int32),
+        tfail=np.asarray([10.0]),
+        fdepth=np.asarray([1.0]),
+        meta=meta,
+        candidates=[],
+        profile_stats={},
+    )
+    original_archive = (checkpoint_dir / "active_order_checkpoint.npz").read_bytes()
+    original_replace = analytic.Path.replace
+
+    def fail_archive_publish(path, target):
+        if target == checkpoint_dir / "active_order_checkpoint.npz":
+            raise OSError("simulated publish interruption")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(analytic.Path, "replace", fail_archive_publish)
+    with pytest.raises(OSError, match="publish interruption"):
+        analytic._write_active_order_checkpoint(
+            checkpoint_dir,
+            gindx=np.asarray([2], dtype=np.int32),
+            tfail=np.asarray([20.0]),
+            fdepth=np.asarray([2.0]),
+            meta=meta,
+            candidates=[],
+            profile_stats={},
+        )
+
+    assert (checkpoint_dir / "active_order_checkpoint.npz").read_bytes() == original_archive
+    assert not list(checkpoint_dir.glob(".active_order_checkpoint.*.tmp"))

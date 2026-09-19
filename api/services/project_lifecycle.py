@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import stat
 import time
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ class ProjectLifecycle:
     def __init__(self, store):
         self.store = store
         self._previews: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._preview_lock = Lock()
         self.active_projects = lambda: set()
         with store.catalog() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS project_deletions (
@@ -146,13 +148,15 @@ class ProjectLifecycle:
             self.fail("project_delete_mode", "无效的项目操作。")
         result = self.inspect(project_id, mode)
         now = time.monotonic()
-        self._previews = {key: item for key, item in self._previews.items() if item[0] > now}
         token = secrets.token_urlsafe(32)
-        self._previews[token] = (now + 600, result.copy())
+        with self._preview_lock:
+            self._previews = {key: item for key, item in self._previews.items() if item[0] > now}
+            self._previews[token] = (now + 600, result.copy())
         return {**result, "confirmation_token": token, "allowed": not result["blocked_reasons"]}
 
     def execute(self, project_id: str, mode: str, token: str, confirmed_name: str):
-        item = self._previews.pop(token, None)
+        with self._preview_lock:
+            item = self._previews.pop(token, None)
         if not item or item[0] < time.monotonic():
             self.fail("project_delete_preview_expired", "确认已过期，请重新预览。")
         expected = item[1]
