@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from itertools import count
 from pathlib import Path
 from time import monotonic, sleep
+from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_app
+from api.services import workbench_store
 from tests.test_workbench_domain_api import _create_project, _create_ready_scenario
 from tests.test_workbench_scheduler import BlockingRunExecutor
 
@@ -19,7 +23,16 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
     raise AssertionError("condition did not become true before timeout")
 
 
-def test_stop_active_run_then_retry_creates_a_new_queue_item(tmp_path: Path) -> None:
+@pytest.mark.parametrize("uuid_step", [1, -1])
+def test_stop_active_run_then_retry_creates_a_new_queue_item(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    uuid_step: int,
+) -> None:
+    uuid_values = count(1 if uuid_step > 0 else (2**128 - 1), uuid_step)
+    monkeypatch.setattr(workbench_store, "uuid4", lambda: UUID(int=next(uuid_values)))
+    monkeypatch.setattr(workbench_store, "utc_now", lambda: "2026-09-19T00:00:00+00:00")
+
     executor = BlockingRunExecutor()
     app = create_app(
         state_dir=tmp_path / "state",
@@ -35,26 +48,45 @@ def test_stop_active_run_then_retry_creates_a_new_queue_item(tmp_path: Path) -> 
             f"/api/projects/{project['project_id']}/queue",
             json={"scenario_id": scenario["scenario_id"]},
         ).json()
-        _wait_for(lambda: client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]["status"] == "running")
+        _wait_for(
+            lambda: next(
+                item
+                for item in client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
+                if item["queue_item_id"] == queued["queue_item_id"]
+            )["status"]
+            == "running"
+        )
         simulation = client.get(f"/api/projects/{project['project_id']}/simulations").json()["simulations"][0]
 
         stopped = client.post(f"/api/simulations/{simulation['simulation_id']}/stop")
         assert stopped.status_code == 200
-        _wait_for(lambda: client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]["status"] == "stopped")
+        _wait_for(
+            lambda: next(
+                item
+                for item in client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
+                if item["queue_item_id"] == queued["queue_item_id"]
+            )["status"]
+            == "stopped"
+        )
 
         retry = client.post(
             f"/api/projects/{project['project_id']}/queue/{queued['queue_item_id']}/retry"
         )
         assert retry.status_code == 201
+        retried = retry.json()
+        assert retried["queue_item_id"] != queued["queue_item_id"]
         executor.release.set()
         _wait_for(
-            lambda: all(
-                item["status"] == "completed"
+            lambda: next(
+                item
                 for item in client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
-                if item["queue_item_id"] != queued["queue_item_id"]
-            )
+                if item["queue_item_id"] == retried["queue_item_id"]
+            )["status"]
+            == "completed"
         )
         items = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"]
         assert len(items) == 2
-        assert items[0]["queue_item_id"] == queued["queue_item_id"]
-        assert items[1]["retry_of"] == queued["queue_item_id"]
+        items_by_id = {item["queue_item_id"]: item for item in items}
+        assert items_by_id[queued["queue_item_id"]]["status"] == "stopped"
+        assert items_by_id[retried["queue_item_id"]]["status"] == "completed"
+        assert items_by_id[retried["queue_item_id"]]["retry_of"] == queued["queue_item_id"]
