@@ -5454,14 +5454,29 @@ class WorkbenchStore:
             connection.execute(f"UPDATE simulation_runs SET {assignments} WHERE simulation_id=?", params)
             status = normalized_values.get("status")
             if status in {"running", "starting", "stopping"}:
+                queue_assignments = ["status=?", "summary=?"]
+                queue_params: list[Any] = [
+                    status,
+                    "正在模拟中" if status == "running" else "正在停止" if status == "stopping" else "准备运行",
+                ]
+                if "progress" in normalized_values:
+                    queue_assignments.append("progress=?")
+                    queue_params.append(float(normalized_values["progress"] or 0))
+                queue_params.append(simulation_id)
                 connection.execute(
-                    "UPDATE queue_items SET status=?, progress=?, summary=? WHERE simulation_id=?",
-                    (
-                        status,
-                        float(normalized_values.get("progress") or 0),
-                        "正在模拟中" if status == "running" else "准备运行",
-                        simulation_id,
-                    ),
+                    f"UPDATE queue_items SET {', '.join(queue_assignments)} "
+                    "WHERE simulation_id=? AND deleted_at IS NULL "
+                    "AND status IN ('queued', 'starting', 'running', 'stopping')",
+                    queue_params,
+                )
+            elif "progress" in normalized_values:
+                connection.execute(
+                    """
+                    UPDATE queue_items SET progress=?
+                    WHERE simulation_id=? AND deleted_at IS NULL
+                      AND status IN ('starting', 'running', 'stopping')
+                    """,
+                    (float(normalized_values["progress"] or 0), simulation_id),
                 )
 
     def erosion_probe_suggestions(

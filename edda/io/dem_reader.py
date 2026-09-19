@@ -279,10 +279,20 @@ def read_ascii_grid(ascii_file: str) -> Tuple[np.ndarray, Dict[str, Any]]:
     # Extract key parameters
     ncols = int(metadata.get('ncols', 0))
     nrows = int(metadata.get('nrows', 0))
-    xllcorner = metadata.get('xllcorner', 0.0)
-    yllcorner = metadata.get('yllcorner', 0.0)
     cellsize = metadata.get('cellsize', 1.0)
     nodata = metadata.get('nodata_value', -9999.0)
+    if 'xllcorner' in metadata:
+        xllcorner = float(metadata['xllcorner'])
+    elif 'xllcenter' in metadata:
+        xllcorner = float(metadata['xllcenter']) - float(cellsize) / 2.0
+    else:
+        raise ValueError("ASCII grid header must define xllcorner or xllcenter")
+    if 'yllcorner' in metadata:
+        yllcorner = float(metadata['yllcorner'])
+    elif 'yllcenter' in metadata:
+        yllcorner = float(metadata['yllcenter']) - float(cellsize) / 2.0
+    else:
+        raise ValueError("ASCII grid header must define yllcorner or yllcenter")
 
     # ESRI ASCII stores its origin at the lower-left corner, whereas the
     # rasterio affine transform is anchored at the upper-left corner. Keep
@@ -300,6 +310,10 @@ def read_ascii_grid(ascii_file: str) -> Tuple[np.ndarray, Dict[str, Any]]:
 
     metadata['width'] = ncols
     metadata['height'] = nrows
+    # Normalize center-origin headers for every downstream consumer while
+    # retaining the original center keys above for provenance.
+    metadata['xllcorner'] = xllcorner
+    metadata['yllcorner'] = yllcorner
     metadata['dx'] = cellsize
     metadata['dy'] = cellsize
     metadata['nodata'] = nodata

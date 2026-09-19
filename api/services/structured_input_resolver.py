@@ -22,6 +22,12 @@ from edda.io.spatial_input_loader import SpatialInputLoader, fill_raster_nodata
 
 RASTER_SOURCES = {"raster", "rifil", "rifil_grid", "raster_rifil"}
 UNIFORM_SOURCES = {"uniform", "uniform_cri"}
+PRECOMPUTED_UNSFIN_BINDINGS = (
+    "precomputed_unsfin.gindx",
+    "precomputed_unsfin.tfail_s",
+    "precomputed_unsfin.fdepth_m",
+    "precomputed_unsfin.meta",
+)
 
 
 def _rainfall_is_active(parameters: Dict[str, Any]) -> bool:
@@ -218,6 +224,108 @@ def validate_scenario_configuration(
     manning_source = str(parameters.get("manning.source") or "global").lower()
     if manning_source in {"raster", "raster_manningfil", "spatial"} and "manning.raster" not in by_key:
         add_error("manning_binding_missing", "空间曼宁模式需要活动的 manning.raster 绑定。", parameter_key="manning.source", binding_key="manning.raster")
+
+    if parameters.get("edda.run_controls.simulate_outflow_cell") is True:
+        outflow = next(
+            (
+                item
+                for item in bindings
+                if str(item.get("binding_key") or "") == "outflow.primary"
+                or str(item.get("family") or "").lower() in {"outflow", "outflow.txt"}
+            ),
+            None,
+        )
+        if outflow is None:
+            add_error(
+                "outflow_binding_missing",
+                "已启用出流格点观测，但缺少活动的 outflow.txt 输入绑定。",
+                parameter_key="edda.run_controls.simulate_outflow_cell",
+                binding_key="outflow.primary",
+            )
+        else:
+            outflow_path = Path(str(outflow.get("blob_path") or ""))
+            if not outflow_path.is_file():
+                add_error(
+                    "outflow_binding_invalid",
+                    "出流格点输入内容不可用，请重新绑定 outflow.txt。",
+                    parameter_key="edda.run_controls.simulate_outflow_cell",
+                    binding_key=str(outflow.get("binding_key") or "outflow.primary"),
+                )
+            else:
+                try:
+                    from api.services.native_sidecar_loader import parse_cell_list_sidecar
+
+                    dem_path = Path(str((by_key.get("dem.primary") or {}).get("blob_path") or ""))
+                    summary = parse_cell_list_sidecar(
+                        outflow_path,
+                        family="outflow.txt",
+                        dem_file=dem_path if dem_path.is_file() else None,
+                    )
+                    if (
+                        summary.get("parse_status") != "ok"
+                        or int(summary.get("declared_cell_count") or 0) <= 0
+                        or int(summary.get("parsed_cell_count") or 0)
+                        != int(summary.get("declared_cell_count") or 0)
+                        or summary.get("missing_cell_ids")
+                    ):
+                        raise ValueError("outflow.txt does not contain a complete, mapped cell list")
+                except Exception as exc:
+                    add_error(
+                        "outflow_binding_invalid",
+                        f"outflow.txt 未通过格点清单校验：{exc}",
+                        parameter_key="edda.run_controls.simulate_outflow_cell",
+                        binding_key=str(outflow.get("binding_key") or "outflow.primary"),
+                    )
+
+    precomputed_enabled = (
+        parameters.get("edda.run_controls.simulate_shallow_landslide") is True
+        and str(parameters.get("hydrology.dfs_failure_source_variant") or "")
+        == "precomputed_unsfin_schedule"
+    )
+    if precomputed_enabled:
+        artifact_paths: Dict[str, Path] = {}
+        artifacts_ready = True
+        for binding_key in PRECOMPUTED_UNSFIN_BINDINGS:
+            binding = by_key.get(binding_key)
+            if binding is None:
+                artifacts_ready = False
+                add_error(
+                    "precomputed_unsfin_binding_missing",
+                    f"预计算滑坡源缺少冻结输入：{binding_key}。",
+                    parameter_key="hydrology.dfs_failure_source_variant",
+                    binding_key=binding_key,
+                )
+                continue
+            artifact_path = Path(str(binding.get("blob_path") or ""))
+            if not artifact_path.is_file():
+                artifacts_ready = False
+                add_error(
+                    "precomputed_unsfin_binding_invalid",
+                    f"预计算滑坡源输入内容不可用：{binding_key}。",
+                    parameter_key="hydrology.dfs_failure_source_variant",
+                    binding_key=binding_key,
+                )
+            else:
+                artifact_paths[binding_key.split(".", 1)[1]] = artifact_path
+        if artifacts_ready:
+            try:
+                from api.services.native_sidecar_loader import load_precomputed_unsfin_schedule
+
+                dem_path = Path(str((by_key.get("dem.primary") or {}).get("blob_path") or ""))
+                schedule = load_precomputed_unsfin_schedule(
+                    artifact_paths["meta"].parent,
+                    dem_file=dem_path if dem_path.is_file() else None,
+                    artifact_paths=artifact_paths,
+                )
+                if not schedule.get("runtime_arrays"):
+                    raise ValueError(str(schedule.get("parse_status") or "invalid_schedule"))
+            except Exception as exc:
+                add_error(
+                    "precomputed_unsfin_binding_invalid",
+                    f"预计算滑坡源输入未通过格式或网格校验：{exc}",
+                    parameter_key="hydrology.dfs_failure_source_variant",
+                    binding_key="precomputed_unsfin.meta",
+                )
 
     semantic_gate: Dict[str, Any]
     try:

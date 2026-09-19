@@ -13,6 +13,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "portabl
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $python = Join-Path $Root ".runtime\portable\python\python.exe"
 $helper = Join-Path $Root "scripts\portable\relocate_paths.py"
+$lockVerifier = Join-Path $Root "scripts\portable\verify_runtime_lock.py"
+$runtimeLock = Join-Path $Root "scripts\portable\portable-runtime.lock.txt"
 $verifyReport = Join-Path $Root ".runtime\portable\verify-report.json"
 $smokeReport = $null
 
@@ -49,6 +51,16 @@ foreach ($file in @($manifest.files)) {
 Write-Host "[verify] checking private Python imports"
 $probe = Invoke-PortablePython @("-c", "import sys,fastapi,uvicorn,taichi,rasterio,geopandas,shapely,psutil,dotenv; print(sys.version.split()[0]); print(taichi.__version__); print(geopandas.__version__); print(shapely.__version__); print(psutil.__version__)")
 if ($LASTEXITCODE -ne 0) { throw "Private Python import verification failed: $($probe -join [Environment]::NewLine)" }
+
+Write-Host "[verify] checking private Python dependency lock"
+$lockOutput = Invoke-PortablePython @($lockVerifier, "--lock", $runtimeLock)
+$lockExit = $LASTEXITCODE
+$lockLine = $lockOutput | Where-Object { [string]$_ -like "TAICHI_FLOW_RUNTIME_LOCK=*" } | Select-Object -Last 1
+if ($null -eq $lockLine) { throw "Runtime lock verification returned no structured report: $($lockOutput -join [Environment]::NewLine)" }
+$lockReport = ([string]$lockLine).Substring("TAICHI_FLOW_RUNTIME_LOCK=".Length) | ConvertFrom-Json
+if ($lockExit -ne 0 -or -not [bool]$lockReport.valid) {
+    throw "Private Python does not match portable-runtime.lock.txt: $($lockReport.errors -join '; ')"
+}
 
 Write-Host "[verify] checking and (when needed) relocating SQLite paths"
 # Verification is also the supported post-copy entry point.  Let the
@@ -146,6 +158,7 @@ $report = [ordered]@{
     }
     project_counts = $counts
     relocation = $relocationReport
+    runtime_lock = $lockReport
     node_required = $false
     system_python_required = $false
 }

@@ -59,6 +59,7 @@ foreach ($required in @(
     (Join-Path $frontendRoot "desktop\main.cjs"),
     (Join-Path $frontendRoot "node_modules\electron\dist\electron.exe"),
     (Join-Path $portableScriptRoot "relocate_paths.py"),
+    (Join-Path $portableScriptRoot "verify_runtime_lock.py"),
     $portableRuntimeLock
 )) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Portable build prerequisite is missing: $required" }
@@ -117,7 +118,7 @@ Copy-Item -LiteralPath (Join-Path $frontendRoot "package.json") -Destination (Jo
 
 $outputScripts = Join-Path $OutputRoot "scripts"
 New-Item -ItemType Directory -Path (Join-Path $outputScripts "portable"), (Join-Path $outputScripts "desktop-dev") -Force | Out-Null
-foreach ($scriptName in @("Start-Taichi-Flow-Portable.ps1", "Stop-Taichi-Flow-Portable.ps1", "Verify-Taichi-Flow-Portable.ps1", "relocate_paths.py", "register_project.py", "portable-runtime.lock.txt")) {
+foreach ($scriptName in @("Start-Taichi-Flow-Portable.ps1", "Stop-Taichi-Flow-Portable.ps1", "Verify-Taichi-Flow-Portable.ps1", "relocate_paths.py", "register_project.py", "verify_runtime_lock.py", "portable-runtime.lock.txt")) {
     Copy-Item -LiteralPath (Join-Path $portableScriptRoot $scriptName) -Destination (Join-Path $outputScripts "portable\$scriptName") -Force
 }
 Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\desktop-dev\TaichiFlow.DesktopDev.psm1") -Destination (Join-Path $outputScripts "desktop-dev\TaichiFlow.DesktopDev.psm1") -Force
@@ -206,6 +207,24 @@ $probeOutput = @(& $portablePython -c $probeCode 2>&1)
 if ($LASTEXITCODE -ne 0) { throw "Portable Python import probe failed: $($probeOutput -join [Environment]::NewLine)" }
 Write-Host "[portable] Python probe passed: $($probeOutput -join ' ')"
 
+$lockVerifier = Join-Path $OutputRoot "scripts\portable\verify_runtime_lock.py"
+$packagedRuntimeLock = Join-Path $OutputRoot "scripts\portable\portable-runtime.lock.txt"
+$lockOutput = @(& $portablePython $lockVerifier --lock $packagedRuntimeLock 2>&1)
+$lockExit = $LASTEXITCODE
+$lockLine = $lockOutput | Where-Object { [string]$_ -like "TAICHI_FLOW_RUNTIME_LOCK=*" } | Select-Object -Last 1
+if ($null -eq $lockLine) {
+    throw "Portable runtime lock verification returned no structured report: $($lockOutput -join [Environment]::NewLine)"
+}
+$lockReport = ([string]$lockLine).Substring("TAICHI_FLOW_RUNTIME_LOCK=".Length) | ConvertFrom-Json
+if ($lockExit -ne 0 -or -not [bool]$lockReport.valid) {
+    throw "Portable runtime does not match portable-runtime.lock.txt: $($lockReport.errors -join '; ')"
+}
+$runtimeVersions = [ordered]@{}
+foreach ($entry in @($lockReport.entries)) {
+    $runtimeVersions[[string]$entry.name] = [string](@($entry.actual) | Select-Object -First 1)
+}
+Write-Host "[portable] dependency lock passed for $($runtimeVersions.Count) runtime entries"
+
 $projectDestination = Join-Path $OutputRoot $projectRelative
 New-Item -ItemType Directory -Path (Split-Path -Parent $projectDestination) -Force | Out-Null
 Write-Host "[portable] copying compact demonstration project"
@@ -233,7 +252,7 @@ $manifest = [ordered]@{
     architecture = "x64"
     source_revision = $sourceRevision
     checkout_id = $checkoutId
-    runtime = [ordered]@{ python = $pythonVersion; taichi = "1.7.4"; electron = $electronVersion; electron_executable = "electron.exe"; node_required = $false; dependency_lock = "scripts\portable\portable-runtime.lock.txt" }
+    runtime = [ordered]@{ python = $runtimeVersions["python"]; taichi = $runtimeVersions["taichi"]; electron = $electronVersion; electron_executable = "electron.exe"; node_required = $false; dependency_lock = "scripts\portable\portable-runtime.lock.txt"; dependencies = $runtimeVersions }
     project = [ordered]@{
         name = "Chamoli 90-second compact demo"
         relative_path = $projectRelative
@@ -271,6 +290,7 @@ $keyFiles = @(
     "Start-Taichi-Flow.cmd", "Stop-Taichi-Flow.cmd", "Verify-Taichi-Flow.cmd",
     "scripts\portable\Start-Taichi-Flow-Portable.ps1", "scripts\portable\Stop-Taichi-Flow-Portable.ps1",
     "scripts\portable\Verify-Taichi-Flow-Portable.ps1", "scripts\portable\relocate_paths.py",
+    "scripts\portable\verify_runtime_lock.py",
     "scripts\portable\portable-runtime.lock.txt",
     "api\app.py", "app\dist\index.html", "app\desktop\main.cjs", ".runtime\portable\python\python.exe",
     ".runtime\portable\electron\electron.exe", ".runtime\portable\electron\Taichi-Flow.exe"
@@ -290,6 +310,7 @@ Copy-Item -LiteralPath (Join-Path $portableScriptRoot "Stop-Taichi-Flow-Portable
 Copy-Item -LiteralPath (Join-Path $portableScriptRoot "Verify-Taichi-Flow-Portable.ps1") -Destination (Join-Path $OutputRoot "scripts\portable\Verify-Taichi-Flow-Portable.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $portableScriptRoot "relocate_paths.py") -Destination (Join-Path $OutputRoot "scripts\portable\relocate_paths.py") -Force
 Copy-Item -LiteralPath (Join-Path $portableScriptRoot "register_project.py") -Destination (Join-Path $OutputRoot "scripts\portable\register_project.py") -Force
+Copy-Item -LiteralPath (Join-Path $portableScriptRoot "verify_runtime_lock.py") -Destination (Join-Path $OutputRoot "scripts\portable\verify_runtime_lock.py") -Force
 
 $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
@@ -298,6 +319,7 @@ $report = [ordered]@{
     build_id = $buildId
     output_root = $OutputRoot
     python_probe = ($probeOutput -join " ")
+    runtime_lock = $lockReport
     relocation = $relocationReport
     project = $registeredProject
     generated_at = [DateTime]::UtcNow.ToString("o")

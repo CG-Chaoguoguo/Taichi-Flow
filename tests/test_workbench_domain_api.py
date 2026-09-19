@@ -33,20 +33,63 @@ def _create_ready_scenario(client: TestClient, project: dict, name: str) -> dict
         files={
             "file": (
                 f"{name}.asc",
-                b"ncols 1\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1\n",
+                b"ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1 1\n1 1\n",
                 "text/plain",
             )
         },
     )
     assert dem.status_code == 201
+    grid_header = b"ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n"
+    supporting_assets: list[tuple[str, dict]] = []
+    for binding_key, family, filename, content in (
+        ("outflow.primary", "outflow", "outflow.txt", b"outflow cells\n1\n1\n"),
+        ("precomputed_unsfin.gindx", "precomputed_unsfin", "precomputed_unsfin_gindx.txt", grid_header + b"1 0\n0 0\n"),
+        ("precomputed_unsfin.tfail_s", "precomputed_unsfin", "precomputed_unsfin_tfail.txt", grid_header + b"0 9999\n9999 9999\n"),
+        ("precomputed_unsfin.fdepth_m", "precomputed_unsfin", "precomputed_unsfin_fdepth.txt", grid_header + b"0.1 0\n0 0\n"),
+        (
+            "precomputed_unsfin.meta",
+            "precomputed_unsfin",
+            "precomputed_unsfin_meta.json",
+            b'{"provider":"production_native_unsfin","source_provenance":"production_native_unsfin","shape_kind":"ascii_grid"}\n',
+        ),
+    ):
+        uploaded = client.post(
+            f"/api/projects/{project['project_id']}/uploads/{family}",
+            files={"file": (filename, content, "text/plain")},
+        )
+        assert uploaded.status_code == 201
+        supporting_assets.append((binding_key, uploaded.json()))
     revision = client.post(
         f"/api/projects/{project['project_id']}/input-revisions",
-        json={"upload_ids": [dem.json()["upload_id"]]},
+        json={
+            "bindings": [
+                {
+                    "binding_key": "dem.primary",
+                    "asset_id": dem.json()["upload_id"],
+                    "family": "dem",
+                    "role": "primary",
+                    "ordinal": 1,
+                },
+                *[
+                    {
+                        "binding_key": binding_key,
+                        "asset_id": asset["upload_id"],
+                        "family": asset["family"],
+                        "role": "outflow" if binding_key == "outflow.primary" else "precomputed-unsfin",
+                        "ordinal": index,
+                    }
+                    for index, (binding_key, asset) in enumerate(supporting_assets, start=1)
+                ],
+            ],
+        },
     )
     assert revision.status_code == 201
     scenario = client.post(
         f"/api/projects/{project['project_id']}/scenarios",
-        json={"name": name, "input_revision_id": revision.json()["revision_id"]},
+        json={
+            "name": name,
+            "input_revision_id": revision.json()["revision_id"],
+        },
     )
     assert scenario.status_code == 201
     return scenario.json()
@@ -238,6 +281,40 @@ def test_queue_order_cancel_retry_and_restart_persistence(tmp_path: Path) -> Non
         assert [item["position"] for item in persisted if item["status"] == "queued"] == [1, 2]
 
 
+def test_queue_rejects_enabled_outflow_before_creating_a_run(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "outflow-preflight-project")
+        dem = client.post(
+            f"/api/projects/{project['project_id']}/uploads/dem",
+            files={"file": ("dem.asc", b"ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1 1\n1 1\n", "text/plain")},
+        )
+        assert dem.status_code == 201
+        revision = client.post(
+            f"/api/projects/{project['project_id']}/input-revisions",
+            json={"upload_ids": [dem.json()["upload_id"]]},
+        )
+        assert revision.status_code == 201
+        created = client.post(
+            f"/api/projects/{project['project_id']}/scenarios",
+            json={"name": "Missing outflow", "input_revision_id": revision.json()["revision_id"]},
+        )
+        assert created.status_code == 201
+        scenario = created.json()
+        assert scenario["effective_parameters"]["edda.run_controls.simulate_outflow_cell"] is True
+
+        rejected = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+
+        assert rejected.status_code == 422
+        assert rejected.json()["code"] == "scenario_configuration_invalid"
+        details = rejected.json()["details"]
+        assert "outflow_binding_missing" in {issue["code"] for issue in details["issues"]}
+        queue = client.get(f"/api/projects/{project['project_id']}/queue").json()
+        assert queue["items"] == []
+
+
 def test_queue_freezes_policy_and_retry_reuses_original_snapshot(tmp_path: Path) -> None:
     with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
         project = _create_project(client, tmp_path / "freeze-project")
@@ -388,7 +465,7 @@ def test_queue_rejects_invalid_erosion_probe_payload_and_freezes_valid_options(t
             queue_url,
             json={
                 "scenario_id": scenario["scenario_id"],
-                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[1, 0]]}},
+                "diagnostics": {"erosion_probe": {"enabled": True, "probe_cells": [[2, 0]]}},
             },
         )
         assert outside.status_code == 422

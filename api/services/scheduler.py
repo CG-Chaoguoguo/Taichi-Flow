@@ -21,6 +21,7 @@ from api.services.runtime_session import (
     RuntimeSession,
     prepare_runtime_from_payload,
 )
+from api.services.runtime_profile import resolve_runtime_profile
 from api.services.workbench_store import WorkbenchError, WorkbenchStore
 
 
@@ -197,7 +198,20 @@ class RuntimeRunExecutor:
         # Taichi is process-global.  BackendManager rejects a second init with
         # different precision/thread/memory arguments, so admission must use
         # the same init contract rather than only the user-facing profile.
-        effective = context.get("effective_config") or {}
+        effective = context.get("effective_config")
+        if effective is None:
+            raw_effective = context.get("effective_config_json")
+            if raw_effective in (None, ""):
+                effective = {}
+            elif isinstance(raw_effective, str):
+                try:
+                    effective = json.loads(raw_effective)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("Queue item contains an invalid frozen effective-config snapshot") from exc
+            else:
+                raise ValueError("Queue item frozen effective-config snapshot must be JSON text")
+        if not isinstance(effective, dict):
+            raise ValueError("Queue item frozen effective-config snapshot must decode to an object")
         compute = effective.get("compute") if isinstance(effective, dict) else None
         if not isinstance(compute, dict):
             compute = {}
@@ -206,13 +220,17 @@ class RuntimeRunExecutor:
             return compute.get(name, effective.get(f"compute.{name}", default)) if isinstance(effective, dict) else default
 
         profile = str(context.get("runtime_profile") or "cuda_production_default")
-        backend = str(value("backend") or ("cpu" if profile == "compat_default_off" else "cuda")).lower()
+        runtime_profile = resolve_runtime_profile(profile)
+        backend = str(value("backend") or runtime_profile.default_backend).lower()
+        if backend not in {"auto", "cuda", "cpu", "vulkan", "opengl", "metal"}:
+            backend = "auto"
         contract = {
             "profile": profile,
             "backend": backend,
             "use_double_precision": bool(value("use_double_precision", False)),
             "num_threads": value("num_threads"),
-            "device_memory_GB": value("device_memory_GB", 8.0 if backend in {"cuda", "auto"} else 1.0),
+            # EDDASolver.initialize fixes this value from the requested backend.
+            "device_memory_GB": 8.0 if backend in {"cuda", "auto"} else 1.0,
         }
         return json.dumps(contract, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -424,7 +442,14 @@ class SimulationCoordinator:
             project_id = str(candidate["project_id"])
             if project_id in self._active:
                 continue
-            signature = str(self.executor.signature(candidate))
+            try:
+                signature = str(self.executor.signature(candidate))
+            except (TypeError, ValueError):
+                logger.exception(
+                    "Queue item %s has an invalid runtime compatibility snapshot; refusing dispatch.",
+                    candidate.get("queue_item_id"),
+                )
+                continue
             if active_signatures and signature not in active_signatures:
                 continue
             try:

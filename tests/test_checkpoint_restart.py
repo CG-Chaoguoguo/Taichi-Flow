@@ -186,8 +186,14 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     expected_v_pred = solver_a.shallow_water.v_pred.to_numpy().copy()
     expected_v_prev = solver_a.shallow_water.v_prev.to_numpy().copy()
     expected_rikzero = solver_a.dfs_dynamic_wave.initial_rikzero_field.copy()
+    expected_rhodepo = solver_a.fields.rhodepo.to_numpy().copy()
 
     solver_a.save_state(str(checkpoint))
+    # Simulate the field key emitted before rhodepo became a persistent field.
+    with np.load(checkpoint, allow_pickle=False) as payload:
+        legacy_payload = {key: payload[key] for key in payload.files if key != "fields__rhodepo"}
+        legacy_payload["fields__rhodepo_temp"] = payload["fields__rhodepo"]
+    np.savez_compressed(checkpoint, **legacy_payload)
 
     config_b = _build_config(dem_file, output_b)
     solver_b = EDDASolver(config_b)
@@ -205,6 +211,7 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     np.testing.assert_allclose(solver_b.shallow_water.v_prev.to_numpy(), expected_v_prev)
     np.testing.assert_allclose(solver_b.shallow_water.manning.to_numpy(), expected_manning)
     np.testing.assert_allclose(solver_b.dfs_dynamic_wave.initial_rikzero_field, expected_rikzero)
+    np.testing.assert_allclose(solver_b.fields.rhodepo.to_numpy(), expected_rhodepo)
     assert solver_b.time_stepper.t_current == 4.0
     assert solver_b.time_stepper.dt_current == 0.25
     assert solver_b.fortran_tempdt == 0.75
@@ -227,6 +234,20 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
             "relative_paths": ["Flow_depth_Taichi_4.0.txt"],
         },
     ]
+
+
+def test_checkpoint_rejects_conflicting_legacy_and_current_deposition_fields() -> None:
+    checkpoint = {
+        "fields__rhodepo": np.asarray([[1.0, 2.0]]),
+        "fields__rhodepo_temp": np.asarray([[1.0, 3.0]]),
+    }
+
+    try:
+        EDDASolver._validate_checkpoint_field_aliases(checkpoint)
+    except ValueError as exc:
+        assert "conflicting fields__rhodepo" in str(exc)
+    else:
+        raise AssertionError("conflicting renamed checkpoint fields must be rejected")
 
 
 def test_checkpoint_keeps_pre_restart_sidecars_after_next_write(tmp_path):

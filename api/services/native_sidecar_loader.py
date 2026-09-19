@@ -329,14 +329,37 @@ def _reference_failure_grid_validation(
     }
 
 
-def load_precomputed_unsfin_schedule(case_dir: Path, dem_file: Optional[Path] = None) -> Dict[str, Any]:
+def load_precomputed_unsfin_schedule(
+    case_dir: Path,
+    dem_file: Optional[Path] = None,
+    *,
+    artifact_paths: Optional[Dict[str, Path]] = None,
+) -> Dict[str, Any]:
     """
     Load original EDDA `unsfin` artifacts as an explicit runtime schedule provider.
 
     This function intentionally does not infer `tfail` from `LS_Scar` or
     `faildph`.  Missing original artifacts remain blocked and auditable.
     """
-    locator = find_precomputed_unsfin_artifacts(Path(case_dir))
+    if artifact_paths is None:
+        locator = find_precomputed_unsfin_artifacts(Path(case_dir))
+    else:
+        normalized_paths = {
+            key: str(Path(artifact_paths[key]))
+            for key in PRECOMPUTED_UNSFIN_FILENAMES
+            if key in artifact_paths
+        }
+        missing = [
+            filename
+            for key, filename in PRECOMPUTED_UNSFIN_FILENAMES.items()
+            if key not in normalized_paths or not Path(normalized_paths[key]).is_file()
+        ]
+        locator = {
+            "artifact_paths": normalized_paths,
+            "missing_artifacts": missing,
+            "all_required_present": not missing,
+            "search_dirs": [],
+        }
     if not locator["all_required_present"]:
         return {
             "family": "precomputed_unsfin_schedule",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
 from pathlib import Path
 from threading import Event, Lock
 from time import monotonic, sleep
@@ -8,7 +9,7 @@ from time import monotonic, sleep
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from api.services.scheduler import _RunProgressPersister
+from api.services.scheduler import RuntimeRunExecutor, _RunProgressPersister
 from api.services.workbench_store import ProjectDatabase, SCHEMA_VERSION
 from tests.test_workbench_domain_api import _create_project, _create_ready_scenario
 
@@ -72,6 +73,31 @@ class SignalRunExecutor:
         while not self.release.wait(0.01):
             if stop_event.is_set():
                 return {"status": "stopped", "resource_summary": {"children": 0}}
+        return {"status": "completed", "progress": 100.0, "resource_summary": {"children": 0}}
+
+
+class PrecisionBlockingExecutor(RuntimeRunExecutor):
+    """Use the production signature while keeping execution deterministic."""
+
+    def __init__(self) -> None:
+        self.release_first = Event()
+        self.first_started = Event()
+        self.second_started = Event()
+        self.lock = Lock()
+        self.started_precisions: list[bool] = []
+
+    def request_stop(self, simulation_id: str) -> None:
+        self.release_first.set()
+
+    def execute(self, context: dict, on_update, stop_event: Event) -> dict:
+        precision = bool((context.get("effective_config") or {}).get("compute.use_double_precision"))
+        with self.lock:
+            self.started_precisions.append(precision)
+            position = len(self.started_precisions)
+            (self.first_started if position == 1 else self.second_started).set()
+        on_update({"status": "running", "progress": 10.0})
+        if position == 1:
+            assert self.release_first.wait(5.0)
         return {"status": "completed", "progress": 100.0, "resource_summary": {"children": 0}}
 
 
@@ -450,3 +476,111 @@ def test_scheduler_throttles_progress_writes_to_output_boundaries(tmp_path: Path
         assert simulation["step_count"] == BurstProgressExecutor.STEPS
         assert simulation["current_time"] == float(BurstProgressExecutor.STEPS)
         assert simulation["output_count"] == BurstProgressExecutor.STEPS // BurstProgressExecutor.OUTPUT_EVERY
+
+
+def test_runtime_signature_decodes_real_queue_candidate_frozen_config(tmp_path: Path) -> None:
+    app = create_app(state_dir=tmp_path / "state", scheduler_enabled=False)
+    with TestClient(app) as client:
+        project = _create_project(client, tmp_path / "signature-project", "Signature")
+        scenario = _create_ready_scenario(client, project, "Frozen precision")
+        queued = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+        assert queued.status_code == 201
+        candidate = client.app.state.workbench.queue_candidates(set())[0]
+
+    executor = RuntimeRunExecutor()
+    fp32 = dict(candidate)
+    fp64 = dict(candidate)
+    fp32["effective_config_json"] = json.dumps({"compute.use_double_precision": False})
+    fp64["effective_config_json"] = json.dumps({"compute.use_double_precision": True})
+
+    assert executor.signature(fp32) != executor.signature(fp64)
+    assert '"use_double_precision":false' in executor.signature(fp32)
+    assert '"use_double_precision":true' in executor.signature(fp64)
+    broken = dict(candidate, effective_config_json="{broken")
+    try:
+        executor.signature(broken)
+    except ValueError as exc:
+        assert "invalid frozen effective-config" in str(exc)
+    else:
+        raise AssertionError("damaged frozen queue snapshots must not fall back to FP32")
+
+
+def test_scheduler_batches_incompatible_frozen_precisions(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    projects: list[dict] = []
+    with TestClient(create_app(state_dir=state_dir, scheduler_enabled=False)) as client:
+        for index, precision in enumerate((False, True)):
+            project = _create_project(client, tmp_path / f"precision-{index}", f"Precision {index}")
+            scenario = _create_ready_scenario(client, project, f"Precision {precision}")
+            queued = client.post(
+                f"/api/projects/{project['project_id']}/queue",
+                json={"scenario_id": scenario["scenario_id"]},
+            )
+            assert queued.status_code == 201
+            database = client.app.state.workbench.project_database(project["project_id"])
+            with database.connect() as connection:
+                row = connection.execute(
+                    "SELECT effective_config_json FROM queue_items WHERE queue_item_id=?",
+                    (queued.json()["queue_item_id"],),
+                ).fetchone()
+                frozen = json.loads(row["effective_config_json"])
+                frozen["compute.use_double_precision"] = precision
+                connection.execute(
+                    "UPDATE queue_items SET effective_config_json=? WHERE queue_item_id=?",
+                    (json.dumps(frozen), queued.json()["queue_item_id"]),
+                )
+            projects.append(project)
+
+    executor = PrecisionBlockingExecutor()
+    app = create_app(
+        state_dir=state_dir,
+        scheduler_enabled=True,
+        run_executor=executor,
+        scheduler_poll_interval=0.01,
+        max_concurrent_projects=2,
+    )
+    with TestClient(app):
+        assert executor.first_started.wait(5.0)
+        assert executor.second_started.wait(0.2) is False
+        executor.release_first.set()
+        assert executor.second_started.wait(5.0)
+        assert executor.started_precisions == [False, True]
+
+
+def test_progress_only_update_tracks_active_queue_and_preserves_terminal_rows(tmp_path: Path) -> None:
+    app = create_app(state_dir=tmp_path / "state", scheduler_enabled=False)
+    with TestClient(app) as client:
+        project = _create_project(client, tmp_path / "progress-project", "Progress")
+        scenario = _create_ready_scenario(client, project, "Progress sync")
+        queued = client.post(
+            f"/api/projects/{project['project_id']}/queue",
+            json={"scenario_id": scenario["scenario_id"]},
+        )
+        assert queued.status_code == 201
+        store = client.app.state.workbench
+        context = store.claim_queue_item(project["project_id"], queued.json()["queue_item_id"])
+        simulation_id = context["simulation_id"]
+
+        store.update_run(project["project_id"], simulation_id, {"progress": 37.0, "current_time": 9.0})
+        item = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]
+        assert item["status"] == "starting"
+        assert item["progress"] == 37.0
+
+        store.update_run(project["project_id"], simulation_id, {"status": "running"})
+        item = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]
+        assert item["status"] == "running"
+        assert item["progress"] == 37.0
+
+        database = store.project_database(project["project_id"])
+        with database.connect() as connection:
+            connection.execute(
+                "UPDATE queue_items SET status='completed', progress=100 WHERE simulation_id=?",
+                (simulation_id,),
+            )
+        store.update_run(project["project_id"], simulation_id, {"progress": 42.0})
+        item = client.get(f"/api/projects/{project['project_id']}/queue").json()["items"][0]
+        assert item["status"] == "completed"
+        assert item["progress"] == 100.0

@@ -3263,6 +3263,20 @@ class EDDASolver:
             records.append(dict(item))
         return records
 
+    @staticmethod
+    def _validate_checkpoint_field_aliases(checkpoint: Any) -> None:
+        """Validate renamed field keys before any checkpoint state is applied."""
+        legacy_key = "fields__rhodepo_temp"
+        current_key = "fields__rhodepo"
+        if legacy_key not in checkpoint or current_key not in checkpoint:
+            return
+        legacy = np.asarray(checkpoint[legacy_key])
+        current = np.asarray(checkpoint[current_key])
+        if legacy.shape != current.shape or not np.array_equal(legacy, current, equal_nan=True):
+            raise ValueError(
+                "Checkpoint contains conflicting fields__rhodepo and legacy fields__rhodepo_temp arrays"
+            )
+
     def save_state(self, output_file: str) -> None:
         """
         Save a full restart checkpoint for research-grade windowed reruns.
@@ -3373,12 +3387,17 @@ class EDDASolver:
             "flow_neighbor_j",
         }
         with np.load(input_path, allow_pickle=False) as checkpoint:
+            self._validate_checkpoint_field_aliases(checkpoint)
             if self.dfs_dynamic_wave is not None:
                 host_state = validate_dfs_host_state(self.dfs_dynamic_wave, checkpoint)
                 restore_dfs_host_state(self.dfs_dynamic_wave, host_state)
             for key in checkpoint.files:
                 if key.startswith("fields__"):
                     name = key.split("__", 1)[1]
+                    if name == "rhodepo_temp":
+                        if "fields__rhodepo" in checkpoint:
+                            continue
+                        name = "rhodepo"
                     self._restore_taichi_field(getattr(self.fields, name), checkpoint[key])
                     if name in flow_connectivity_fields:
                         restored_flow_connectivity = True

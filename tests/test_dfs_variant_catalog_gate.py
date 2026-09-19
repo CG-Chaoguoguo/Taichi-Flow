@@ -1,11 +1,20 @@
 """Catalog / enum gate coverage for DFS face-flux and Manning-bar variants."""
 
+from pathlib import Path
+
 from api.services.parameter_catalog import (
     EDITABLE_PARAMETERS,
     PARAMETER_ENUM_SPECS,
     build_static_parameter_catalog,
 )
 from api.services.structured_input_resolver import validate_scenario_configuration
+
+
+def _write_preflight_dem(path: Path) -> None:
+    path.write_text(
+        "ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 1\nNODATA_value -9999\n1 1\n1 1\n",
+        encoding="ascii",
+    )
 
 
 def test_static_catalog_exposes_editable_dfs_variant_enums():
@@ -106,6 +115,88 @@ def test_scenario_configuration_rejects_invalid_boundary_enum():
     codes = {issue["code"] for issue in result["issues"]}
     assert "parameter_enum_invalid" in codes
     assert result["valid"] is False
+
+
+def test_scenario_configuration_requires_enabled_outflow_binding(tmp_path: Path):
+    dem = tmp_path / "dem.asc"
+    _write_preflight_dem(dem)
+    parameters = {
+        "edda.run_controls.simulate_rainfall": False,
+        "edda.run_controls.simulate_outflow_cell": True,
+    }
+    bindings = [{"binding_key": "dem.primary", "role": "primary", "active": True, "blob_path": str(dem)}]
+
+    missing = validate_scenario_configuration(parameters, bindings)
+    assert "outflow_binding_missing" in {issue["code"] for issue in missing["issues"]}
+
+    outflow = tmp_path / "outflow.txt"
+    outflow.write_text("outflow cells\n1\n1\n", encoding="ascii")
+    valid = validate_scenario_configuration(
+        parameters,
+        bindings
+        + [{
+            "binding_key": "outflow.primary",
+            "family": "outflow",
+            "role": "outflow",
+            "active": True,
+            "blob_path": str(outflow),
+        }],
+    )
+    assert "outflow_binding_missing" not in {issue["code"] for issue in valid["issues"]}
+    assert "outflow_binding_invalid" not in {issue["code"] for issue in valid["issues"]}
+
+    disabled = validate_scenario_configuration(
+        {**parameters, "edda.run_controls.simulate_outflow_cell": False},
+        bindings,
+    )
+    assert not {"outflow_binding_missing", "outflow_binding_invalid"} & {
+        issue["code"] for issue in disabled["issues"]
+    }
+
+
+def test_scenario_configuration_requires_all_precomputed_unsfin_bindings(tmp_path: Path):
+    dem = tmp_path / "dem.asc"
+    _write_preflight_dem(dem)
+    parameters = {
+        "edda.run_controls.simulate_rainfall": False,
+        "edda.run_controls.simulate_shallow_landslide": True,
+        "hydrology.dfs_failure_source_variant": "precomputed_unsfin_schedule",
+    }
+    bindings = [{"binding_key": "dem.primary", "role": "primary", "active": True, "blob_path": str(dem)}]
+    for key in ("gindx", "tfail_s", "fdepth_m"):
+        artifact = tmp_path / key
+        artifact.write_text("frozen", encoding="ascii")
+        bindings.append({
+            "binding_key": f"precomputed_unsfin.{key}",
+            "family": "precomputed_unsfin",
+            "role": "precomputed-unsfin",
+            "active": True,
+            "blob_path": str(artifact),
+        })
+
+    missing = validate_scenario_configuration(parameters, bindings)
+    missing_issues = [
+        issue for issue in missing["issues"] if issue["code"] == "precomputed_unsfin_binding_missing"
+    ]
+    assert [issue["binding_key"] for issue in missing_issues] == ["precomputed_unsfin.meta"]
+
+    meta = tmp_path / "meta"
+    meta.write_text("{}", encoding="utf-8")
+    invalid_bindings = bindings + [{
+        "binding_key": "precomputed_unsfin.meta",
+        "family": "precomputed_unsfin",
+        "role": "precomputed-unsfin",
+        "active": True,
+        "blob_path": str(meta),
+    }]
+    invalid = validate_scenario_configuration(parameters, invalid_bindings)
+    assert "precomputed_unsfin_binding_invalid" in {issue["code"] for issue in invalid["issues"]}
+
+    disabled = validate_scenario_configuration(
+        {**parameters, "edda.run_controls.simulate_shallow_landslide": False},
+        invalid_bindings,
+    )
+    assert not any(issue["code"].startswith("precomputed_unsfin_binding_") for issue in disabled["issues"])
 
 
 def test_scenario_configuration_rejects_invalid_face_flux_enum():
