@@ -267,6 +267,87 @@ def test_queue_freezes_policy_and_retry_reuses_original_snapshot(tmp_path: Path)
         assert retried.json()["compute_policy_resolution"]["effective"]["mode"] == original_mode
 
 
+def test_retry_after_draft_change_claims_frozen_snapshot(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "retry-claim-project")
+        scenario = _create_ready_scenario(client, project, "Retry claim frozen")
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+
+        queued = client.post(queue_url, json={"scenario_id": scenario["scenario_id"]})
+        assert queued.status_code == 201
+        original = queued.json()
+        frozen_config = original["effective_config"]
+        assert original["retry_of"] in {None, ""}
+        assert original["input_revision_id"]
+        assert frozen_config
+
+        edited = client.patch(
+            f"/api/projects/{project['project_id']}/scenarios/{scenario['scenario_id']}",
+            json={"parameter_patch": {"rheology.n_manning": 0.08}, "expected_version": scenario["version"]},
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["effective_parameters"]["rheology.n_manning"] == 0.08
+        assert edited.json()["version"] != original["scenario_version"]
+
+        cancelled = next(
+            item
+            for item in client.get(queue_url).json()["items"]
+            if item["queue_item_id"] == original["queue_item_id"]
+        )
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancel_reason"] == "draft_changed"
+
+        retried = client.post(f"{queue_url}/{original['queue_item_id']}/retry")
+        assert retried.status_code == 201, retried.text
+        retry_item = retried.json()
+        assert retry_item["retry_of"] == original["queue_item_id"]
+        assert retry_item["input_revision_id"] == original["input_revision_id"]
+        assert retry_item["effective_config"] == frozen_config
+        assert retry_item["scenario_version"] == original["scenario_version"]
+
+        store = client.app.state.workbench
+        context = store.claim_queue_item(project["project_id"], retry_item["queue_item_id"])
+        assert context["effective_config"] == frozen_config
+        assert context["effective_config"]["rheology.n_manning"] != 0.08
+        simulation = store.public_simulation(
+            project["project_id"],
+            store.simulation_row(project["project_id"], context["simulation_id"]),
+        )
+        assert simulation["status"] == "starting"
+        assert simulation["effective_config"] == frozen_config
+        assert simulation["input_revision_id"] == original["input_revision_id"]
+
+
+def test_first_enqueue_claim_cancels_when_live_version_changes(tmp_path: Path) -> None:
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        project = _create_project(client, tmp_path / "first-enqueue-claim-project")
+        scenario = _create_ready_scenario(client, project, "First enqueue live version")
+        queue_url = f"/api/projects/{project['project_id']}/queue"
+        queued = client.post(queue_url, json={"scenario_id": scenario["scenario_id"]})
+        assert queued.status_code == 201
+        item = queued.json()
+        assert item["retry_of"] in {None, ""}
+        assert item["input_revision_id"]
+        assert item["effective_config"]
+
+        store = client.app.state.workbench
+        database = store.project_database(project["project_id"])
+        with database.connect() as connection:
+            connection.execute(
+                "UPDATE scenarios SET version=? WHERE scenario_id=?",
+                (int(item["scenario_version"]) + 1, scenario["scenario_id"]),
+            )
+
+        with pytest.raises(WorkbenchError) as error:
+            store.claim_queue_item(project["project_id"], item["queue_item_id"])
+        assert error.value.code == "queue_item_draft_changed"
+        cancelled = next(
+            row for row in store.list_queue(project["project_id"]) if row["queue_item_id"] == item["queue_item_id"]
+        )
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancel_reason"] == "draft_changed"
+
+
 def test_queue_rejects_invalid_erosion_probe_payload_and_freezes_valid_options(tmp_path: Path) -> None:
     with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
         project = _create_project(client, tmp_path / "probe-project")

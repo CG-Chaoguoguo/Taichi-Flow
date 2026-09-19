@@ -5862,8 +5862,20 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
         else:
             queued_version = item["scenario_version"]
             current_version = scenario["version"]
+            revision_id = item["input_revision_id"] if "input_revision_id" in item.keys() else None
+            retry_of = item["retry_of"] if "retry_of" in item.keys() else None
+            # Frozen retries already carry an immutable input + config snapshot.
+            # A later live draft bump must not cancel that replay. First enqueue
+            # still compares scenario_version and cancels on draft change.
+            has_frozen_retry_snapshot = bool(
+                retry_of
+                and revision_id
+                and isinstance(queue_effective, dict)
+                and queue_effective
+            )
             if (
-                queued_version is not None
+                not has_frozen_retry_snapshot
+                and queued_version is not None
                 and current_version is not None
                 and int(queued_version) != int(current_version)
             ):
@@ -5873,8 +5885,6 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                     status_code=409,
                     details={"queued_version": queued_version, "current_version": current_version},
                 )
-            else:
-                revision_id = item["input_revision_id"]
             if failure is None and revision_id:
                 revision = connection.execute(
                     "SELECT * FROM input_revisions WHERE revision_id=?", (revision_id,)

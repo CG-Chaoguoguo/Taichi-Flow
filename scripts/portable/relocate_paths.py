@@ -105,10 +105,39 @@ def _sqlite_tables(connection: sqlite3.Connection) -> Iterable[str]:
     return [str(row[0]) for row in rows]
 
 
-def _rewrite_database(path: Path, replace, verify_only: bool) -> dict[str, Any]:
+def _discard_temporary_path(temporary_path: Path) -> None:
+    try:
+        temporary_path.unlink()
+    except FileNotFoundError:
+        pass
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(f"{temporary_path}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _discard_temporary_databases(replacements: Iterable[tuple[Path, Path]]) -> None:
+    for _, temporary_path in replacements:
+        _discard_temporary_path(temporary_path)
+
+
+def _replace_live_databases(replacements: list[tuple[Path, Path]]) -> None:
+    """Publish rewritten copies over live databases only after every rewrite."""
+    for live_path, temporary_path in replacements:
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{live_path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
+        os.replace(temporary_path, live_path)
+
+
+def _rewrite_database(path: Path, replace, verify_only: bool) -> tuple[dict[str, Any], Path | None]:
     # Work on a same-directory copy.  SQLite's transaction protects a normal
     # failure, while the copy also protects against an interrupted process or
-    # an unexpected filesystem error during a drive-letter move.
+    # an unexpected filesystem error during a drive-letter move. Live files
+    # stay untouched until every database rewrite and project verification
+    # succeed; relocate() then replaces them together.
     temporary_path: Path | None = None
     target_path = path
     connection: sqlite3.Connection | None = None
@@ -127,7 +156,7 @@ def _rewrite_database(path: Path, replace, verify_only: bool) -> dict[str, Any]:
             finally:
                 # sqlite3.Connection's context manager does not close the
                 # connection; close explicitly so Windows releases -wal/-shm
-                # handles before the atomic replacement below.
+                # handles before a later atomic replacement.
                 source.close()
             fd, temporary_name = tempfile.mkstemp(
                 prefix=f".{path.stem}.portable-",
@@ -179,6 +208,7 @@ def _rewrite_database(path: Path, replace, verify_only: bool) -> dict[str, Any]:
         integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
         if integrity.lower() != "ok":
             raise RuntimeError(f"SQLite integrity check failed for {target_path}: {integrity}")
+        report = {"path": str(path), "changed_values": changed, "integrity": integrity}
         if not verify_only and temporary_path is not None:
             connection.close()
             connection = None
@@ -186,13 +216,10 @@ def _rewrite_database(path: Path, replace, verify_only: bool) -> dict[str, Any]:
                 sidecar = Path(f"{temporary_path}{suffix}")
                 if sidecar.exists():
                     sidecar.unlink()
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(f"{path}{suffix}")
-                if sidecar.exists():
-                    sidecar.unlink()
-            os.replace(temporary_path, path)
+            kept = temporary_path
             temporary_path = None
-        return {"path": str(path), "changed_values": changed, "integrity": integrity}
+            return report, kept
+        return report, None
     except Exception:
         if connection is not None:
             connection.rollback()
@@ -201,15 +228,7 @@ def _rewrite_database(path: Path, replace, verify_only: bool) -> dict[str, Any]:
         if connection is not None:
             connection.close()
         if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
-            for suffix in ("-wal", "-shm"):
-                try:
-                    Path(f"{temporary_path}{suffix}").unlink()
-                except FileNotFoundError:
-                    pass
+            _discard_temporary_path(temporary_path)
 
 
 def _path_values(value: Any) -> Iterable[str]:
@@ -223,8 +242,12 @@ def _path_values(value: Any) -> Iterable[str]:
             yield from _path_values(item)
 
 
-def _verify_project(project_root: Path) -> dict[str, Any]:
-    database_path = project_root / ".taichi-flow" / "state.sqlite3"
+def _verify_project(project_root: Path, database_path: Path | None = None) -> dict[str, Any]:
+    live_path = project_root / ".taichi-flow" / "state.sqlite3"
+    if not live_path.is_file():
+        raise RuntimeError(f"Project database is missing: {live_path}")
+    if database_path is None:
+        database_path = live_path
     if not database_path.is_file():
         raise RuntimeError(f"Project database is missing: {database_path}")
     connection = sqlite3.connect(database_path)
@@ -301,25 +324,44 @@ def relocate(root: Path, manifest_path: Path, verify_only: bool = False) -> dict
         and ".git" not in path.parts
         and ".portable-" not in path.name
     )
-    reports = []
-    for path in database_paths:
-        reports.append(_rewrite_database(path, replace, verify_only))
+    reports: list[dict[str, Any]] = []
+    replacements: list[tuple[Path, Path]] = []
     project_info = manifest.get("project") or {}
     relative_project = str(project_info.get("relative_path") or "")
     project_root = (current_root / relative_project).resolve()
-    validation = _verify_project(project_root)
-    manifest_updated = False
-    if not verify_only and recorded_root and _norm_path(recorded_root) != _norm_path(str(current_root)):
-        _update_manifest_root(manifest_path, manifest, current_root)
-        manifest_updated = True
-    return {
-        "root": str(current_root),
-        "mappings": [{"from": old, "to": new} for old, new in mappings],
-        "databases": reports,
-        "project": validation,
-        "manifest_updated": manifest_updated,
-        "verify_only": verify_only,
-    }
+    project_database = project_root / ".taichi-flow" / "state.sqlite3"
+    try:
+        for path in database_paths:
+            report, temporary_path = _rewrite_database(path, replace, verify_only)
+            reports.append(report)
+            if temporary_path is not None:
+                replacements.append((path, temporary_path))
+        rewritten_project = next(
+            (
+                temporary_path
+                for live_path, temporary_path in replacements
+                if live_path.resolve() == project_database.resolve()
+            ),
+            None,
+        )
+        validation = _verify_project(project_root, rewritten_project)
+        manifest_updated = False
+        if not verify_only:
+            _replace_live_databases(replacements)
+            replacements = []
+            if recorded_root and _norm_path(recorded_root) != _norm_path(str(current_root)):
+                _update_manifest_root(manifest_path, manifest, current_root)
+                manifest_updated = True
+        return {
+            "root": str(current_root),
+            "mappings": [{"from": old, "to": new} for old, new in mappings],
+            "databases": reports,
+            "project": validation,
+            "manifest_updated": manifest_updated,
+            "verify_only": verify_only,
+        }
+    finally:
+        _discard_temporary_databases(replacements)
 
 
 def main() -> int:

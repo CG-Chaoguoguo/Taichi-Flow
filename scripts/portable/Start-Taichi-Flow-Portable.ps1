@@ -219,15 +219,9 @@ try {
     $script:PortableState.api_url = $apiUrl
     $script:PortableState.api_port = $selectedApiPort
     $script:PortableState.api_instance_id = $apiInstanceId
-    $script:PublishActive = $true
+    # Keep writing session state only. Publishing active.json before Electron
+    # is recorded lets a second launcher treat an API-only session as live.
     Save-PortableState
-    # Startup serialization protects publication only.  Holding it until the
-    # window exits turns every second launcher into a false startup timeout.
-    if ($null -ne $startupMutex) {
-        try { $startupMutex.ReleaseMutex() } catch { }
-        try { $startupMutex.Dispose() } catch { }
-        $startupMutex = $null
-    }
 
     $electronStdout = Join-Path $sessionRoot "electron.stdout.log"
     $electronStderr = Join-Path $sessionRoot "electron.stderr.log"
@@ -251,7 +245,15 @@ try {
     $electronStarted = $true
     Add-PortableProcess (New-TaichiFlowProcessRecord -Name "electron" -Identity $electron.Identity -Owned $true -StandardOutputPath $electronStdout -StandardErrorPath $electronStderr)
     $script:PortableState.status = if ($Smoke) { "smoke-running" } else { "running" }
+    $script:PublishActive = $true
     Save-PortableState
+    # Startup serialization protects publication only.  Holding it until the
+    # window exits turns every second launcher into a false startup timeout.
+    if ($null -ne $startupMutex) {
+        try { $startupMutex.ReleaseMutex() } catch { }
+        try { $startupMutex.Dispose() } catch { }
+        $startupMutex = $null
+    }
     $electron.Process.WaitForExit()
     $nativeExit = $null
     try { $nativeExit = $electron.Process.ExitCode } catch { }

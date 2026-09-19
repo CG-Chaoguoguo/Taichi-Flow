@@ -165,6 +165,45 @@ describe("RunModule runtime profile", () => {
     });
   });
 
+  it("restores parsed probe cells after disable then re-enable and keeps enqueue usable", () => {
+    render(
+      <MemoryRouter>
+        <RunModule scenario={scenario} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId("run-erosion-probe-enabled"));
+    fireEvent.change(screen.getByTestId("run-erosion-probe-cells"), {
+      target: { value: "415,630\n534,590" },
+    });
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("run-erosion-probe-enabled"));
+    expect(screen.getByTestId("run-erosion-probe-cells")).toHaveValue("415,630\n534,590");
+    expect(screen.getByTestId("run-diagnostics-summary")).toHaveTextContent("诊断：关闭");
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "加入模拟队列" }));
+    expect(enqueueScenario).toHaveBeenCalledWith("scenario-run", "cuda_production_default", {
+      erosion_probe: { enabled: false, probe_cells: [] },
+    });
+    enqueueScenario.mockClear();
+
+    fireEvent.click(screen.getByTestId("run-erosion-probe-enabled"));
+    expect(screen.getByTestId("run-diagnostics-summary")).toHaveTextContent("诊断：开启 · 2 探针");
+    expect(screen.getByRole("button", { name: "加入模拟队列" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "加入模拟队列" }));
+
+    expect(enqueueScenario).toHaveBeenCalledWith("scenario-run", "cuda_production_default", {
+      erosion_probe: {
+        enabled: true,
+        probe_cells: [
+          [415, 630],
+          [534, 590],
+        ],
+      },
+    });
+  });
+
   it("blocks an enabled erosion probe until it has at least one cell", () => {
     render(
       <MemoryRouter>

@@ -26,7 +26,9 @@ def resolve_native_input_path(case_dir: Path, raw: str) -> Path:
             raise ValueError(f"Drive-relative native input path is ambiguous: {raw!r}")
         if os.name != "nt":
             raise ValueError(f"Foreign Windows drive requires explicit local remapping: {raw!r}")
-    elif token.startswith("\\"):
+    elif not windows.drive and windows.anchor and not Path(token).is_absolute():
+        # \data\... and /data/... share a Windows root anchor. POSIX Path('/abs')
+        # stays absolute; do not use os.name as the reject predicate.
         raise ValueError(f"Root-relative Windows input path is ambiguous: {raw!r}")
     path = Path(token.replace("\\", "/"))
     if not path.is_absolute():

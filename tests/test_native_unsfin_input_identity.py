@@ -88,10 +88,13 @@ def test_equivalent_decimal_center_and_corner_origins_are_not_misregistered(tmp_
     assert analytic.build_active_context(tmp_path).zone_values == [1., 1., 2., 2.]
 
 
-@pytest.mark.parametrize("raw", ["", "  ", "C:relative.asc", r"\root-relative.asc", r"\\server\share\grid.asc"])
+@pytest.mark.parametrize("raw", ["", "  ", "C:relative.asc", r"\root-relative.asc", r"\\server\share\grid.asc", "/root-relative.asc", "/data/slope.asc"])
 def test_ambiguous_paths_never_become_silent_relative_paths(tmp_path, raw):
     from edda.solver.native_unsfin.input_grid import resolve_native_input_path
-    with pytest.raises(ValueError):
+    # Host-absolute POSIX /abs paths are not Windows root-relative; they must
+    # fail as missing files, not as a silent join onto case_dir.
+    expected = FileNotFoundError if raw.startswith("/") and Path(raw).is_absolute() else ValueError
+    with pytest.raises(expected):
         resolve_native_input_path(tmp_path, raw)
 
 

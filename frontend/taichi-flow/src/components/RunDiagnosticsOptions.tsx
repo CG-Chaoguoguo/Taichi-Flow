@@ -157,7 +157,7 @@ export function RunDiagnosticsOptions({
               erosion_probe: {
                 ...value.erosion_probe,
                 enabled,
-                probe_cells: enabled ? value.erosion_probe.probe_cells : [],
+                probe_cells: enabled ? parsed.cells : [],
               },
             });
           }}

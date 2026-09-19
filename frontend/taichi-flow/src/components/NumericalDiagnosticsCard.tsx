@@ -17,6 +17,22 @@ function statusLabel(value: boolean | null | undefined): { text: string; ok: boo
   return { text: "待报告", ok: false };
 }
 
+const CPU_LIVE_ARCH_FAMILY = ["cpu", "x64", "arm64"] as const;
+
+function backendLinkOk(backend: NonNullable<NumericalDiagnostics["backend"]>): boolean {
+  if (backend.fallback_active === true) return false;
+  const requested = String(backend.requested_backend || "").trim().toLowerCase();
+  if (!requested) return false;
+  const live = String(backend.live_arch || "").toLowerCase();
+  if (requested === "cuda") return live.includes("cuda");
+  if (requested === "cpu") {
+    const liveIsCpuFamily = CPU_LIVE_ARCH_FAMILY.some((token) => live.includes(token));
+    const managerIsCpu = String(backend.manager_backend || "").toLowerCase() === "cpu";
+    return (liveIsCpuFamily || managerIsCpu) && !live.includes("cuda");
+  }
+  return false;
+}
+
 export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: NumericalDiagnostics }) {
   const backend = diagnostics.backend || {};
   const integration = diagnostics.time_integration || {};
@@ -28,8 +44,7 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
     && probe.capture_active === false && probe.buffered_record_count === 0
     && typeof probe.captured_record_count === "number"
     && probe.captured_record_count === probe.written_record_count;
-  const cudaOk = String(backend.live_arch || "").toLowerCase().includes("cuda")
-    && backend.fallback_active !== true;
+  const linkOk = backendLinkOk(backend);
   const closure = statusLabel(classification.conservation_closure ?? ledger.passed);
   const ledgerUnavailable = ledger.available === false;
   const nonfinite = Object.values(diagnostics.nonfinite_counts || {}).reduce(
@@ -46,9 +61,9 @@ export function NumericalDiagnosticsCard({ diagnostics }: { diagnostics: Numeric
             诊断快照 · {diagnostics.status || "未知状态"}
           </div>
         </div>
-        <span className={`tf-diagnostic-state${cudaOk && closure.ok ? " is-ok" : " is-warning"}`}>
-          {cudaOk && closure.ok ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
-          {cudaOk && closure.ok ? "运行链路通过" : "需要复核"}
+        <span className={`tf-diagnostic-state${linkOk && closure.ok ? " is-ok" : " is-warning"}`} data-testid="numerical-link-status">
+          {linkOk && closure.ok ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+          {linkOk && closure.ok ? "运行链路通过" : "需要复核"}
         </span>
       </div>
 
