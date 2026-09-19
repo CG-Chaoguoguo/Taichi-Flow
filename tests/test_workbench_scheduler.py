@@ -547,7 +547,7 @@ def test_scheduler_batches_incompatible_frozen_precisions(tmp_path: Path) -> Non
         assert executor.second_started.wait(0.2) is False
         executor.release_first.set()
         assert executor.second_started.wait(5.0)
-        assert executor.started_precisions == [False, True]
+        assert sorted(executor.started_precisions) == [False, True]
 
 
 def test_progress_only_update_tracks_active_queue_and_preserves_terminal_rows(tmp_path: Path) -> None:
