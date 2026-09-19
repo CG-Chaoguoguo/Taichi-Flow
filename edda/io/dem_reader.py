@@ -4,11 +4,41 @@ DEM (Digital Elevation Model) reader supporting multiple formats.
 import numpy as np
 import rasterio
 from rasterio.fill import fillnodata
+from rasterio.transform import from_origin
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
+
+_ESRI_ASCII_REQUIRED_HEADER_KEYS = {"ncols", "nrows", "cellsize"}
+_ESRI_ASCII_ORIGIN_HEADER_KEYS = {"xllcorner", "xllcenter", "yllcorner", "yllcenter"}
+
+
+def is_esri_ascii_grid(path: str | Path) -> bool:
+    """Recognise an ESRI ASCII grid by content, not only by filename suffix.
+
+    Workbench blobs are content-addressed paths without the original ``.asc``
+    suffix.  Dispatching those files to GDAL makes an ASCII grid pass through a
+    float32 raster driver before a configured f64 solver sees it.  The original
+    EDDA parser reads its text values as double precision, so untyped blobs need
+    the same text-reader path.
+    """
+    try:
+        with Path(path).open("rt", encoding="utf-8-sig", errors="strict") as stream:
+            header_keys: set[str] = set()
+            for _ in range(6):
+                pieces = stream.readline().strip().split()
+                if len(pieces) < 2:
+                    return False
+                header_keys.add(pieces[0].lower())
+    except (OSError, UnicodeDecodeError):
+        return False
+    return (
+        _ESRI_ASCII_REQUIRED_HEADER_KEYS.issubset(header_keys)
+        and bool(_ESRI_ASCII_ORIGIN_HEADER_KEYS & header_keys)
+        and ("nodata_value" in header_keys or "nodata" in header_keys)
+    )
 
 
 class DEMReader:
@@ -45,12 +75,11 @@ class DEMReader:
         logger.info(f"Reading DEM file: {self.dem_file}")
 
         suffix = self.dem_file.suffix.lower()
-        if suffix in {".asc", ".txt"} or self._looks_like_ascii_grid():
+        if suffix in {".asc", ".txt"} or is_esri_ascii_grid(self.dem_file):
             self.elevation, self.metadata = read_ascii_grid(str(self.dem_file))
-            self.transform = None
+            self.transform = self.metadata.get('transform')
             self.crs = None
             self.nodata_value = self.metadata.get('nodata', self.metadata.get('nodata_value'))
-            self.metadata.setdefault('transform', None)
             self.metadata.setdefault('crs', None)
             logger.info(f"DEM dimensions: {self.metadata['width']} x {self.metadata['height']}")
             logger.info(f"Grid spacing: dx={self.metadata['dx']:.2f}m, dy={self.metadata['dy']:.2f}m")
@@ -85,15 +114,6 @@ class DEMReader:
             logger.info(f"NoData value: {src.nodata}")
 
         return self.elevation, self.metadata
-
-    def _looks_like_ascii_grid(self) -> bool:
-        """Recognize extensionless AAIGrid blobs without changing reader semantics."""
-        try:
-            with self.dem_file.open("r", encoding="ascii") as handle:
-                first_line = handle.readline().strip().lower()
-        except (OSError, UnicodeDecodeError):
-            return False
-        return first_line.startswith("ncols ") or first_line.startswith("ncols\t")
 
     def get_nodata_mask(self) -> np.ndarray:
         """
@@ -251,21 +271,53 @@ def read_ascii_grid(ascii_file: str) -> Tuple[np.ndarray, Dict[str, Any]]:
             metadata[key] = value
 
         # Read elevation data
-        elevation = np.loadtxt(f)
+        # Keep exact ASCII values through the f64 production pathway.  The
+        # dtype is explicit because a blob path has no filename extension and
+        # must never depend on a raster driver's default precision.
+        elevation = np.loadtxt(f, dtype=np.float64)
 
     # Extract key parameters
     ncols = int(metadata.get('ncols', 0))
     nrows = int(metadata.get('nrows', 0))
-    xllcorner = metadata.get('xllcorner', 0.0)
-    yllcorner = metadata.get('yllcorner', 0.0)
     cellsize = metadata.get('cellsize', 1.0)
     nodata = metadata.get('nodata_value', -9999.0)
+    if 'xllcorner' in metadata:
+        xllcorner = float(metadata['xllcorner'])
+    elif 'xllcenter' in metadata:
+        xllcorner = float(metadata['xllcenter']) - float(cellsize) / 2.0
+    else:
+        raise ValueError("ASCII grid header must define xllcorner or xllcenter")
+    if 'yllcorner' in metadata:
+        yllcorner = float(metadata['yllcorner'])
+    elif 'yllcenter' in metadata:
+        yllcorner = float(metadata['yllcenter']) - float(cellsize) / 2.0
+    else:
+        raise ValueError("ASCII grid header must define yllcorner or yllcenter")
+
+    # ESRI ASCII stores its origin at the lower-left corner, whereas the
+    # rasterio affine transform is anchored at the upper-left corner. Keep
+    # this transform even when the grid has no CRS: result exports need it to
+    # retain the exact grid registration of the immutable input. Previously
+    # ASCII inputs set ``transform=None`` and every Taichi output silently
+    # acquired a 0/0/1 header, making a shape-identical comparison spatially
+    # invalid.
+    transform = from_origin(
+        float(xllcorner),
+        float(yllcorner) + nrows * float(cellsize),
+        float(cellsize),
+        float(cellsize),
+    )
 
     metadata['width'] = ncols
     metadata['height'] = nrows
+    # Normalize center-origin headers for every downstream consumer while
+    # retaining the original center keys above for provenance.
+    metadata['xllcorner'] = xllcorner
+    metadata['yllcorner'] = yllcorner
     metadata['dx'] = cellsize
     metadata['dy'] = cellsize
     metadata['nodata'] = nodata
+    metadata['transform'] = transform
     metadata['bounds'] = (xllcorner, xllcorner + ncols * cellsize,
                          yllcorner, yllcorner + nrows * cellsize)
 

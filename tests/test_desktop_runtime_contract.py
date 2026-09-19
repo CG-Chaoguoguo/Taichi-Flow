@@ -15,6 +15,7 @@ def test_health_exposes_desktop_runtime_contract(tmp_path: Path) -> None:
     payload = response.json()
     assert payload["service_id"] == "taichi-flow-api"
     assert payload["api_contract_version"] == 1
+    assert "api_instance_id" in payload
     assert len(payload["checkout_id"]) == 16
     assert all(character in "0123456789abcdef" for character in payload["checkout_id"])
 
@@ -31,6 +32,21 @@ def test_desktop_preview_origin_is_explicitly_allowed(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "app://taichi-flow"
+
+
+def test_desktop_dev_loopback_origin_can_be_configured(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TAICHI_FLOW_ALLOWED_ORIGINS", "http://127.0.0.1:3007")
+    with TestClient(create_app(state_dir=tmp_path / "state", scheduler_enabled=False)) as client:
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://127.0.0.1:3007",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3007"
 
 
 def test_unknown_desktop_origin_is_not_allowed(tmp_path: Path) -> None:

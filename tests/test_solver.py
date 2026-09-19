@@ -119,7 +119,7 @@ class TestTimeStepper:
 
         stats = stepper.get_statistics()
         assert stats['step_count'] == 10
-        assert stats['t_current'] == 1.0
+        assert stats['t_current'] == pytest.approx(1.0, rel=0.0, abs=1e-15)
         assert 'progress' in stats
 
 

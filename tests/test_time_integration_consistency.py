@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from edda.solver.edda_solver import EDDASolver
+from edda.config.sim_config import SimulationConfig
 from edda.solver.time_stepper import TimeStepper
 
 
@@ -16,6 +17,9 @@ class _HarnessSolver(EDDASolver):
     """
 
     def __init__(self, scripted_steps, *, t_end: float, dt_initial: float, dt_output: float):
+        # A time-loop double still satisfies the real output lifecycle contract.
+        # No file is read: physics and output callbacks are the deliberate doubles.
+        super().__init__(SimulationConfig(dem_file="time-loop-test-double.asc", compute={"async_output": False}))
         self.fields = object()
         self.time_stepper = TimeStepper(
             t_start=0.0,
@@ -36,9 +40,16 @@ class _HarnessSolver(EDDASolver):
         self.fortran_tempdt = 0.0
         self.dfs_candidate_step_id = 0
         self.dfs_accepted_step_id = 0
+        self.step_lifecycle_trace_enabled = False
+        self.step_lifecycle_trace_records = []
         self._scripted_steps = list(scripted_steps)
         self.physics_dts = []
         self.output_times = []
+
+    def write_erosion_probe_csv(self):
+        # This harness deliberately has no raster/output workspace. Keep the
+        # real run() finalization and completion checks, but double probe I/O.
+        return None
 
     def _use_fortran_dfs(self) -> bool:  # pragma: no cover - behavior tested through run()
         return True
@@ -154,3 +165,17 @@ def test_output_truncation_precedes_end_time_truncation_when_boundaries_coincide
     # dt must still survive even when the run also ends at that same time.
     assert solver.fortran_tempdt == pytest.approx(8.0)
     assert solver.time_stepper.dt_current == pytest.approx(8.0)
+
+
+def test_final_output_does_not_duplicate_an_output_boundary(monkeypatch):
+    monkeypatch.setenv("TQDM_DISABLE", "1")
+    solver = _HarnessSolver(
+        scripted_steps=[{"accepted": True, "used_dt": 5.0, "next_dt": 5.0}],
+        t_end=5.0,
+        dt_initial=5.0,
+        dt_output=5.0,
+    )
+
+    solver.run()
+
+    assert solver.output_times == [5.0]

@@ -8,16 +8,21 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, Iterator, Optional
+from typing import Any, BinaryIO, Dict, Iterator, Mapping, Optional
 from uuid import uuid4
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import shutil
+
+from api.services.result_files import classify_result_writer
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 12
 
 
 class WorkbenchError(Exception):
@@ -68,6 +73,8 @@ def _legacy_binding_identity(family: str, ordinal: int) -> tuple[str, str]:
         "slofil": ("slope.primary", "slope"),
         "thickness": ("thickness.primary", "thickness"),
         "zfil": ("thickness.primary", "thickness"),
+        "trigger": ("trigger.primary", "trigger"),
+        "triggerslide": ("trigger.primary", "trigger"),
         "config": ("legacy.config", "legacy-config"),
     }
     if normalized in {"rainfall", "rifil"}:
@@ -89,6 +96,8 @@ ASSET_ROLE_BY_FAMILY = {
     "zonfil": "zones",
     "thickness": "thickness",
     "zfil": "thickness",
+    "trigger": "trigger",
+    "triggerslide": "trigger",
     "config": "legacy-config",
 }
 
@@ -104,6 +113,8 @@ RASTER_ASSET_FAMILIES = {
     "zonfil",
     "thickness",
     "zfil",
+    "trigger",
+    "triggerslide",
     "groundwater",
     "infiltration",
 }
@@ -233,6 +244,7 @@ class ProjectDatabase:
                     base_scenario_id TEXT REFERENCES scenarios(scenario_id),
                     parameter_template_id TEXT,
                     parameter_patch_json TEXT NOT NULL,
+                    control_overrides_json TEXT NOT NULL DEFAULT '{}',
                     effective_parameters_json TEXT NOT NULL,
                     draft_validation_json TEXT NOT NULL DEFAULT '{}',
                     version INTEGER NOT NULL DEFAULT 1,
@@ -255,10 +267,14 @@ class ProjectDatabase:
                     start_time TEXT,
                     end_time_actual TEXT,
                     error TEXT,
+                    error_code TEXT,
+                    error_details_json TEXT NOT NULL DEFAULT '{}',
                     elapsed_seconds REAL NOT NULL DEFAULT 0,
                     output_dir TEXT,
                     runtime_profile_json TEXT NOT NULL DEFAULT '{}',
+                    run_options_json TEXT NOT NULL DEFAULT '{}',
                     effective_config_json TEXT NOT NULL DEFAULT '{}',
+                    compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}',
                     resource_summary_json TEXT NOT NULL DEFAULT '{}',
                     terminal_log_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL
@@ -269,10 +285,13 @@ class ProjectDatabase:
                     scenario_version INTEGER,
                     input_revision_id TEXT REFERENCES input_revisions(revision_id),
                     position INTEGER NOT NULL,
-                    queue_order INTEGER,
                     status TEXT NOT NULL,
                     simulation_id TEXT REFERENCES simulation_runs(simulation_id),
                     retry_of TEXT REFERENCES queue_items(queue_item_id),
+                    runtime_profile TEXT NOT NULL DEFAULT 'cuda_production_default',
+                    run_options_json TEXT NOT NULL DEFAULT '{}',
+                    effective_config_json TEXT NOT NULL DEFAULT '{}',
+                    compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}',
                     enqueued_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -281,8 +300,6 @@ class ProjectDatabase:
                     cancel_reason TEXT,
                     deleted_at TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_queue_items_order
-                    ON queue_items(status, queue_order, enqueued_at, queue_item_id);
                 CREATE TABLE IF NOT EXISTS result_families (
                     family_id TEXT PRIMARY KEY,
                     simulation_id TEXT NOT NULL REFERENCES simulation_runs(simulation_id),
@@ -683,57 +700,125 @@ class ProjectDatabase:
                 """
             )
         if version < 7:
-            # Queue position is historical (the public #N identifier); the
-            # mutable queue_order is the only ordering key used by the
-            # scheduler-facing queue.  Existing records which were queued but
-            # never claimed must not auto-start after this migration.
+            simulation_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+            }
+            if "error_code" not in simulation_columns:
+                connection.execute("ALTER TABLE simulation_runs ADD COLUMN error_code TEXT")
+            if "error_details_json" not in simulation_columns:
+                connection.execute(
+                    "ALTER TABLE simulation_runs ADD COLUMN error_details_json TEXT NOT NULL DEFAULT '{}'"
+                )
+        if version < 8:
             queue_columns = {
                 str(column["name"])
                 for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
             }
-            if "queue_order" not in queue_columns:
-                connection.execute("ALTER TABLE queue_items ADD COLUMN queue_order INTEGER")
-            if "deleted_at" not in queue_columns:
-                connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
-            connection.execute(
-                "UPDATE queue_items SET queue_order=position WHERE queue_order IS NULL"
-            )
+            if "runtime_profile" not in queue_columns:
+                connection.execute(
+                    "ALTER TABLE queue_items ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'cuda_production_default'"
+                )
+        if version < 9:
+            simulation_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+            }
+            if "compute_policy_resolution_json" not in simulation_columns:
+                connection.execute(
+                    "ALTER TABLE simulation_runs ADD COLUMN compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "effective_config_json" not in queue_columns:
+                connection.execute(
+                    "ALTER TABLE queue_items ADD COLUMN effective_config_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "compute_policy_resolution_json" not in queue_columns:
+                connection.execute(
+                    "ALTER TABLE queue_items ADD COLUMN compute_policy_resolution_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            # Queue rows created before v9 cannot be safely reconstructed from
+            # current Settings.  Keep the row for audit history, but cancel
+            # any still-waiting item and make the required re-enqueue action
+            # explicit instead of allowing the scheduler to reinterpret it.
+            migration_now = utc_now()
             connection.execute(
                 """
                 UPDATE queue_items
-                SET status='waiting', summary=CASE
-                    WHEN summary IS NULL OR summary='' OR summary='等待调度'
-                    THEN '待运行' ELSE summary END
-                WHERE status='queued' AND simulation_id IS NULL
-                """
+                SET status='cancelled', finished_at=COALESCE(finished_at, ?),
+                    cancel_reason='policy_snapshot_missing_after_upgrade',
+                    summary='缺少升级后的计算策略快照，请重新加入队列。'
+                WHERE status IN ('queued', 'waiting')
+                  AND (effective_config_json='{}' OR compute_policy_resolution_json='{}')
+                """,
+                (migration_now,),
             )
-            waiting_rows = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
-            ).fetchall()
-            for order, row in enumerate(waiting_rows, start=1):
+        if version < 10:
+            scenario_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(scenarios)").fetchall()
+            }
+            if "control_overrides_json" not in scenario_columns:
                 connection.execute(
-                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                    (order, row["queue_item_id"]),
+                    "ALTER TABLE scenarios ADD COLUMN control_overrides_json TEXT NOT NULL DEFAULT '{}'"
                 )
+
+        if version < 11:
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "run_options_json" not in queue_columns:
+                connection.execute(
+                    "ALTER TABLE queue_items ADD COLUMN run_options_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            simulation_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(simulation_runs)").fetchall()
+            }
+            if "run_options_json" not in simulation_columns:
+                connection.execute(
+                    "ALTER TABLE simulation_runs ADD COLUMN run_options_json TEXT NOT NULL DEFAULT '{}'"
+                )
+        if version < 12:
+            queue_columns = {
+                str(column["name"])
+                for column in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+            }
+            if "deleted_at" not in queue_columns:
+                connection.execute("ALTER TABLE queue_items ADD COLUMN deleted_at TEXT")
+            # v9 kept unsafe queued records as cancelled audit history but did
+            # not restore their scenarios to an editable state.  Apply this
+            # corrective step once, without disturbing scenarios that now have
+            # a newer active queue record.
+            migration_now = utc_now()
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_queue_items_order ON queue_items(status, queue_order, enqueued_at, queue_item_id)"
+                """
+                UPDATE scenarios
+                SET status=CASE WHEN input_revision_id IS NULL THEN 'draft' ELSE 'ready' END,
+                    updated_at=?
+                WHERE status IN ('queued', 'waiting')
+                  AND EXISTS (
+                      SELECT 1 FROM queue_items q
+                      WHERE q.scenario_id=scenarios.scenario_id
+                        AND q.cancel_reason='policy_snapshot_missing_after_upgrade'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM queue_items q
+                      WHERE q.scenario_id=scenarios.scenario_id
+                        AND q.deleted_at IS NULL
+                        AND q.status IN ('queued', 'waiting', 'starting', 'running', 'stopping')
+                  )
+                """,
+                (migration_now,),
             )
+
         from api.services.parameter_templates import builtin_parameter_templates
 
-        templates = builtin_parameter_templates()
-        existing_template_ids = {
-            str(row["template_id"])
-            for row in connection.execute(
-                "SELECT template_id FROM parameter_templates WHERE source_kind='bundled_case'"
-            ).fetchall()
-        }
-        for template in templates:
-            if template["template_id"] in existing_template_ids:
-                continue
+        for template in builtin_parameter_templates():
             connection.execute(
                 """
                 INSERT OR IGNORE INTO parameter_templates(
@@ -753,11 +838,27 @@ class ProjectDatabase:
                     utc_now(),
                 ),
             )
-        if version < SCHEMA_VERSION:
-            connection.execute(
-                "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+            # Upgrade older bundled templates in place with explicit
+            # failure-source provenance.  User-created/imported templates are
+            # intentionally left untouched.
+            existing_template = connection.execute(
+                "SELECT source_kind, field_provenance_json FROM parameter_templates WHERE template_id=?",
+                (template["template_id"],),
+            ).fetchone()
+            if existing_template and str(existing_template["source_kind"] or "") == "bundled_case":
+                existing_provenance = json_loads(existing_template["field_provenance_json"], {})
+                builtin_policy = (template.get("field_provenance") or {}).get("_compute_policy")
+                if isinstance(builtin_policy, dict) and "_compute_policy" not in existing_provenance:
+                    upgraded_provenance = dict(existing_provenance)
+                    upgraded_provenance["_compute_policy"] = builtin_policy
+                    connection.execute(
+                        "UPDATE parameter_templates SET field_provenance_json=? WHERE template_id=?",
+                        (json.dumps(upgraded_provenance, ensure_ascii=False), template["template_id"]),
+                    )
+        connection.execute(
+            "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
 
     def metadata(self) -> Optional[Dict[str, Any]]:
         if not self.database_path.exists():
@@ -770,11 +871,15 @@ class ProjectDatabase:
 class WorkbenchStore:
     """Deep module for project discovery and per-project stores."""
 
+    CASE_IMPORT_RECOVERY_FILENAME = "case-import-recovery.json"
+
     def __init__(self, state_dir: Optional[Path] = None):
         self.state_dir = Path(state_dir or default_state_dir()).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.catalog_path = self.state_dir / "catalog.sqlite3"
         self._initialize_catalog()
+        from api.services.project_lifecycle import ProjectLifecycle
+        self.project_lifecycle = ProjectLifecycle(self)
 
     @contextmanager
     def catalog(self) -> Iterator[sqlite3.Connection]:
@@ -808,6 +913,127 @@ class WorkbenchStore:
                 """
             )
 
+    def get_compute_gate_defaults(self) -> Dict[str, Any]:
+        from api.services.compute_gate_defaults import (
+            COMPUTE_GATE_SETTINGS_KEY,
+            compute_gate_baseline,
+            compute_gate_merge_baseline,
+            extract_gate_parameters,
+            merge_compute_gate_defaults,
+        )
+        from api.services.parameter_catalog import build_static_parameter_catalog
+
+        with self.catalog() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM settings WHERE key=?",
+                (COMPUTE_GATE_SETTINGS_KEY,),
+            ).fetchone()
+        stored = json_loads(row["value_json"], {}) if row else {}
+        values = extract_gate_parameters(stored.get("values") if isinstance(stored, dict) else {})
+        baseline = compute_gate_baseline()
+        catalog = build_static_parameter_catalog()
+        return {
+            "catalog_version": catalog["catalog_version"],
+            "values": values,
+            "baseline": baseline,
+            "effective": merge_compute_gate_defaults(compute_gate_merge_baseline(), {}, values),
+            "updated_at": stored.get("updated_at") if isinstance(stored, dict) else None,
+        }
+
+    def get_compute_gate_values(self) -> Dict[str, Any]:
+        return dict(self.get_compute_gate_defaults()["values"])
+
+    def put_compute_gate_defaults(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        from api.services.compute_gate_defaults import (
+            COMPUTE_GATE_SETTINGS_KEY,
+            ComputeGateValidationError,
+            EXPERIMENTAL_LIVE_KEY,
+            POLICY_KEY,
+            extract_gate_parameters,
+            validate_compute_gate_values,
+        )
+
+        # PUT carries a sparse override map.  Keep the read/merge/write cycle
+        # under one write transaction so concurrent sparse updates cannot
+        # erase each other.
+        with self.catalog() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT value_json FROM settings WHERE key=?",
+                (COMPUTE_GATE_SETTINGS_KEY,),
+            ).fetchone()
+            current_payload = json_loads(current_row["value_json"], {}) if current_row else {}
+            current_values = extract_gate_parameters(
+                current_payload.get("values") if isinstance(current_payload, dict) else {}
+            )
+            try:
+                validation_values = dict(values)
+                if (
+                    str(validation_values.get(POLICY_KEY) or "").strip().lower() == "live"
+                    and EXPERIMENTAL_LIVE_KEY not in validation_values
+                ):
+                    validation_values[EXPERIMENTAL_LIVE_KEY] = current_values.get(EXPERIMENTAL_LIVE_KEY, False)
+                cleaned = validate_compute_gate_values(validation_values)
+                if EXPERIMENTAL_LIVE_KEY not in values:
+                    cleaned.pop(EXPERIMENTAL_LIVE_KEY, None)
+                effective_sparse = dict(current_values)
+                from api.services.compute_gate_defaults import VARIANT_AND_POLICY_AUTO_KEYS
+                for key, value in values.items():
+                    key = str(key)
+                    if key in VARIANT_AND_POLICY_AUTO_KEYS and isinstance(value, str) and value.strip().lower() == "auto":
+                        effective_sparse.pop(key, None)
+                    elif key in cleaned:
+                        effective_sparse[key] = cleaned[key]
+                if (
+                    effective_sparse.get(POLICY_KEY) == "live"
+                    and effective_sparse.get(EXPERIMENTAL_LIVE_KEY) is not True
+                ):
+                    raise ComputeGateValidationError(
+                        "live_unlock_required",
+                        "当前策略为实时双层时不能关闭实验解锁，请先切换失稳源策略。",
+                        {"key": EXPERIMENTAL_LIVE_KEY},
+                    )
+            except ComputeGateValidationError as exc:
+                raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
+            payload = {
+                "values": effective_sparse,
+                "updated_at": utc_now(),
+            }
+            connection.execute(
+                "INSERT OR REPLACE INTO settings(key, value_json) VALUES(?, ?)",
+                (COMPUTE_GATE_SETTINGS_KEY, json.dumps(payload, ensure_ascii=False)),
+            )
+        return self.get_compute_gate_defaults()
+
+    def _merged_effective_parameters(
+        self,
+        baseline: Dict[str, Any],
+        patch: Dict[str, Any],
+        *,
+        gates: Optional[Dict[str, Any]] = None,
+        template_id: Optional[str] = None,
+        template_metadata: Optional[Mapping[str, Any]] = None,
+        control_overrides: Optional[Mapping[str, Any]] = None,
+        reference_owned: bool = False,
+    ) -> Dict[str, Any]:
+        from api.services.compute_gate_defaults import resolve_scenario_compute_snapshot, strip_gate_parameters
+
+        metadata = dict(template_metadata or {})
+        policy = metadata.get("_compute_policy")
+        owned = bool(reference_owned or (isinstance(policy, Mapping) and policy.get("ownership") == "reference_case"))
+        snapshot = resolve_scenario_compute_snapshot(
+            baseline,
+            strip_gate_parameters(patch),
+            global_gates=gates if gates is not None else self.get_compute_gate_values(),
+            scenario_controls=control_overrides,
+            reference_owned=owned,
+            template_id=template_id,
+            template_metadata=metadata,
+            source_mode="workbench",
+            strict_reference=bool(template_id),
+        )
+        return dict(snapshot.effective_parameters)
+
     @staticmethod
     def _project_info(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         data = dict(row)
@@ -818,7 +1044,12 @@ class WorkbenchStore:
     def list_projects(self) -> list[Dict[str, Any]]:
         with self.catalog() as connection:
             rows = connection.execute("SELECT * FROM projects ORDER BY created_at, project_id").fetchall()
-        return [self._project_info(row) for row in rows]
+        projects = [self._project_info(row) for row in rows]
+        for project in projects:
+            deletion = self.project_lifecycle.journal(project["project_id"])
+            if deletion:
+                project.update(available=False, deletion_status=deletion["status"], deletion_error=deletion["error"])
+        return projects
 
     def get_project(self, project_id: str) -> Dict[str, Any]:
         with self.catalog() as connection:
@@ -828,6 +1059,7 @@ class WorkbenchStore:
         return self._project_info(row)
 
     def project_database(self, project_id: str) -> ProjectDatabase:
+        self.project_lifecycle.assert_available(project_id)
         project = self.get_project(project_id)
         if not project["available"]:
             raise WorkbenchError(
@@ -842,6 +1074,12 @@ class WorkbenchStore:
 
     def create_or_open_project(self, *, name: str, root_path: str, description: str = "") -> Dict[str, Any]:
         root = Path(root_path).expanduser().resolve()
+        with self.catalog() as catalog:
+            pending = catalog.execute("SELECT root_path, staging_path FROM project_deletions").fetchall()
+        for record in pending:
+            for target in (Path(record["root_path"]), Path(record["staging_path"])):
+                if root == target or target in root.parents or root in target.parents:
+                    raise WorkbenchError("project_deleting", "目录存在未完成的删除，请先重试清理。", status_code=409)
         database = ProjectDatabase(root)
         existing_metadata = database.metadata()
         now = utc_now()
@@ -882,6 +1120,827 @@ class WorkbenchStore:
                 ),
             )
         return self.get_project(str(metadata["project_id"]))
+
+    @staticmethod
+    def _case_config_path(source_root: Path) -> Path:
+        for candidate in (source_root / "edda_in.txt", source_root / "EDDA_in.txt"):
+            if candidate.is_file():
+                return candidate
+        raise WorkbenchError(
+            "case_config_not_found",
+            "指定目录中未找到 edda_in.txt。",
+            status_code=422,
+            details={"source_root": str(source_root)},
+        )
+
+    @staticmethod
+    def _case_reference_source_files(source_root: Path) -> list[tuple[str, Path]]:
+        """Return the source files consulted by the reference variant parser."""
+        dfs = source_root / "dfs.F90"
+        main = source_root / "edda main program.F90"
+        if not main.is_file():
+            candidates = sorted(
+                path
+                for pattern in ("*main*program*.F90", "*main*program*.f90", "*edda*.F90", "*edda*.f90")
+                for path in source_root.glob(pattern)
+                if path.is_file()
+            )
+            if candidates:
+                main = candidates[0]
+        return [("source:dfs.F90", dfs), ("source:edda-main", main)]
+
+    @staticmethod
+    def _append_precomputed_unsfin_inputs(plan: Dict[str, Any], parsed: Any) -> Dict[str, Any]:
+        """Treat an active original UNSFIN schedule as immutable case input."""
+        if not (
+            bool((getattr(parsed, "flags", {}) or {}).get("simulate_shallow_landslide"))
+            and str(getattr(parsed, "dfs_failure_source_variant", "")) == "precomputed_unsfin_schedule"
+        ):
+            return plan
+        from api.services.native_sidecar_loader import (
+            PRECOMPUTED_UNSFIN_FILENAMES,
+            find_precomputed_unsfin_artifacts,
+            load_precomputed_unsfin_schedule,
+        )
+
+        base_dir = Path(parsed.reference_base_dir)
+        dem_path: Path | None = None
+        dem_reference = (getattr(parsed, "file_inputs", {}) or {}).get("demfil")
+        for raw_path in getattr(dem_reference, "resolved_paths", []) or []:
+            candidate = Path(str(raw_path))
+            if candidate.is_file():
+                dem_path = candidate
+                break
+        locator = find_precomputed_unsfin_artifacts(base_dir)
+        try:
+            validation = load_precomputed_unsfin_schedule(base_dir, dem_file=dem_path)
+        except Exception as exc:
+            validation = {
+                "parse_status": "invalid",
+                "runtime_arrays": None,
+                "error": str(exc),
+            }
+        valid = bool(locator.get("all_required_present")) and bool(validation.get("runtime_arrays"))
+        plan["precomputed_unsfin_validation"] = {
+            "valid": valid,
+            "missing_artifacts": list(locator.get("missing_artifacts") or []),
+            "parse_status": validation.get("parse_status"),
+            "error": validation.get("error"),
+        }
+        for ordinal, (key, filename) in enumerate(PRECOMPUTED_UNSFIN_FILENAMES.items(), start=1):
+            path = Path(str(locator["artifact_paths"].get(key) or Path(parsed.reference_base_dir) / filename))
+            exists = path.is_file()
+            item = {
+                "native_family": f"precomputed_unsfin_{key}",
+                "family": "precomputed_unsfin",
+                "ordinal": ordinal,
+                "path": str(path),
+                "exists": exists,
+                "active": True,
+                "binding_key": f"precomputed_unsfin.{key}",
+                "role": "precomputed-unsfin",
+                "target_name": filename,
+            }
+            plan.setdefault("file_references", []).append(item)
+            if exists and valid:
+                plan.setdefault("proposed_bindings", []).append(item)
+            else:
+                plan.setdefault("unresolved_active_bindings", []).append(item)
+        plan["unresolved_active_count"] = len(plan.get("unresolved_active_bindings") or [])
+        return plan
+
+    @classmethod
+    def _case_fingerprint(cls, config_path: Path, plan: Mapping[str, Any]) -> str:
+        """Hash config plus active existing inputs without hashing source paths."""
+        fingerprint, _ = cls._case_fingerprint_with_inventory(config_path, plan)
+        return fingerprint
+
+    @classmethod
+    def _case_fingerprint_with_inventory(
+        cls,
+        config_path: Path,
+        plan: Mapping[str, Any],
+    ) -> tuple[str, list[Dict[str, Any]]]:
+        """Read each fingerprinted source once and retain its content digest."""
+        digest = hashlib.sha256()
+        digest.update(b"taichi-flow-reference-case-v2\0")
+        inventory: list[Dict[str, Any]] = []
+
+        def hash_source(path: Path, label: str, *, message: str) -> str:
+            source_digest = hashlib.sha256()
+            digest.update(label.encode("utf-8"))
+            try:
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        source_digest.update(chunk)
+            except OSError as exc:
+                raise WorkbenchError(
+                    "case_file_unreadable",
+                    message,
+                    status_code=422,
+                    details={"path": str(path), "error": str(exc)},
+                ) from exc
+            source_hash = source_digest.hexdigest()
+            inventory.append({
+                "path": str(path.resolve()),
+                "sha256": source_hash,
+                "label": label.rstrip("\0"),
+                "exists": True,
+                "file_name": path.name,
+            })
+            return source_hash
+
+        def hash_missing(path: Path, label: str) -> None:
+            digest.update(label.encode("utf-8"))
+            digest.update(b"<missing>\0")
+            inventory.append({
+                "path": str(path.resolve()),
+                "sha256": None,
+                "label": label.rstrip("\0"),
+                "exists": False,
+                "file_name": path.name,
+            })
+
+        hash_source(config_path, "edda_in\0", message=f"无法读取 edda_in.txt：{config_path.name}")
+        references = sorted(
+            (
+                item
+                for item in plan.get("file_references", [])
+                if item.get("exists") and item.get("active") and Path(str(item.get("path") or "")).is_file()
+            ),
+            key=lambda item: (str(item.get("native_family")), int(item.get("ordinal") or 0)),
+        )
+        for item in references:
+            label = f"{item.get('native_family')}:{int(item.get('ordinal') or 0)}\0"
+            path = Path(str(item["path"]))
+            hash_source(path, label, message=f"无法读取活动输入：{path.name}")
+        for label, path in cls._case_reference_source_files(config_path.parent):
+            if path.is_file():
+                hash_source(path, f"{label}\0", message=f"无法读取参考源码：{path.name}")
+            else:
+                hash_missing(path, f"{label}\0")
+        return digest.hexdigest(), inventory
+
+    @staticmethod
+    def _case_dimensions(config_path: Path) -> Dict[str, Any]:
+        pattern = re.compile(r"^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,")
+        try:
+            for line in config_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                match = pattern.match(line)
+                if match:
+                    return {
+                        "imax": int(match.group(1)),
+                        "rows": int(match.group(2)),
+                        "cols": int(match.group(3)),
+                    }
+        except OSError:
+            pass
+        return {}
+
+    @staticmethod
+    def _case_sidecar_summary(path: Optional[Path], family: str) -> Dict[str, Any]:
+        if not path or not path.is_file():
+            return {"family": family, "exists": False, "line_count": 0, "preview": []}
+        try:
+            lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        except OSError:
+            lines = []
+        return {
+            "family": family,
+            "exists": True,
+            "line_count": len(lines),
+            "preview": lines[:4],
+            "path_name": path.name,
+        }
+
+    def preview_case_import(self, source_root: str) -> Dict[str, Any]:
+        """Parse a legacy case and expose a commit-safe, path-aware preview."""
+        from api.services.edda_switch_registry import EDDA_SWITCH_REGISTRY
+        from api.services.legacy_migration import build_legacy_migration_plan
+        from api.services.parameter_templates import normalized_parameter_values
+        from api.services.reference_config_parser import parse_reference_config_file
+
+        source = Path(source_root).expanduser().resolve()
+        if not source.is_dir():
+            raise WorkbenchError("case_source_not_found", "兼容算例目录不存在或不可访问。", status_code=422, details={"source_root": str(source)})
+        config_path = self._case_config_path(source)
+        try:
+            parsed = parse_reference_config_file(str(config_path), str(source))
+        except Exception as exc:
+            raise WorkbenchError("case_config_parse_failed", f"解析参考案例 edda_in 失败：{exc}", status_code=422) from exc
+        fingerprint_plan = self._append_precomputed_unsfin_inputs(
+            build_legacy_migration_plan(parsed, source_hash=""), parsed
+        )
+        fingerprint, source_inventory = self._case_fingerprint_with_inventory(config_path, fingerprint_plan)
+        config_hash = source_inventory[0]["sha256"]
+        plan = self._append_precomputed_unsfin_inputs(
+            build_legacy_migration_plan(parsed, source_hash=config_hash), parsed
+        )
+        values = normalized_parameter_values(parsed)
+        snapshot_values = dict(parsed.switch_snapshot.values)
+        run_controls = {
+            spec.key: snapshot_values.get(spec.key)
+            for spec in EDDA_SWITCH_REGISTRY
+            if spec.group == "run_control"
+        }
+        output_controls = {
+            spec.key: snapshot_values.get(spec.key)
+            for spec in EDDA_SWITCH_REGISTRY
+            if spec.group in {"legacy_output", "process_output"}
+        }
+        unresolved = list(plan.get("unresolved_active_bindings") or [])
+        issues: list[Dict[str, Any]] = [
+            {
+                "severity": "error",
+                "code": "active_input_missing",
+                "message": f"活动输入缺失：{item.get('native_family')} ({item.get('path')})",
+                "binding_key": item.get("binding_key"),
+            }
+            for item in unresolved
+        ]
+        issues.extend(
+            {
+                "severity": "warning",
+                "code": "unsupported_control",
+                "message": f"原 EDDA 控制保持只读：{item.get('flag') or item.get('parameter')}",
+            }
+            for item in (parsed.unsupported_flags or [])
+        )
+        if (plan.get("precomputed_unsfin_validation") or {}).get("valid") is False:
+            details = plan["precomputed_unsfin_validation"]
+            issues.append({
+                "severity": "error",
+                "code": "precomputed_unsfin_invalid",
+                "message": "预计算 UNSFIN 文件缺失或未通过格式/网格校验。",
+                "details": details,
+            })
+        references_by_family = {
+            family: [item for item in plan.get("file_references", []) if item.get("native_family") == family]
+            for family in parsed.file_inputs
+        }
+        sidecar_paths = {
+            family: next((Path(str(item["path"])) for item in plan.get("file_references", []) if item.get("native_family") == family and item.get("exists")), None)
+            for family in ("inflow.txt", "outflow.txt")
+        }
+        active_bindings = [dict(item) for item in plan.get("proposed_bindings", [])]
+        return {
+            "source_root": str(source),
+            "case_config_file": str(config_path),
+            "case_name": source.name,
+            "config_sha256": config_hash,
+            "case_fingerprint": fingerprint,
+            "source_inventory": source_inventory,
+            "case_summary": {
+                "dimensions": self._case_dimensions(config_path),
+                "nzon": int(parsed.nzon),
+                "simul_s": float(parsed.simul),
+                "tout_s": float(parsed.tout),
+                "rainfall_period_count": int(parsed.nper),
+                "rainfall_mode": parsed.rainfall_mode,
+                "zmax": float(parsed.zmax),
+                "ltstar_raw": float(parsed.ltstar_raw),
+                "lbstar": float(parsed.lbstar),
+                "active_binding_count": len(active_bindings),
+                "missing_reference_count": int(plan.get("missing_file_count") or 0),
+            },
+            "controls": {
+                "run": run_controls,
+                "output": output_controls,
+                "extension": dict(parsed.extension_flags or {}),
+                "raw_flags": dict(parsed.flags or {}),
+                "normalized_values": values,
+            },
+            "variants": {
+                "face_flux": parsed.dfs_face_flux_variant,
+                "manningbar": parsed.dfs_manningbar_variant,
+                "dry_face_velocity": parsed.dfs_dry_face_velocity_variant,
+                "artivis": parsed.dfs_artivis_variant,
+                "absubar": parsed.dfs_absubar_variant,
+                "flow_velocity_writer": parsed.dfs_flow_velocity_writer_variant,
+                "erosion_depth_writer": parsed.dfs_erosion_depth_writer_variant,
+                "sfdf_classify_cv": parsed.dfs_sfdf_classify_cv_variant,
+                "cvlimit": parsed.dfs_cvlimit_variant,
+                "erodph_dt": parsed.dfs_erodph_dt_variant,
+                "barrier_flux": parsed.dfs_barrier_flux_variant,
+                "commit_cv_eps": parsed.dfs_commit_cv_eps_variant,
+                "failure_source": parsed.dfs_failure_source_variant,
+                "failure_source_topology_status": parsed.dfs_failure_source_topology_status,
+            },
+            "capabilities": {
+                "reference_output_expectations": parsed.reference_output_expectations,
+                "unsupported_flags": list(parsed.unsupported_flags or []),
+                "file_inputs": {
+                    family: {
+                        "active": any(bool(item.get("active")) for item in items),
+                        "existing": sum(bool(item.get("exists")) for item in items),
+                        "declared": len(items),
+                        "runtime_status": getattr(parsed.file_inputs.get(family), "production_status", None),
+                    }
+                    for family, items in references_by_family.items()
+                },
+            },
+            "bindings": active_bindings,
+            "sidecars": {
+                "inflow": self._case_sidecar_summary(sidecar_paths.get("inflow.txt"), "inflow"),
+                "outflow": self._case_sidecar_summary(sidecar_paths.get("outflow.txt"), "outflow"),
+            },
+            "issues": issues,
+            "commit_allowed": not unresolved and not any(item.get("severity") == "error" for item in issues) and any(item.get("family") == "dem" for item in active_bindings),
+            "plan": plan,
+        }
+
+    @classmethod
+    def _case_import_recovery_path(cls, destination: Path) -> Path:
+        return destination / ".taichi-flow" / cls.CASE_IMPORT_RECOVERY_FILENAME
+
+    @staticmethod
+    def _rebase_case_import_paths(database: ProjectDatabase, *, old_root: str, destination: Path) -> None:
+        """Make paths stored before a staging rename point at the published root."""
+        old_normalized = os.path.normcase(os.path.normpath(old_root))
+        destination_root = str(destination)
+
+        def rebase(value: Any) -> Any:
+            if isinstance(value, str):
+                normalized = os.path.normcase(os.path.normpath(value))
+                if normalized == old_normalized:
+                    return destination_root
+                prefix = old_normalized + os.sep
+                if normalized.startswith(prefix):
+                    return destination_root + value[len(old_root):]
+                return value
+            if isinstance(value, list):
+                return [rebase(item) for item in value]
+            if isinstance(value, dict):
+                return {key: rebase(item) for key, item in value.items()}
+            return value
+
+        with database.connect() as connection:
+            upload_rows = connection.execute("SELECT upload_id, blob_path FROM uploads").fetchall()
+            for row in upload_rows:
+                rebased_path = rebase(str(row["blob_path"]))
+                if rebased_path != row["blob_path"]:
+                    connection.execute(
+                        "UPDATE uploads SET blob_path=? WHERE upload_id=?",
+                        (rebased_path, row["upload_id"]),
+                    )
+            revision_rows = connection.execute("SELECT revision_id, manifest_json FROM input_revisions").fetchall()
+            for row in revision_rows:
+                manifest = json_loads(row["manifest_json"], [])
+                rebased_manifest = rebase(manifest)
+                if rebased_manifest != manifest:
+                    connection.execute(
+                        "UPDATE input_revisions SET manifest_json=? WHERE revision_id=?",
+                        (json.dumps(rebased_manifest, ensure_ascii=False), row["revision_id"]),
+                    )
+
+    def _recover_published_case_import(self, destination: Path, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """Finish a published import whose catalog update was interrupted."""
+        recovery_path = self._case_import_recovery_path(destination)
+        if not recovery_path.is_file():
+            return None
+        try:
+            recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+            project_id = str(recovery["project_id"])
+            old_root = str(recovery["staging_root"])
+            recorded_destination = Path(str(recovery["destination_root"])).resolve()
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise WorkbenchError(
+                "case_import_recovery_invalid",
+                "目标目录包含无法验证的中断导入恢复记录，未执行覆盖。",
+                status_code=409,
+                details={"path": str(recovery_path), "error": str(exc)},
+            ) from exc
+        if recorded_destination != destination.resolve() or str(recovery.get("case_fingerprint") or "") != fingerprint:
+            raise WorkbenchError(
+                "case_import_recovery_required",
+                "目标目录保留了另一份中断导入，不能用新的预览结果覆盖。",
+                status_code=409,
+                details={"path": str(destination)},
+            )
+
+        database = ProjectDatabase(destination)
+        metadata = database.metadata()
+        if not metadata or str(metadata.get("project_id") or "") != project_id:
+            raise WorkbenchError(
+                "case_import_recovery_invalid",
+                "中断导入的项目身份无法与目标目录核对，未执行覆盖。",
+                status_code=409,
+                details={"path": str(destination)},
+            )
+        database.ensure_schema()
+        self._rebase_case_import_paths(database, old_root=old_root, destination=destination)
+        with self.catalog() as connection:
+            conflicting = connection.execute(
+                "SELECT project_id FROM projects WHERE root_path=?", (str(destination),)
+            ).fetchone()
+            if conflicting and str(conflicting["project_id"]) != project_id:
+                raise WorkbenchError(
+                    "case_import_recovery_conflict",
+                    "目标目录已被另一项目登记，未执行覆盖。",
+                    status_code=409,
+                    details={"path": str(destination)},
+                )
+            current = connection.execute(
+                "SELECT project_id, root_path FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if current:
+                current_root = Path(str(current["root_path"])).resolve()
+                if current_root not in {Path(old_root).resolve(), destination.resolve()}:
+                    raise WorkbenchError(
+                        "case_import_recovery_conflict",
+                        "中断导入的项目已登记到其他目录，未执行覆盖。",
+                        status_code=409,
+                        details={"path": str(destination)},
+                    )
+                connection.execute(
+                    "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
+                    (str(destination), str(database.database_path), utc_now(), project_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO projects(project_id, name, description, root_path, state_path, created_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        str(metadata["name"]),
+                        str(metadata["description"]),
+                        str(destination),
+                        str(database.database_path),
+                        str(metadata["created_at"]),
+                        str(metadata["updated_at"]),
+                    ),
+                )
+        try:
+            recovery_path.unlink(missing_ok=True)
+        except OSError:
+            # Registration is already durable. A later identical import will
+            # retry removing this advisory recovery marker.
+            pass
+        return self._existing_reference_import(destination, fingerprint)
+
+    def _existing_reference_import(self, destination: Path, fingerprint: str) -> Optional[Dict[str, Any]]:
+        database = ProjectDatabase(destination)
+        if not database.database_path.is_file():
+            return None
+        database.ensure_schema()
+        with database.connect() as connection:
+            rows = connection.execute(
+                "SELECT scenario_id, parameter_template_id FROM scenarios ORDER BY created_at"
+            ).fetchall()
+            match = None
+            for row in rows:
+                metadata = self._parameter_template_metadata(connection, row["parameter_template_id"])
+                policy = metadata.get("_compute_policy") if isinstance(metadata, Mapping) else None
+                if isinstance(policy, Mapping) and str(policy.get("case_fingerprint") or "") == fingerprint:
+                    match = str(row["scenario_id"])
+                    break
+        if not match:
+            return None
+        metadata = database.metadata()
+        if not metadata:
+            return None
+        project = self.create_or_open_project(
+            name=str(metadata.get("name") or destination.name),
+            root_path=str(destination),
+            description=str(metadata.get("description") or ""),
+        )
+        return {
+            "project": project,
+            "scenario": self._public_scenario(project["project_id"], self._scenario_row(project["project_id"], match)),
+            "case_fingerprint": fingerprint,
+            "idempotent": True,
+        }
+
+    def commit_case_import(
+        self,
+        source_root: str,
+        destination_root: str,
+        *,
+        expected_fingerprint: str,
+        name: Optional[str] = None,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        """Atomically stage a path-free reference-case project and register it."""
+        from api.services.legacy_migration import build_legacy_migration_plan
+        from api.services.parameter_templates import normalized_parameter_values
+        from api.services.reference_config_parser import parse_reference_config_file
+
+        preview = self.preview_case_import(source_root)
+        fingerprint = str(preview["case_fingerprint"])
+        if fingerprint != str(expected_fingerprint):
+            raise WorkbenchError(
+                "case_fingerprint_mismatch",
+                "源算例在预览后发生变化，请重新预览。",
+                status_code=409,
+                details={"expected_fingerprint": expected_fingerprint, "actual_fingerprint": fingerprint},
+            )
+        if not bool(preview.get("commit_allowed")):
+            raise WorkbenchError(
+                "case_import_not_ready",
+                "活动输入或 DEM 绑定未通过校验，不能提交参考案例兼容项目。",
+                status_code=422,
+                details={
+                    "issues": list(preview.get("issues") or []),
+                    "bindings": list(preview.get("bindings") or []),
+                },
+            )
+        source = Path(str(preview["source_root"])).resolve()
+        destination = Path(destination_root).expanduser().resolve()
+        if destination == source or source in destination.parents:
+            raise WorkbenchError("case_destination_invalid", "目标目录必须独立于原始算例目录。", status_code=422)
+
+        def destination_is_empty() -> bool:
+            if not destination.is_dir() or destination.is_symlink():
+                raise WorkbenchError("case_destination_invalid", "目标目录必须是普通目录。", status_code=422)
+            try:
+                next(destination.iterdir())
+            except StopIteration:
+                return True
+            except OSError as exc:
+                raise WorkbenchError(
+                    "case_destination_invalid",
+                    "目标目录不可访问。",
+                    status_code=422,
+                    details={"path": str(destination), "error": str(exc)},
+                ) from exc
+            return False
+
+        if destination.exists():
+            recovered = self._recover_published_case_import(destination, fingerprint) if destination.is_dir() else None
+            if recovered:
+                return recovered
+            existing = self._existing_reference_import(destination, fingerprint) if destination.is_dir() else None
+            if existing:
+                return existing
+            if not destination_is_empty():
+                raise WorkbenchError("case_destination_not_empty", "目标目录必须为空，避免覆盖现有项目。", status_code=409)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.parent / f".{destination.name}.import-{uuid4().hex}"
+        project_id: Optional[str] = None
+        moved = False
+        removed_empty_destination = False
+        source_hashes = {
+            os.path.normcase(os.path.normpath(str(Path(item["path"]).resolve()))): str(item["sha256"])
+            for item in preview.get("source_inventory", [])
+            if item.get("exists") and item.get("sha256")
+        }
+
+        def ingest_verified_source(*, family: str, path: str) -> Dict[str, Any]:
+            source_path = Path(path).resolve()
+            source_key = os.path.normcase(os.path.normpath(str(source_path)))
+            expected_hash = source_hashes.get(source_key)
+            if not expected_hash:
+                raise WorkbenchError(
+                    "case_fingerprint_mismatch",
+                    "导入计划包含未预览的源文件，请重新预览。",
+                    status_code=409,
+                    details={"path": str(source_path)},
+                )
+            asset = self.ingest_upload_from_path(project_id or "", family=family, path=str(source_path))
+            if asset["sha256"] != expected_hash:
+                raise WorkbenchError(
+                    "case_fingerprint_mismatch",
+                    "源算例在复制期间发生变化，请重新预览。",
+                    status_code=409,
+                    details={
+                        "path": str(source_path),
+                        "expected_sha256": expected_hash,
+                        "actual_sha256": asset["sha256"],
+                    },
+                )
+            return asset
+
+        try:
+            staged_project = self.create_or_open_project(
+                name=(name or "").strip() or str(preview["case_name"]),
+                root_path=str(staging),
+                description=description,
+            )
+            project_id = str(staged_project["project_id"])
+            assets: list[Dict[str, Any]] = []
+            bindings: list[Dict[str, Any]] = []
+
+            config_asset = ingest_verified_source(family="config", path=str(preview["case_config_file"]))
+            assets.append(config_asset)
+            copied_config_path = self.get_upload_blob_path(project_id, config_asset["asset_id"])
+            reference_source_dir = staging / ".reference-source"
+            reference_source_dir.mkdir(parents=True, exist_ok=True)
+            for source_item in preview.get("source_inventory", []):
+                if not str(source_item.get("label") or "").startswith("source:") or not source_item.get("exists"):
+                    continue
+                source_asset = ingest_verified_source(
+                    family="reference_source",
+                    path=str(source_item["path"]),
+                )
+                assets.append(source_asset)
+                source_name = str(source_item.get("file_name") or Path(str(source_item["path"])).name)
+                shutil.copyfile(
+                    self.get_upload_blob_path(project_id, source_asset["asset_id"]),
+                    reference_source_dir / source_name,
+                )
+                bindings.append({
+                    "binding_key": f"reference.source.{str(source_item.get('label')).replace(':', '.')}",
+                    "asset_id": source_asset["asset_id"],
+                    "family": "reference_source",
+                    "role": "reference-source",
+                    "ordinal": len(bindings) + 1,
+                    "active": False,
+                    "metadata": {
+                        "source_name": source_name,
+                        "source_hash": source_asset["sha256"],
+                        "case_fingerprint": fingerprint,
+                    },
+                })
+            try:
+                parsed = parse_reference_config_file(
+                    str(copied_config_path),
+                    str(source),
+                    reference_source_dir=str(reference_source_dir),
+                )
+            except Exception as exc:
+                raise WorkbenchError("case_config_parse_failed", f"复制后的 edda_in 无法解析：{exc}", status_code=422) from exc
+            plan = self._append_precomputed_unsfin_inputs(
+                build_legacy_migration_plan(parsed, source_hash=str(config_asset["sha256"])), parsed
+            )
+            bindings.append({
+                "binding_key": "legacy.config",
+                "asset_id": config_asset["asset_id"],
+                "family": "config",
+                "role": "legacy-config",
+                "ordinal": 1,
+                "active": True,
+                "metadata": {"case_fingerprint": fingerprint, "source_kind": "reference_case"},
+            })
+            for item in plan["proposed_bindings"]:
+                asset = ingest_verified_source(family=str(item["family"]), path=str(item["path"]))
+                assets.append(asset)
+                bindings.append({
+                    "binding_key": item["binding_key"],
+                    "asset_id": asset["asset_id"],
+                    "family": item["family"],
+                    "role": item["role"],
+                    "period_id": item.get("period_id"),
+                    "ordinal": item.get("ordinal"),
+                    "active": bool(item.get("active", True)),
+                    "metadata": {
+                        "native_family": item.get("native_family"),
+                        "source_hash": asset["sha256"],
+                        "case_fingerprint": fingerprint,
+                    },
+                })
+                target_name = item.get("target_name")
+                if target_name:
+                    # The native loader searches case-local names; create
+                    # those names from the verified blob, not the source tree.
+                    shutil.copyfile(
+                        self.get_upload_blob_path(project_id, asset["asset_id"]),
+                        staging / str(target_name),
+                    )
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                resolved_bindings, manifest = self._resolve_binding_assets(connection, bindings)
+                revision_id, revision_status, _, _ = self._insert_input_revision(
+                    connection,
+                    bindings=resolved_bindings,
+                    manifest=manifest,
+                    parent_revision_id=None,
+                    version_tag="Chamoli reference v1",
+                )
+                if revision_status != "ready":
+                    raise WorkbenchError("case_input_invalid", "导入的活动输入未通过内容校验。", status_code=422)
+                values = normalized_parameter_values(parsed)
+                template_id = f"pt-reference-{fingerprint[:24]}"
+                provenance = {
+                    key: {"source": "Chamoli/edda_in.txt", "source_hash": config_asset["sha256"]}
+                    for key in values
+                }
+                provenance["_compute_policy"] = {
+                    "ownership": "reference_case",
+                    "source_mode": "reference_case_import",
+                    "source_files": [
+                        str(item.get("file_name"))
+                        for item in preview.get("source_inventory", [])
+                        if item.get("exists")
+                    ],
+                    "case_fingerprint": fingerprint,
+                    "original_fssimul": parsed.flags.get("simulate_shallow_landslide"),
+                    "topology": parsed.dfs_failure_source_variant or None,
+                    "topology_status": parsed.dfs_failure_source_topology_status,
+                    "evidence": list(parsed.dfs_failure_source_evidence or []),
+                    "detector_version": "reference-config-parser-v1",
+                }
+                now = utc_now()
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO parameter_templates(
+                        template_id, version, name, description, source_kind,
+                        source_hash, values_json, field_provenance_json, created_at
+                    ) VALUES(?, 1, ?, ?, 'reference_case', ?, ?, ?, ?)
+                    """,
+                    (
+                        template_id,
+                        f"Chamoli reference {fingerprint[:8]}",
+                        "由原始 Chamoli edda_in 导入；控制快照归方案所有，未注入 BJ 全局默认。",
+                        config_asset["sha256"],
+                        json.dumps(values, ensure_ascii=False),
+                        json.dumps(provenance, ensure_ascii=False),
+                        now,
+                    ),
+                )
+            scenario = self.create_scenario(
+                project_id,
+                name=(name or "").strip() or "Chamoli reference",
+                input_revision_id=revision_id,
+                base_scenario_id=None,
+                parameter_patch={},
+                parameter_template_id=template_id,
+                control_overrides={},
+            )
+            old_root = str(staging)
+            recovery_path = self._case_import_recovery_path(staging)
+            recovery_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "project_id": project_id,
+                        "staging_root": old_root,
+                        "destination_root": str(destination),
+                        "case_fingerprint": fingerprint,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            if destination.exists():
+                if not destination_is_empty():
+                    raise WorkbenchError(
+                        "case_destination_not_empty",
+                        "发布前目标目录发生变化，已取消导入以避免覆盖现有文件。",
+                        status_code=409,
+                    )
+                destination.rmdir()
+                removed_empty_destination = True
+            staging.replace(destination)
+            moved = True
+            new_database = ProjectDatabase(destination)
+            self._rebase_case_import_paths(new_database, old_root=old_root, destination=destination)
+            with self.catalog() as connection:
+                connection.execute(
+                    "UPDATE projects SET root_path=?, state_path=?, updated_at=? WHERE project_id=?",
+                    (str(destination), str(new_database.database_path), utc_now(), project_id),
+                )
+            project = self.get_project(project_id)
+            final_scenario = self._public_scenario(project_id, self._scenario_row(project_id, scenario["scenario_id"]))
+            try:
+                self._case_import_recovery_path(destination).unlink(missing_ok=True)
+            except OSError:
+                # A lingering advisory marker must not turn a completed
+                # project registration into a failed import.
+                pass
+            return {
+                "project": project,
+                "scenario": final_scenario,
+                "case_fingerprint": fingerprint,
+                "input_revision_id": revision_id,
+                "asset_count": len(assets),
+                "idempotent": False,
+            }
+        except Exception:
+            # A publish rename is not the end of the transaction: the moved
+            # database still needs rebasing and catalog registration.  Roll it
+            # back while the destination is exclusively ours, so a retry does
+            # not encounter a stranded non-empty directory.
+            if moved and destination.exists() and not staging.exists():
+                try:
+                    destination.replace(staging)
+                    moved = False
+                except OSError:
+                    # A durable marker moved with the staged project.  Finish
+                    # the rebase/catalog update if locks or storage pressure
+                    # have cleared; otherwise leave it for the next identical
+                    # import instead of deleting or overwriting the target.
+                    try:
+                        recovered = self._recover_published_case_import(destination, fingerprint)
+                    except WorkbenchError:
+                        recovered = None
+                    if recovered:
+                        return recovered
+            if not moved:
+                if project_id:
+                    with self.catalog() as connection:
+                        connection.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+                if removed_empty_destination and not destination.exists():
+                    try:
+                        destination.mkdir()
+                    except OSError:
+                        pass
+            raise
 
     def update_project(self, project_id: str, *, name: Optional[str], description: Optional[str]) -> Dict[str, Any]:
         current = self.get_project(project_id)
@@ -957,6 +2016,15 @@ class WorkbenchStore:
                 raise WorkbenchError("empty_upload", "参数配置文件不能为空。", status_code=422)
             parsed = parse_reference_config_file(str(preview_path), str(project["root_path"]))
             values = normalized_parameter_values(parsed)
+            compute_policy = {
+                "source_mode": "edda_in_parameter_import",
+                "source_files": [str(parsed.reference_config_file)] if getattr(parsed, "reference_config_file", None) else [],
+                "original_fssimul": parsed.flags.get("simulate_shallow_landslide"),
+                "topology": parsed.dfs_failure_source_variant or None,
+                "topology_status": parsed.dfs_failure_source_topology_status,
+                "evidence": list(parsed.dfs_failure_source_evidence or []),
+                "detector_version": "reference-config-parser-v1",
+            }
             current = json_loads(scenario["effective_parameters_json"], {})
             diff = [
                 {"key": key, "before": current.get(key), "after": values.get(key)}
@@ -977,6 +2045,7 @@ class WorkbenchStore:
                 "source_name": Path(filename or "edda_in.txt").name,
                 "source_hash": digest.hexdigest(),
                 "values": values,
+                "compute_policy": compute_policy,
                 "diff": diff,
                 "ignored_file_references": {
                     "count": ignored_count,
@@ -1004,8 +2073,6 @@ class WorkbenchStore:
         stream: BinaryIO,
     ) -> Dict[str, Any]:
         """Confirm a path-free parameter import without touching input bindings."""
-        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION
-
         preview = self.preview_parameter_import(
             project_id,
             scenario_id,
@@ -1013,7 +2080,7 @@ class WorkbenchStore:
             stream=stream,
         )
         source_hash = str(preview["source_hash"])
-        template_id = f"pt-import-{source_hash[:16]}-params-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
+        template_id = f"pt-import-{source_hash[:16]}-params"
         values = dict(preview["values"])
         now = utc_now()
         database = self.project_database(project_id)
@@ -1021,17 +2088,17 @@ class WorkbenchStore:
             key: {"source": "edda_in_parameter_import", "source_hash": source_hash}
             for key in values
         }
+        provenance["_compute_policy"] = dict(preview.get("compute_policy") or {})
         with database.connect() as connection:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, ?, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
+                ) VALUES(?, 1, ?, ?, 'edda_in_parameter_import', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
-                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported parameters {source_hash[:8]}",
                     "Path-free parameter import; all legacy file references were intentionally ignored.",
                     source_hash,
@@ -1129,7 +2196,7 @@ class WorkbenchStore:
     ) -> Dict[str, Any]:
         """Collect confirmed legacy files and replace path coupling with semantic bindings."""
         from api.services.legacy_migration import build_legacy_migration_plan
-        from api.services.parameter_templates import PATH_FREE_PARAMETER_TEMPLATE_VERSION, normalized_parameter_values
+        from api.services.parameter_templates import normalized_parameter_values
 
         scenario, config_item, parsed = self._legacy_scenario_config(project_id, scenario_id)
         current_version = int(scenario["version"] or 1)
@@ -1169,12 +2236,21 @@ class WorkbenchStore:
             )
 
         values = normalized_parameter_values(parsed)
-        template_id = f"pt-import-{source_hash[:16]}-v{PATH_FREE_PARAMETER_TEMPLATE_VERSION}"
+        template_id = f"pt-import-{source_hash[:16]}"
         database = self.project_database(project_id)
         now = utc_now()
         provenance = {
             key: {"source": "legacy_edda_in", "source_hash": source_hash}
             for key in values
+        }
+        provenance["_compute_policy"] = {
+            "source_mode": "legacy_migration",
+            "source_files": [str(parsed.reference_config_file)] if getattr(parsed, "reference_config_file", None) else [],
+            "original_fssimul": parsed.flags.get("simulate_shallow_landslide"),
+            "topology": parsed.dfs_failure_source_variant or None,
+            "topology_status": parsed.dfs_failure_source_topology_status,
+            "evidence": list(parsed.dfs_failure_source_evidence or []),
+            "detector_version": "reference-config-parser-v1",
         }
         with database.connect() as connection:
             connection.execute(
@@ -1182,11 +2258,10 @@ class WorkbenchStore:
                 INSERT OR IGNORE INTO parameter_templates(
                     template_id, version, name, description, source_kind,
                     source_hash, values_json, field_provenance_json, created_at
-                ) VALUES(?, ?, ?, ?, 'legacy_migration', ?, ?, ?, ?)
+                ) VALUES(?, 1, ?, ?, 'legacy_migration', ?, ?, ?, ?)
                 """,
                 (
                     template_id,
-                    PATH_FREE_PARAMETER_TEMPLATE_VERSION,
                     f"Imported edda_in {source_hash[:8]}",
                     "Path-free parameter template produced by the explicit legacy migration wizard.",
                     source_hash,
@@ -1273,6 +2348,87 @@ class WorkbenchStore:
             raise WorkbenchError("parameter_template_not_found", "参数模板不存在。", status_code=404)
         return json_loads(row["values_json"], {})
 
+    @staticmethod
+    def _parameter_template_metadata(
+        connection: sqlite3.Connection,
+        template_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if not template_id:
+            return {}
+        row = connection.execute(
+            "SELECT template_id, source_kind, source_hash, field_provenance_json FROM parameter_templates WHERE template_id=?",
+            (template_id,),
+        ).fetchone()
+        if not row:
+            raise WorkbenchError("parameter_template_not_found", "参数模板不存在。", status_code=404)
+        return {
+            "template_id": row["template_id"],
+            "source_kind": row["source_kind"],
+            "source_hash": row["source_hash"],
+            "field_provenance": json_loads(row["field_provenance_json"], {}),
+            "_compute_policy": json_loads(row["field_provenance_json"], {}).get("_compute_policy", {}),
+        }
+
+    @staticmethod
+    def _reference_case_owned(metadata: Optional[Mapping[str, Any]]) -> bool:
+        policy = (metadata or {}).get("_compute_policy") if isinstance(metadata, Mapping) else None
+        return bool(isinstance(policy, Mapping) and policy.get("ownership") == "reference_case")
+
+    @staticmethod
+    def _validate_control_overrides(values: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        from api.services.compute_gate_defaults import ComputeGateValidationError, validate_compute_gate_values
+
+        payload = dict(values or {})
+        if not payload:
+            return {}
+        try:
+            return validate_compute_gate_values(payload)
+        except ComputeGateValidationError as exc:
+            raise WorkbenchError(exc.code, exc.message, status_code=422, details=exc.details) from exc
+
+    def _scenario_compute_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        scenario: sqlite3.Row | Dict[str, Any],
+        *,
+        global_gates: Optional[Mapping[str, Any]] = None,
+    ):
+        from api.services.compute_gate_defaults import (
+            ScenarioComputeSnapshot,
+            resolve_scenario_compute_snapshot,
+            strip_gate_parameters,
+        )
+        from api.services.parameter_templates import canonicalize_edda_control_parameters
+        from api.services.compute_policy_resolver import legacy_unrecorded_compute_policy_resolution
+
+        template_id = scenario.get("parameter_template_id") if isinstance(scenario, dict) else scenario["parameter_template_id"]
+        if not template_id:
+            effective = json_loads(scenario.get("effective_parameters_json"), {}) if isinstance(scenario, dict) else json_loads(scenario["effective_parameters_json"], {})
+            legacy_resolution = legacy_unrecorded_compute_policy_resolution()
+            return ScenarioComputeSnapshot(
+                effective_parameters=effective,
+                resolution=legacy_resolution,
+                validation_issues=[],
+            )
+
+        baseline = self._parameter_template_values(connection, str(template_id))
+        metadata = self._parameter_template_metadata(connection, str(template_id))
+        patch_json = scenario.get("parameter_patch_json") if isinstance(scenario, dict) else scenario["parameter_patch_json"]
+        patch = strip_gate_parameters(canonicalize_edda_control_parameters(json_loads(patch_json, {})))
+        control_json = scenario.get("control_overrides_json", "{}") if isinstance(scenario, dict) else scenario["control_overrides_json"]
+        control_overrides = self._validate_control_overrides(json_loads(control_json, {}))
+        return resolve_scenario_compute_snapshot(
+            baseline,
+            patch,
+            global_gates=global_gates if global_gates is not None else self.get_compute_gate_values(),
+            scenario_controls=control_overrides,
+            reference_owned=self._reference_case_owned(metadata),
+            template_id=str(template_id),
+            template_metadata=metadata,
+            source_mode="workbench",
+            strict_reference=True,
+        )
+
     def ingest_upload(
         self,
         project_id: str,
@@ -1292,6 +2448,7 @@ class WorkbenchStore:
             "slope",
             "zones",
             "thickness",
+            "trigger",
             "manning",
             "groundwater",
             "infiltration",
@@ -1301,9 +2458,12 @@ class WorkbenchStore:
             "rifil",
             "zonfil",
             "zfil",
+            "triggerslide",
             "slofil",
             "drainage",
             "swmm",
+            "reference_source",
+            "precomputed_unsfin",
         }
         normalized_family = family.strip().lower()
         if normalized_family not in allowed_families:
@@ -1338,22 +2498,28 @@ class WorkbenchStore:
         # asset.  Repeated rainfall periods may contain identical bytes yet must
         # remain independently bindable and deletable files.
         blob_path = database.blob_dir / sha256[:2] / sha256
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-        deduplicated = blob_path.exists()
-        if deduplicated:
-            staged_path.unlink(missing_ok=True)
-        else:
-            staged_path.replace(blob_path)
 
         summary = "内容校验完成"
         warnings: list[str] = []
         asset_roles = list(roles or [ASSET_ROLE_BY_FAMILY.get(normalized_family, normalized_family)])
         raster_metadata: Dict[str, Any] = {}
         if normalized_family in RASTER_ASSET_FAMILIES:
+            metadata_path = staged_path
+            metadata_probe: Optional[Path] = None
+            source_suffix = Path(safe_name).suffix.lower()
+            # Content-addressed blobs intentionally have no filename suffix.
+            # Preserve the original raster suffix for ASCII grids so GDAL's
+            # AAIGrid driver reads xllcorner/yllcorner instead of falling back
+            # to an origin of (0, 0). This keeps draft and revision manifests
+            # geometrically equivalent after a scenario is duplicated.
+            if source_suffix in {".asc", ".tif", ".tiff", ".img", ".dem"} and staged_path.suffix.lower() != source_suffix:
+                metadata_probe = database.staging_dir / f"{upload_id}{source_suffix}"
+                shutil.copyfile(staged_path, metadata_probe)
+                metadata_path = metadata_probe
             try:
                 from edda.io.spatial_input_loader import SpatialInputLoader
 
-                data, metadata = SpatialInputLoader(str(blob_path)).read()
+                data, metadata = SpatialInputLoader(str(metadata_path)).read()
                 rows, cols = data.shape[:2]
                 bounds = metadata.get("bounds")
                 if bounds is not None and hasattr(bounds, "left"):
@@ -1377,15 +2543,28 @@ class WorkbenchStore:
                 }
             except Exception as exc:
                 warnings.append(f"栅格元数据读取失败：{exc}")
+            finally:
+                if metadata_probe is not None:
+                    metadata_probe.unlink(missing_ok=True)
         parse_summary: Optional[Dict[str, Any]] = None
         if normalized_family == "config":
-            parse_summary = self._try_parse_config_upload(project_id, blob_path)
+            parse_summary = self._try_parse_config_upload(project_id, staged_path)
             if parse_summary:
                 summary = parse_summary.get("summary") or summary
                 warnings = list(parse_summary.get("warnings") or [])
 
         created_at = utc_now()
         with database.connect() as connection:
+            # The logical record and final content placement share this write
+            # lock with batch deletion. A delete can therefore never observe an
+            # uploaded blob before it has a durable owner row.
+            connection.execute("BEGIN IMMEDIATE")
+            blob_path.parent.mkdir(parents=True, exist_ok=True)
+            deduplicated = blob_path.exists()
+            if deduplicated:
+                staged_path.unlink(missing_ok=True)
+            else:
+                staged_path.replace(blob_path)
             connection.execute(
                 """
                 INSERT INTO uploads(
@@ -1542,9 +2721,7 @@ class WorkbenchStore:
             SELECT b.asset_id, COUNT(DISTINCT q.queue_item_id) AS count
             FROM scenario_draft_bindings b
             JOIN queue_items q ON q.scenario_id=b.scenario_id
-            WHERE b.asset_id IN ({placeholders})
-              AND q.deleted_at IS NULL
-              AND q.status IN ('waiting', 'queued')
+            WHERE b.asset_id IN ({placeholders}) AND q.status='queued'
             GROUP BY b.asset_id
             """,
             tuple(normalized),
@@ -1603,9 +2780,7 @@ class WorkbenchStore:
             SELECT DISTINCT q.queue_item_id, q.scenario_id
             FROM queue_items q
             JOIN scenario_draft_bindings b ON b.scenario_id=q.scenario_id
-            WHERE q.deleted_at IS NULL
-              AND q.status IN ('waiting', 'queued')
-              AND b.asset_id IN ({placeholders})
+            WHERE q.status='queued' AND b.asset_id IN ({placeholders})
             ORDER BY q.queue_item_id
             """,
             tuple(normalized),
@@ -1704,7 +2879,7 @@ class WorkbenchStore:
             normalized = impact["asset_ids"]
             placeholders = ",".join("?" for _ in normalized)
             removed_rows = connection.execute(
-                f"SELECT sha256 FROM uploads WHERE upload_id IN ({placeholders})",
+                f"SELECT sha256, blob_path FROM uploads WHERE upload_id IN ({placeholders})",
                 tuple(normalized),
             ).fetchall()
             now = utc_now()
@@ -1715,9 +2890,7 @@ class WorkbenchStore:
                     UPDATE queue_items
                     SET status='cancelled', finished_at=?, summary='Draft input deleted; queue item cancelled.',
                         cancel_reason='asset_deleted'
-                    WHERE queue_item_id IN ({queue_placeholders})
-                      AND status IN ('waiting', 'queued')
-                      AND deleted_at IS NULL
+                    WHERE queue_item_id IN ({queue_placeholders}) AND status='queued'
                     """,
                     (now, *impact["cancelled_queue_item_ids"]),
                 )
@@ -1732,7 +2905,7 @@ class WorkbenchStore:
                     UPDATE scenarios
                     SET status='draft', version=version+1, updated_at=?
                     WHERE scenario_id IN ({scenario_placeholders})
-                      AND archived=0 AND status IN ('draft', 'ready', 'queued', 'waiting')
+                      AND archived=0 AND status IN ('draft', 'ready', 'queued')
                     """,
                     (now, *impact["affected_scenario_ids"]),
                 )
@@ -1740,20 +2913,62 @@ class WorkbenchStore:
                 f"DELETE FROM uploads WHERE upload_id IN ({placeholders})",
                 tuple(normalized),
             )
+            # Commit the logical deletion before touching content files. A
+            # fresh write lock below rechecks every reference so a concurrent
+            # upload that publishes the same digest cannot lose its blob.
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
             manifests = connection.execute("SELECT manifest_json FROM input_revisions").fetchall()
-            retained_snapshot_blob_count = sum(
-                1
+            retained_snapshot_hashes = {
+                str(entry.get("sha256") or "")
+                for manifest in manifests
+                for entry in json_loads(manifest["manifest_json"], [])
+                if entry.get("sha256")
+            }
+            candidate_blobs = {
+                str(row["sha256"]): str(row["blob_path"])
                 for row in removed_rows
-                if any(
-                    any(str(entry.get("sha256") or "") == str(row["sha256"]) for entry in json_loads(manifest["manifest_json"], []))
-                    for manifest in manifests
-                )
+            }
+            retained_snapshot_blob_count = sum(
+                sha256 in retained_snapshot_hashes for sha256 in candidate_blobs
             )
+            retained_upload_blob_count = 0
+            deleted_blob_count = 0
+            cleanup_failures: list[Dict[str, str]] = []
+            blob_root = database.blob_dir.resolve()
+            for sha256, stored_path in candidate_blobs.items():
+                if sha256 in retained_snapshot_hashes:
+                    continue
+                remaining_upload = connection.execute(
+                    "SELECT 1 FROM uploads WHERE sha256=? LIMIT 1",
+                    (sha256,),
+                ).fetchone()
+                if remaining_upload:
+                    retained_upload_blob_count += 1
+                    continue
+                blob_path = Path(stored_path).resolve()
+                expected_path = (blob_root / sha256[:2] / sha256).resolve()
+                try:
+                    blob_path.relative_to(blob_root)
+                    if blob_path != expected_path:
+                        raise ValueError("content path does not match its digest")
+                except ValueError as exc:
+                    cleanup_failures.append({"sha256": sha256, "path": str(blob_path), "error": str(exc)})
+                    continue
+                try:
+                    if blob_path.is_file():
+                        blob_path.unlink()
+                        deleted_blob_count += 1
+                except OSError as exc:
+                    cleanup_failures.append({"sha256": sha256, "path": str(blob_path), "error": str(exc)})
         return {
             "deleted_ids": impact["asset_ids"],
             "detached_binding_count": impact["detached_binding_count"],
             "cancelled_queue_item_ids": impact["cancelled_queue_item_ids"],
             "retained_snapshot_blob_count": retained_snapshot_blob_count,
+            "retained_upload_blob_count": retained_upload_blob_count,
+            "deleted_blob_count": deleted_blob_count,
+            "orphaned_blob_cleanup_failures": cleanup_failures,
         }
 
     def delete_asset(self, project_id: str, asset_id: str) -> None:
@@ -2448,8 +3663,11 @@ class WorkbenchStore:
         return keys
 
     def _validate_parameter_patch(self, patch: Dict[str, Any]) -> None:
+        from api.services.compute_gate_defaults import strip_gate_parameters
+
         allowed = self._editable_parameter_keys()
-        invalid = sorted(key for key in patch if key not in allowed)
+        scientific = strip_gate_parameters(patch)
+        invalid = sorted(key for key in scientific if key not in allowed)
         if invalid:
             raise WorkbenchError(
                 "parameter_not_editable",
@@ -2557,7 +3775,13 @@ class WorkbenchStore:
             connection.commit()
         return recovered
 
-    def _public_scenario(self, project_id: str, row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    def _public_scenario(
+        self,
+        project_id: str,
+        row: sqlite3.Row | Dict[str, Any],
+        *,
+        global_gates: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         database = self.project_database(project_id)
         data = dict(row)
         work_dir = database.scenario_dir(str(data["scenario_id"]))
@@ -2596,8 +3820,26 @@ class WorkbenchStore:
                 connection,
                 data.get("parameter_template_id"),
             )
+            parameter_metadata = self._parameter_template_metadata(
+                connection,
+                data.get("parameter_template_id"),
+            )
+            control_overrides = self._validate_control_overrides(
+                json_loads(data.get("control_overrides_json"), {})
+            )
+            compute_snapshot = self._scenario_compute_snapshot(
+                connection,
+                row,
+                global_gates=global_gates,
+            )
         file_count = len(input_bindings) if input_bindings else (len(json_loads(revision["manifest_json"], [])) if revision else 0)
         relative_work = str(work_dir.relative_to(database.root)).replace("\\", "/")
+        from api.services.parameter_templates import canonicalize_edda_control_parameters
+        from api.services.compute_gate_defaults import strip_gate_parameters
+
+        parameter_patch = strip_gate_parameters(
+            canonicalize_edda_control_parameters(json_loads(data["parameter_patch_json"], {}))
+        )
         return {
             "scenario_id": data["scenario_id"],
             "project_id": project_id,
@@ -2606,8 +3848,13 @@ class WorkbenchStore:
             "base_scenario_id": data.get("base_scenario_id"),
             "parameter_template_id": data.get("parameter_template_id"),
             "parameter_baseline": parameter_baseline,
-            "parameter_patch": json_loads(data["parameter_patch_json"], {}),
-            "effective_parameters": json_loads(data["effective_parameters_json"], {}),
+            "parameter_patch": parameter_patch,
+            "control_overrides": control_overrides,
+            "configuration_ownership": "reference_case" if self._reference_case_owned(parameter_metadata) else "global_defaults",
+            "case_fingerprint": ((parameter_metadata.get("_compute_policy") or {}).get("case_fingerprint")
+                                  if isinstance(parameter_metadata.get("_compute_policy"), Mapping) else None),
+            "effective_parameters": compute_snapshot.effective_parameters,
+            "compute_policy_resolution": compute_snapshot.resolution,
             "input_bindings": input_bindings,
             "binding_state": binding_state,
             "version": int(data.get("version") or 1),
@@ -2636,6 +3883,12 @@ class WorkbenchStore:
         scenario = self._public_scenario(project_id, scenario_row)
         database = self.project_database(project_id)
         manifest: list[Dict[str, Any]] = []
+        with database.connect() as connection:
+            defaults_row = {**dict(scenario_row), "control_overrides_json": "{}"}
+            control_defaults = self._scenario_compute_snapshot(connection, defaults_row).effective_parameters
+            has_history = connection.execute(
+                "SELECT COUNT(*) FROM simulation_runs WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0]
         revision_validation: Dict[str, Any] = {}
         draft_validation: Dict[str, Any] = json_loads(scenario_row["draft_validation_json"], {})
         if scenario.get("input_revision_id"):
@@ -2651,6 +3904,16 @@ class WorkbenchStore:
                 draft_bindings = self._bindings_for_draft_connection(connection, scenario_id)
                 _, manifest = self._resolve_binding_assets(connection, draft_bindings)
         validation = validate_scenario_configuration(scenario["effective_parameters"], manifest)
+        resolution = scenario.get("compute_policy_resolution") or {}
+        if str(resolution.get("status") or "resolved") != "resolved":
+            issue = resolution.get("blocking_issue") or {
+                "code": "compute_policy_resolution_blocked",
+                "severity": "error",
+                "message": "失稳源策略尚未通过严格参考配置解析。",
+            }
+            validation["valid"] = False
+            validation.setdefault("errors", []).append(str(issue.get("message") or "失稳源策略解析失败。"))
+            validation.setdefault("issues", []).append(issue)
         unresolved = list((revision_validation or draft_validation).get("unresolved_bindings") or [])
         if unresolved:
             validation["valid"] = False
@@ -2664,10 +3927,16 @@ class WorkbenchStore:
             "parameter_template_id": scenario.get("parameter_template_id"),
             "baseline": scenario.get("parameter_baseline") or {},
             "overrides": scenario.get("parameter_patch") or {},
+            "control_overrides": scenario.get("control_overrides") or {},
+            "control_defaults": control_defaults,
+            "editable": bool(scenario.get("parameter_template_id")) and not has_history and scenario.get("status") in {"draft", "ready"},
+            "configuration_ownership": scenario.get("configuration_ownership") or "global_defaults",
+            "case_fingerprint": scenario.get("case_fingerprint"),
             "effective": scenario.get("effective_parameters") or {},
             "bindings": scenario.get("input_bindings") or [],
             "binding_state": scenario.get("binding_state") or "draft",
             "validation": validation,
+            "compute_policy_resolution": resolution,
             "version": scenario.get("version", 1),
         }
 
@@ -2680,8 +3949,10 @@ class WorkbenchStore:
         base_scenario_id: Optional[str],
         parameter_patch: Dict[str, Any],
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from api.services.parameter_templates import BJ_HXL_TEMPLATE_ID, merge_parameter_values, normalize_rainfall_patch
+        from api.services.compute_gate_defaults import strip_gate_parameters
 
         database = self.project_database(project_id)
         base = self._scenario_row(project_id, base_scenario_id) if base_scenario_id else None
@@ -2708,14 +3979,26 @@ class WorkbenchStore:
                 # and old revisions never become implicit scenario inputs.
                 revision = None
             baseline = self._parameter_template_values(connection, selected_template_id)
+            template_metadata = self._parameter_template_metadata(connection, selected_template_id)
         if revision and revision["status"] != "ready":
             raise WorkbenchError("input_revision_invalid", "方案只能引用已通过校验的输入修订。", status_code=409)
 
         effective_patch = json_loads(base["parameter_patch_json"], {}) if base else {}
         effective_patch.update(parameter_patch)
-        effective_patch = normalize_rainfall_patch(effective_patch)
+        effective_patch = strip_gate_parameters(normalize_rainfall_patch(effective_patch))
         self._validate_parameter_patch(effective_patch)
-        effective_parameters = merge_parameter_values(baseline, effective_patch)
+        effective_controls = self._validate_control_overrides(
+            control_overrides
+            if control_overrides is not None
+            else (json_loads(base["control_overrides_json"], {}) if base is not None else {})
+        )
+        effective_parameters = self._merged_effective_parameters(
+            baseline,
+            effective_patch,
+            template_id=selected_template_id,
+            template_metadata=template_metadata,
+            control_overrides=effective_controls,
+        )
         scenario_id = f"scn-{uuid4().hex}"
         now = utc_now()
         status = "ready" if revision else "draft"
@@ -2725,9 +4008,9 @@ class WorkbenchStore:
                 """
                 INSERT INTO scenarios(
                     scenario_id, name, input_revision_id, base_scenario_id,
-                    parameter_template_id, parameter_patch_json, effective_parameters_json, status,
-                    archived, latest_simulation_id, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    parameter_template_id, parameter_patch_json, control_overrides_json,
+                    effective_parameters_json, status, archived, latest_simulation_id, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
                 """,
                 (
                     scenario_id,
@@ -2736,6 +4019,7 @@ class WorkbenchStore:
                     base_scenario_id,
                     selected_template_id,
                     json.dumps(effective_patch, ensure_ascii=False),
+                    json.dumps(effective_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     status,
                     now,
@@ -2760,9 +4044,11 @@ class WorkbenchStore:
         input_revision_id: Optional[str] = None,
         input_bindings: Optional[list[Dict[str, Any]]] = None,
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         from api.services.parameter_templates import merge_parameter_values, normalize_rainfall_patch
+        from api.services.compute_gate_defaults import strip_gate_parameters
 
         database = self.project_database(project_id)
         row = self._scenario_row(project_id, scenario_id)
@@ -2787,7 +4073,7 @@ class WorkbenchStore:
                 status_code=409,
                 details={"expected_version": expected_version, "current_version": current_version},
             )
-        patch = json_loads(row["parameter_patch_json"], {}) if parameter_patch is None else normalize_rainfall_patch(parameter_patch)
+        patch = json_loads(row["parameter_patch_json"], {}) if parameter_patch is None else strip_gate_parameters(normalize_rainfall_patch(parameter_patch))
         self._validate_parameter_patch(patch)
         new_name = row["name"] if name is None else name.strip()
         if not new_name:
@@ -2836,12 +4122,24 @@ class WorkbenchStore:
                 else parameter_template_id
             )
             baseline = self._parameter_template_values(connection, next_template_id)
-            effective_parameters = merge_parameter_values(baseline, patch)
+            template_metadata = self._parameter_template_metadata(connection, next_template_id)
+            next_controls = self._validate_control_overrides(
+                control_overrides
+                if control_overrides is not None
+                else json_loads(row["control_overrides_json"], {})
+            )
+            effective_parameters = self._merged_effective_parameters(
+                baseline,
+                patch,
+                template_id=next_template_id,
+                template_metadata=template_metadata,
+                control_overrides=next_controls,
+            )
             next_version = current_version + 1
             connection.execute(
                 """
                 UPDATE scenarios SET name=?, input_revision_id=?, parameter_template_id=?,
-                    parameter_patch_json=?, effective_parameters_json=?, version=?,
+                    parameter_patch_json=?, control_overrides_json=?, effective_parameters_json=?, version=?,
                     status=?, updated_at=? WHERE scenario_id=?
                 """,
                 (
@@ -2849,6 +4147,7 @@ class WorkbenchStore:
                     next_revision_id,
                     next_template_id,
                     json.dumps(patch, ensure_ascii=False),
+                    json.dumps(next_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
                     next_status,
@@ -2874,10 +4173,12 @@ class WorkbenchStore:
         input_revision_id: Optional[str] = None,
         input_bindings: Optional[list[Dict[str, Any]]] = None,
         parameter_template_id: Optional[str] = None,
+        control_overrides: Optional[Dict[str, Any]] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Atomically update only mutable draft state; snapshots are scheduler-owned."""
         from api.services.parameter_templates import merge_parameter_values, normalize_rainfall_patch
+        from api.services.compute_gate_defaults import strip_gate_parameters
 
         database = self.project_database(project_id)
         with database.connect() as connection:
@@ -2891,7 +4192,7 @@ class WorkbenchStore:
             active_queue_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM queue_items
-                WHERE scenario_id=? AND status IN ('starting', 'running', 'stopping')
+                    WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()[0]
@@ -2912,11 +4213,23 @@ class WorkbenchStore:
             new_name = str(row["name"]) if name is None else name.strip()
             if not new_name:
                 raise WorkbenchError("invalid_scenario_name", "Scenario name cannot be empty.", status_code=422)
-            patch = json_loads(row["parameter_patch_json"], {}) if parameter_patch is None else normalize_rainfall_patch(parameter_patch)
+            patch = json_loads(row["parameter_patch_json"], {}) if parameter_patch is None else strip_gate_parameters(normalize_rainfall_patch(parameter_patch))
             self._validate_parameter_patch(patch)
             next_template_id = row["parameter_template_id"] if parameter_template_id is None else parameter_template_id
             baseline = self._parameter_template_values(connection, next_template_id)
-            effective_parameters = merge_parameter_values(baseline, patch)
+            template_metadata = self._parameter_template_metadata(connection, next_template_id)
+            next_controls = self._validate_control_overrides(
+                control_overrides
+                if control_overrides is not None
+                else json_loads(row["control_overrides_json"], {})
+            )
+            effective_parameters = self._merged_effective_parameters(
+                baseline,
+                patch,
+                template_id=next_template_id,
+                template_metadata=template_metadata,
+                control_overrides=next_controls,
+            )
 
             current_draft = self._bindings_for_draft_connection(connection, scenario_id)
             legacy_bindings = self._bindings_for_revision_connection(connection, row["input_revision_id"])
@@ -2938,30 +4251,47 @@ class WorkbenchStore:
                 (self._binding_projection(binding) for binding in next_bindings),
                 key=lambda binding: binding["binding_key"],
             )
+            # Parameter-only edits must retain a ready immutable input revision.
+            # The editor submits its current binding projection with every save;
+            # turning that identical projection into a draft would lose input
+            # provenance without any input mutation.  Inputs only return to
+            # draft state when their projected binding identity actually changes.
+            preserve_input_revision = bool(
+                row["input_revision_id"]
+                and not current_draft
+                and current_projection == next_projection
+                and input_revision_id is None
+            )
+            next_input_revision_id = row["input_revision_id"] if preserve_input_revision else None
+            next_status = "ready" if preserve_input_revision else "draft"
             draft_changed = (
                 current_projection != next_projection
                 or json_loads(row["parameter_patch_json"], {}) != patch
+                or json_loads(row["control_overrides_json"], {}) != next_controls
                 or str(row["name"]) != new_name
                 or row["parameter_template_id"] != next_template_id
-                or row["input_revision_id"] is not None
             )
-            self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
+            if not preserve_input_revision:
+                self._replace_draft_bindings_connection(connection, scenario_id, next_bindings)
             now = utc_now()
             next_version = current_version + 1
             connection.execute(
                 """
                 UPDATE scenarios
-                SET name=?, input_revision_id=NULL, parameter_template_id=?,
-                    parameter_patch_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
-                    status='draft', updated_at=?
+                SET name=?, input_revision_id=?, parameter_template_id=?,
+                    parameter_patch_json=?, control_overrides_json=?, effective_parameters_json=?, draft_validation_json='{}', version=?,
+                    status=?, updated_at=?
                 WHERE scenario_id=?
                 """,
                 (
                     new_name,
+                    next_input_revision_id,
                     next_template_id,
                     json.dumps(patch, ensure_ascii=False),
+                    json.dumps(next_controls, ensure_ascii=False),
                     json.dumps(effective_parameters, ensure_ascii=False),
                     next_version,
+                    next_status,
                     now,
                     scenario_id,
                 ),
@@ -2972,7 +4302,7 @@ class WorkbenchStore:
                     UPDATE queue_items
                     SET status='cancelled', finished_at=?, summary='Draft changed; queue item cancelled.',
                         cancel_reason='draft_changed'
-                    WHERE scenario_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
+                    WHERE scenario_id=? AND status='queued'
                     """,
                     (now, scenario_id),
                 )
@@ -2993,11 +4323,22 @@ class WorkbenchStore:
             base_scenario_id=scenario_id,
             parameter_patch=json_loads(source["parameter_patch_json"], {}),
             parameter_template_id=source["parameter_template_id"],
+            control_overrides=json_loads(source["control_overrides_json"], {}),
         )
 
     def duplicate_scenario(self, project_id: str, scenario_id: str) -> Dict[str, Any]:
         """Copy any draft or historical bindings into a new mutable scenario."""
         source = self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
+        if source.get("input_revision_id"):
+            return self.create_scenario(
+                project_id,
+                name=f"{source['name']} (copy)",
+                input_revision_id=str(source["input_revision_id"]),
+                base_scenario_id=scenario_id,
+                parameter_patch=dict(source["parameter_patch"]),
+                parameter_template_id=source.get("parameter_template_id"),
+                control_overrides=dict(source.get("control_overrides") or {}),
+            )
         duplicate = self.create_scenario(
             project_id,
             name=f"{source['name']} (copy)",
@@ -3005,6 +4346,7 @@ class WorkbenchStore:
             base_scenario_id=scenario_id,
             parameter_patch=dict(source["parameter_patch"]),
             parameter_template_id=source.get("parameter_template_id"),
+            control_overrides=dict(source.get("control_overrides") or {}),
         )
         bindings = list(source.get("input_bindings") or [])
         if not bindings:
@@ -3016,6 +4358,7 @@ class WorkbenchStore:
             parameter_patch=dict(source["parameter_patch"]),
             input_bindings=bindings,
             parameter_template_id=source.get("parameter_template_id"),
+            control_overrides=dict(source.get("control_overrides") or {}),
             expected_version=duplicate.get("version"),
         )
 
@@ -3051,54 +4394,271 @@ class WorkbenchStore:
         database = self.project_database(project_id)
         with database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM queue_items WHERE queue_item_id=?", (queue_item_id,)
+                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL", (queue_item_id,)
             ).fetchone()
         if not row:
             raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
         return row
 
-    def _public_queue_item(self, project_id: str, row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    def _public_queue_item(
+        self,
+        project_id: str,
+        row: sqlite3.Row | Dict[str, Any],
+        *,
+        display_position: Optional[int] = None,
+    ) -> Dict[str, Any]:
         database = self.project_database(project_id)
         data = dict(row)
         with database.connect() as connection:
             scenario = connection.execute(
                 "SELECT name FROM scenarios WHERE scenario_id=?", (data["scenario_id"],)
             ).fetchone()
+            if data["status"] == "queued" and display_position is None:
+                waiting_ahead = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM queue_items
+                    WHERE status='queued' AND deleted_at IS NULL AND (
+                        position < ?
+                        OR (position = ? AND (
+                            enqueued_at < ?
+                            OR (enqueued_at = ? AND queue_item_id < ?)
+                        ))
+                    )
+                    """,
+                    (
+                        data["position"],
+                        data["position"],
+                        data["enqueued_at"],
+                        data["enqueued_at"],
+                        data["queue_item_id"],
+                    ),
+                ).fetchone()[0]
+                display_position = int(waiting_ahead) + 1
+        position = display_position if data["status"] == "queued" else int(data["position"])
         return {
             "queue_item_id": data["queue_item_id"],
             "project_id": project_id,
             "scenario_id": data["scenario_id"],
             "scenario_name": scenario["name"] if scenario else data["scenario_id"],
-            "position": data["position"],
-            "queue_order": int(data["queue_order"]) if data.get("queue_order") is not None else None,
+            "position": position,
             "status": data["status"],
             "simulation_id": data.get("simulation_id"),
             "scenario_version": int(data["scenario_version"]) if data.get("scenario_version") is not None else None,
             "input_revision_id": data.get("input_revision_id"),
             "cancel_reason": data.get("cancel_reason"),
             "retry_of": data.get("retry_of"),
+            "runtime_profile": data.get("runtime_profile") or "cuda_production_default",
+            "run_options": json_loads(data.get("run_options_json"), {}),
+            "effective_config": json_loads(data.get("effective_config_json"), {}),
+            "compute_policy_resolution": json_loads(data.get("compute_policy_resolution_json"), {}),
             "enqueued_at": data["enqueued_at"],
             "started_at": data.get("started_at"),
             "finished_at": data.get("finished_at"),
             "progress": float(data["progress"]),
             "summary": data["summary"],
-            "deletable": data.get("status") not in {"starting", "running", "stopping"},
         }
 
     def list_queue(self, project_id: str) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
         with database.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM queue_items
-                WHERE deleted_at IS NULL
-                ORDER BY
-                    CASE WHEN status IN ('waiting', 'queued', 'starting', 'running', 'stopping') THEN 0 ELSE 1 END,
-                    CASE WHEN status IN ('waiting', 'queued') THEN queue_order ELSE NULL END,
-                    position, enqueued_at, queue_item_id
-                """
+                "SELECT * FROM queue_items WHERE deleted_at IS NULL ORDER BY position, enqueued_at, queue_item_id"
             ).fetchall()
-        return [self._public_queue_item(project_id, row) for row in rows]
+        display_positions = {
+            row["queue_item_id"]: index
+            for index, row in enumerate((row for row in rows if row["status"] == "queued"), start=1)
+        }
+        return [
+            self._public_queue_item(project_id, row, display_position=display_positions.get(row["queue_item_id"]))
+            for row in rows
+        ]
+
+
+    def _normalize_run_options(
+        self,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+        *,
+        frozen_manifest: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Freeze strictly validated, run-only diagnostics for one queue item.
+
+        Legacy `{}` values deliberately remain equivalent to diagnostics-off.
+        New probe requests are fail-closed: no numeric coercion, truncation, or
+        implicit deduplication is permitted before a queue item is created.
+        """
+        payload: Dict[str, Any] = {"diagnostics": {"erosion_probe": {"enabled": False, "probe_cells": []}}}
+        if diagnostics is None or diagnostics == {}:
+            return payload
+        if not isinstance(diagnostics, Mapping):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "运行诊断必须是对象。",
+                status_code=422,
+            )
+        erosion = diagnostics.get("erosion_probe")
+        if erosion is None:
+            return payload
+        if not isinstance(erosion, Mapping):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "侵蚀探针诊断必须是对象。",
+                status_code=422,
+            )
+        enabled_value = erosion.get("enabled", False)
+        if not isinstance(enabled_value, bool):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "侵蚀探针开关必须为布尔值。",
+                status_code=422,
+            )
+        raw_cells = erosion.get("probe_cells", [])
+        if not isinstance(raw_cells, list):
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "探针格点必须是二维整数列表。",
+                status_code=422,
+            )
+        if len(raw_cells) > 32:
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "探针格点最多 32 个。",
+                status_code=422,
+                details={"max_probe_cells": 32},
+            )
+        cells: list[list[int]] = []
+        seen: set[tuple[int, int]] = set()
+        for index, cell in enumerate(raw_cells):
+            if not isinstance(cell, (list, tuple)) or len(cell) != 2:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针必须恰好为 [row, col]。",
+                    status_code=422,
+                )
+            row, col = cell
+            if isinstance(row, bool) or isinstance(col, bool) or not isinstance(row, int) or not isinstance(col, int):
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针的 row/col 必须为非负整数。",
+                    status_code=422,
+                )
+            if row < 0 or col < 0:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"第 {index + 1} 个探针的 row/col 必须为非负整数。",
+                    status_code=422,
+                )
+            coordinate = (row, col)
+            if coordinate in seen:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 重复。",
+                    status_code=422,
+                )
+            seen.add(coordinate)
+            cells.append([row, col])
+        if enabled_value and not cells:
+            raise WorkbenchError(
+                "erosion_probe_invalid",
+                "启用侵蚀探针时至少需要一个探针格点。",
+                status_code=422,
+            )
+        if cells:
+            self._validate_erosion_probe_cells_against_frozen_dem(cells, frozen_manifest or [])
+        payload["diagnostics"]["erosion_probe"] = {
+            "enabled": enabled_value,
+            "probe_cells": cells,
+        }
+        return payload
+
+    @staticmethod
+    def _validate_erosion_probe_cells_against_frozen_dem(
+        cells: list[list[int]],
+        frozen_manifest: list[Dict[str, Any]],
+    ) -> None:
+        """Validate coordinates against the exact DEM carried by this run."""
+        import numpy as np
+
+        dem_entry = next(
+            (
+                item
+                for item in frozen_manifest
+                if bool(item.get("active", True))
+                and (
+                    str(item.get("binding_key") or "") == "dem.primary"
+                    or str(item.get("family") or "").lower() in {"dem", "demfil"}
+                )
+            ),
+            None,
+        )
+        if not dem_entry or not dem_entry.get("blob_path"):
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "无法用冻结 DEM 校验探针格点。",
+                status_code=422,
+            )
+        dem_path = Path(str(dem_entry["blob_path"]))
+        if not dem_path.is_file():
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "冻结 DEM 文件不可用，不能入队。",
+                status_code=422,
+            )
+        try:
+            source_suffix = Path(str(dem_entry.get("name") or dem_path.name)).suffix.lower()
+            if source_suffix in {".asc", ".txt"}:
+                from edda.io.dem_reader import read_ascii_grid
+
+                data, metadata = read_ascii_grid(str(dem_path))
+                height = int(metadata["height"])
+                width = int(metadata["width"])
+                nodata = metadata.get("nodata", metadata.get("nodata_value"))
+                array = np.asarray(data, dtype=np.float64).reshape((height, width))
+            elif source_suffix in {".tif", ".tiff"}:
+                import rasterio
+
+                with rasterio.open(dem_path) as source:
+                    array = np.asarray(source.read(1), dtype=np.float64)
+                    height, width = int(source.height), int(source.width)
+                    nodata = source.nodata
+            else:
+                raise ValueError(f"不支持的 DEM 格式：{source_suffix or dem_path.suffix}")
+        except Exception as exc:
+            raise WorkbenchError(
+                "erosion_probe_dem_unavailable",
+                "冻结 DEM 无法读取，不能校验探针格点。",
+                status_code=422,
+                details={"dem": str(dem_path), "reason": str(exc)},
+            ) from exc
+        for row, col in cells:
+            if row >= height or col >= width:
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 超出冻结 DEM 边界。",
+                    status_code=422,
+                    details={"height": height, "width": width, "cell": [row, col]},
+                )
+            value = float(array[row, col])
+            if not np.isfinite(value) or (nodata is not None and value == float(nodata)):
+                raise WorkbenchError(
+                    "erosion_probe_invalid",
+                    f"探针格点 ({row},{col}) 位于冻结 DEM 的 NoData 区域。",
+                    status_code=422,
+                    details={"cell": [row, col]},
+                )
+
+    @staticmethod
+    def _resolve_enqueue_runtime_profile(runtime_profile: Optional[str]) -> str:
+        from api.services.runtime_profile import resolve_user_runtime_profile
+
+        try:
+            return resolve_user_runtime_profile(runtime_profile).name
+        except ValueError as exc:
+            raise WorkbenchError(
+                "runtime_profile_invalid",
+                "不支持的计算后端。请选择 CUDA 加速或 CPU 兼容。",
+                status_code=422,
+                details={"runtime_profile": runtime_profile},
+            ) from exc
 
     def _legacy_enqueue_scenario(
         self,
@@ -3106,6 +4666,7 @@ class WorkbenchStore:
         scenario_id: str,
         *,
         retry_of: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
     ) -> Dict[str, Any]:
         database = self.project_database(project_id)
         scenario = self._scenario_row(project_id, scenario_id)
@@ -3149,6 +4710,21 @@ class WorkbenchStore:
         if scenario["parameter_template_id"]:
             validation = self.get_scenario_configuration(project_id, scenario_id)["validation"]
             if not validation["valid"]:
+                semantic_gate = validation.get("edda_semantic_gate") or {}
+                if semantic_gate.get("decision") == "reject" and semantic_gate.get("code"):
+                    raise WorkbenchError(
+                        str(semantic_gate["code"]),
+                        next(
+                            (
+                                str(issue.get("message"))
+                                for issue in validation.get("issues", [])
+                                if issue.get("code") == semantic_gate.get("code")
+                            ),
+                            "EDDA semantic preflight rejected the scenario.",
+                        ),
+                        status_code=422,
+                        details=validation,
+                    )
                 raise WorkbenchError(
                     "scenario_configuration_invalid",
                     "方案参数或输入绑定未通过运行预检。",
@@ -3159,23 +4735,23 @@ class WorkbenchStore:
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND status IN ('queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
             if duplicate:
                 raise WorkbenchError("scenario_already_queued", "方案已在队列中。", status_code=409)
-            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
+            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items WHERE deleted_at IS NULL AND status='queued'").fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
             connection.execute(
                 """
                 INSERT INTO queue_items(
                     queue_item_id, scenario_id, position, status, simulation_id,
-                    retry_of, enqueued_at, started_at, finished_at, progress, summary
-                ) VALUES(?, ?, ?, 'queued', NULL, ?, ?, NULL, NULL, 0, '等待调度')
+                    retry_of, runtime_profile, enqueued_at, started_at, finished_at, progress, summary
+                ) VALUES(?, ?, ?, 'queued', NULL, ?, ?, ?, NULL, NULL, 0, '等待调度')
                 """,
-                (queue_item_id, scenario_id, position, retry_of, now),
+                (queue_item_id, scenario_id, position, retry_of, self._resolve_enqueue_runtime_profile(runtime_profile), now),
             )
             connection.execute(
                 "UPDATE scenarios SET status='queued', updated_at=? WHERE scenario_id=?",
@@ -3190,24 +4766,90 @@ class WorkbenchStore:
         *,
         retry_of: Optional[str] = None,
         snapshot_revision_id: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
+        frozen_effective_config: Optional[Mapping[str, Any]] = None,
+        frozen_compute_policy_resolution: Optional[Mapping[str, Any]] = None,
+        frozen_scenario_version: Optional[int] = None,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+        frozen_run_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Queue a mutable draft; its immutable input revision is made at claim time."""
-        scenario = self._public_scenario(project_id, self._scenario_row(project_id, scenario_id))
+        """Queue a draft and freeze its compute policy at enqueue time."""
+        from api.services.structured_input_resolver import validate_scenario_configuration
+
+        has_frozen_policy = (
+            isinstance(frozen_effective_config, Mapping)
+            and bool(frozen_effective_config)
+            and isinstance(frozen_compute_policy_resolution, Mapping)
+            and bool(frozen_compute_policy_resolution)
+        )
+        # Settings are a sparse global override map.  Read them exactly once
+        # for a new enqueue operation and carry that immutable snapshot through
+        # preview, validation, and the queue INSERT.  Retry paths already carry
+        # their original frozen policy and intentionally do not read Settings.
+        enqueue_global_gates = None if has_frozen_policy else self.get_compute_gate_values()
+        if has_frozen_policy:
+            raw_scenario = self._scenario_row(project_id, scenario_id)
+            scenario = {
+                "scenario_id": str(raw_scenario["scenario_id"]),
+                "status": raw_scenario["status"],
+                "input_revision_id": raw_scenario["input_revision_id"],
+                "binding_state": "runtime_snapshot" if raw_scenario["input_revision_id"] else "draft",
+                "effective_parameters": dict(frozen_effective_config or {}),
+                "compute_policy_resolution": dict(frozen_compute_policy_resolution or {}),
+            }
+        else:
+            scenario = self._public_scenario(
+                project_id,
+                self._scenario_row(project_id, scenario_id),
+                global_gates=enqueue_global_gates,
+            )
         if scenario["status"] == "archived":
             raise WorkbenchError("scenario_archived", "Archived scenarios cannot be queued.", status_code=409)
         frozen_revision_id = snapshot_revision_id
+        frozen_manifest: list[Dict[str, Any]] | None = None
         if frozen_revision_id is None and scenario.get("binding_state") == "runtime_snapshot":
             frozen_revision_id = scenario.get("input_revision_id")
         if frozen_revision_id:
             revision = self._revision_row(project_id, str(frozen_revision_id))
             if revision["status"] != "ready":
                 raise WorkbenchError("input_revision_invalid", "The frozen input snapshot is invalid.", status_code=409)
-        else:
-            validation = self.get_scenario_configuration(project_id, scenario_id)["validation"]
+            frozen_manifest = json_loads(revision["manifest_json"], [])
+
+        queue_effective = dict(frozen_effective_config or scenario.get("effective_parameters") or {})
+        queue_resolution = dict(
+            frozen_compute_policy_resolution
+            or scenario.get("compute_policy_resolution")
+            or {}
+        )
+        if frozen_effective_config is None or frozen_compute_policy_resolution is None:
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                current_for_snapshot = connection.execute(
+                    "SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)
+                ).fetchone()
+                if current_for_snapshot:
+                    snapshot = self._scenario_compute_snapshot(
+                        connection,
+                        current_for_snapshot,
+                        global_gates=enqueue_global_gates,
+                    )
+                    queue_effective = dict(snapshot.effective_parameters)
+                    queue_resolution = dict(snapshot.resolution)
+        if str(queue_resolution.get("status") or "resolved") != "resolved":
+            issue = queue_resolution.get("blocking_issue") or {}
+            raise WorkbenchError(
+                str(issue.get("code") or "compute_policy_resolution_blocked"),
+                str(issue.get("message") or "失稳源策略未完成严格解析，不能入队。"),
+                status_code=422,
+                details=queue_resolution,
+            )
+        if frozen_revision_id:
+            revision_manifest = frozen_manifest or []
+            validation = validate_scenario_configuration(queue_effective, revision_manifest)
             if not validation["valid"]:
                 raise WorkbenchError(
                     "scenario_configuration_invalid",
-                    "Draft parameters or input bindings did not pass the run preflight.",
+                    "冻结参数或输入修订未通过运行预检。",
                     status_code=422,
                     details=validation,
                 )
@@ -3218,155 +4860,129 @@ class WorkbenchStore:
             current = connection.execute("SELECT * FROM scenarios WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not current:
                 raise WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
+            if not has_frozen_policy:
+                # The scenario row, its version and the policy snapshot must
+                # originate under this same write lock.  A pre-transaction
+                # preview is useful for early feedback but must never be what
+                # the queue records after a concurrent editor save.
+                locked_snapshot = self._scenario_compute_snapshot(
+                    connection,
+                    current,
+                    global_gates=enqueue_global_gates,
+                )
+                queue_effective = dict(locked_snapshot.effective_parameters)
+                queue_resolution = dict(locked_snapshot.resolution)
+                locked_revision_id = current["input_revision_id"]
+                if locked_revision_id:
+                    frozen_revision_id = str(locked_revision_id)
+                    locked_revision = connection.execute(
+                        "SELECT * FROM input_revisions WHERE revision_id=?", (frozen_revision_id,)
+                    ).fetchone()
+                    if not locked_revision or locked_revision["status"] != "ready":
+                        raise WorkbenchError("input_revision_invalid", "The current input snapshot is invalid.", status_code=409)
+                    frozen_manifest = json_loads(locked_revision["manifest_json"], [])
+                else:
+                    frozen_revision_id = None
+                    frozen_manifest = None
+                if str(queue_resolution.get("status") or "resolved") != "resolved":
+                    issue = queue_resolution.get("blocking_issue") or {}
+                    raise WorkbenchError(
+                        str(issue.get("code") or "compute_policy_resolution_blocked"),
+                        str(issue.get("message") or "失稳源策略未完成严格解析，不能入队。"),
+                        status_code=422,
+                        details=queue_resolution,
+                    )
             duplicate = connection.execute(
                 """
                 SELECT queue_item_id FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                  AND status IN ('waiting', 'queued', 'starting', 'running', 'stopping')
+                WHERE scenario_id=? AND deleted_at IS NULL AND status IN ('queued', 'starting', 'running', 'stopping')
                 """,
                 (scenario_id,),
             ).fetchone()
             if duplicate:
                 raise WorkbenchError("scenario_already_queued", "Scenario is already queued.", status_code=409)
-            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items").fetchone()[0]
-            queue_order = connection.execute(
-                """
-                SELECT COALESCE(MAX(queue_order), 0) + 1
-                FROM queue_items
-                WHERE deleted_at IS NULL AND status='waiting'
-                """
-            ).fetchone()[0]
+            if frozen_revision_id is None:
+                draft_bindings = self._bindings_for_draft_connection(connection, scenario_id)
+                try:
+                    bindings, snapshot_manifest = self._resolve_binding_assets(connection, draft_bindings)
+                    validation = validate_scenario_configuration(queue_effective, snapshot_manifest)
+                except WorkbenchError:
+                    raise
+                if not validation["valid"]:
+                    raise WorkbenchError(
+                        "scenario_configuration_invalid",
+                        "Draft parameters or input bindings did not pass the run preflight.",
+                        status_code=422,
+                        details=validation,
+                    )
+                frozen_revision_id, revision_status, _, _ = self._insert_input_revision(
+                    connection,
+                    bindings=bindings,
+                    manifest=snapshot_manifest,
+                    parent_revision_id=None,
+                    version_tag=None,
+                )
+                if revision_status != "ready":
+                    raise WorkbenchError(
+                        "input_revision_invalid",
+                        "The input snapshot could not be frozen.",
+                        status_code=409,
+                    )
+                frozen_manifest = snapshot_manifest
+            position = connection.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM queue_items WHERE deleted_at IS NULL AND status='queued'").fetchone()[0]
             queue_item_id = f"que-{uuid4().hex}"
             now = utc_now()
+            profile_name = self._resolve_enqueue_runtime_profile(runtime_profile)
+            run_options = (
+                dict(frozen_run_options)
+                if isinstance(frozen_run_options, Mapping) and frozen_run_options
+                else self._normalize_run_options(diagnostics, frozen_manifest=frozen_manifest)
+            )
             connection.execute(
                 """
                 INSERT INTO queue_items(
                     queue_item_id, scenario_id, scenario_version, input_revision_id,
-                    position, queue_order, status, simulation_id, retry_of, enqueued_at,
+                    position, status, simulation_id, retry_of, runtime_profile,
+                    run_options_json, effective_config_json, compute_policy_resolution_json, enqueued_at,
                     started_at, finished_at, progress, summary, cancel_reason
-                ) VALUES(?, ?, ?, ?, ?, ?, 'waiting', NULL, ?, ?, NULL, NULL, 0, '待运行', NULL)
+                ) VALUES(?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 'Draft input and compute policy preflight passed.', NULL)
                 """,
                 (
                     queue_item_id,
                     scenario_id,
-                    int(current["version"] or 1),
+                    int(frozen_scenario_version if frozen_scenario_version is not None else current["version"] or 1),
                     frozen_revision_id,
                     position,
-                    queue_order,
                     retry_of,
+                    profile_name,
+                    json.dumps(run_options, ensure_ascii=False),
+                    json.dumps(queue_effective, ensure_ascii=False),
+                    json.dumps(queue_resolution, ensure_ascii=False),
                     now,
                 ),
             )
             connection.execute(
-                "UPDATE scenarios SET status='waiting', updated_at=? WHERE scenario_id=?",
+                "UPDATE scenarios SET status='queued', updated_at=? WHERE scenario_id=?",
                 (now, scenario_id),
             )
         return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
 
-    @staticmethod
-    def _normalize_waiting_queue_order_connection(connection: sqlite3.Connection) -> None:
-        rows = connection.execute(
-            """
-            SELECT queue_item_id FROM queue_items
-            WHERE status='waiting' AND deleted_at IS NULL
-            ORDER BY queue_order, enqueued_at, queue_item_id
-            """
-        ).fetchall()
-        for order, row in enumerate(rows, start=1):
-            connection.execute(
-                "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                (order, row["queue_item_id"]),
-            )
-
-    def start_queue_batch(self, project_id: str) -> Dict[str, Any]:
-        """Release the currently staged waiting rows as one scheduler batch."""
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
-            ).fetchall()
-            started_item_ids = [str(row["queue_item_id"]) for row in rows]
-            if started_item_ids:
-                placeholders = ",".join("?" for _ in started_item_ids)
-                connection.execute(
-                    f"""
-                    UPDATE queue_items
-                    SET status='queued', summary='已加入当前运行批次'
-                    WHERE queue_item_id IN ({placeholders})
-                      AND status='waiting' AND deleted_at IS NULL
-                    """,
-                    tuple(started_item_ids),
-                )
-                connection.execute(
-                    f"""
-                    UPDATE scenarios
-                    SET status='queued', updated_at=?
-                    WHERE scenario_id IN (
-                        SELECT scenario_id FROM queue_items
-                        WHERE queue_item_id IN ({placeholders})
-                    )
-                    """,
-                    (now, *started_item_ids),
-                )
-        return {
-            "started_item_ids": started_item_ids,
-            "items": self.list_queue(project_id),
-            "count": len(started_item_ids),
-        }
-
     def reorder_queue(self, project_id: str, queue_item_id: str, new_position: int) -> list[Dict[str, Any]]:
         database = self.project_database(project_id)
+        row = self._queue_row(project_id, queue_item_id)
+        if row["status"] != "queued":
+            raise WorkbenchError("queue_item_not_reorderable", "只有等待中的队列项可以重排。", status_code=409)
         with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
-                (queue_item_id,),
-            ).fetchone()
-            if not row:
-                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
-            if row["status"] != "waiting":
-                raise WorkbenchError(
-                    "queue_order_locked",
-                    "运行批次已启动，队列排序已锁定。",
-                    status_code=409,
-                )
-            active_batch = connection.execute(
-                """
-                SELECT 1 FROM queue_items
-                WHERE deleted_at IS NULL
-                  AND status IN ('queued', 'starting', 'running', 'stopping')
-                LIMIT 1
-                """
-            ).fetchone()
-            if active_batch:
-                raise WorkbenchError(
-                    "queue_order_locked",
-                    "Queue order is locked while a released batch is active.",
-                    status_code=409,
-                )
-            waiting = connection.execute(
-                """
-                SELECT queue_item_id FROM queue_items
-                WHERE status='waiting' AND deleted_at IS NULL
-                ORDER BY queue_order, enqueued_at, queue_item_id
-                """
+            queued = connection.execute(
+                "SELECT queue_item_id FROM queue_items WHERE status='queued' AND deleted_at IS NULL ORDER BY position, enqueued_at"
             ).fetchall()
-            ordered_ids = [str(item["queue_item_id"]) for item in waiting]
-            if queue_item_id not in ordered_ids:
-                raise WorkbenchError("queue_item_not_reorderable", "只有待运行项可以重排。", status_code=409)
+            ordered_ids = [str(item["queue_item_id"]) for item in queued]
             ordered_ids.remove(queue_item_id)
             index = max(0, min(len(ordered_ids), new_position - 1))
             ordered_ids.insert(index, queue_item_id)
-            for queue_order, item_id in enumerate(ordered_ids, start=1):
+            for position, item_id in enumerate(ordered_ids, start=1):
                 connection.execute(
-                    "UPDATE queue_items SET queue_order=? WHERE queue_item_id=?",
-                    (queue_order, item_id),
+                    "UPDATE queue_items SET position=? WHERE queue_item_id=?", (position, item_id)
                 )
         return self.list_queue(project_id)
 
@@ -3379,184 +4995,22 @@ class WorkbenchStore:
                 "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL",
                 (queue_item_id,),
             ).fetchone()
-            if not row:
-                raise WorkbenchError("queue_item_not_found", "队列项不存在。", status_code=404)
-            if row["status"] not in {"waiting", "queued"}:
-                raise WorkbenchError("queue_item_not_cancelable", "只有尚未启动的队列项可以取消。", status_code=409)
-            connection.execute(
+            if not row or row["status"] != "queued":
+                raise WorkbenchError("queue_item_not_cancelable", "只有等待中的队列项可以取消。", status_code=409)
+            updated = connection.execute(
                 """
                 UPDATE queue_items SET status='cancelled', finished_at=?, summary='已取消'
-                WHERE queue_item_id=? AND status IN ('waiting', 'queued') AND deleted_at IS NULL
+                WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL
                 """,
                 (now, queue_item_id),
-            )
-            self._restore_scenario_status_connection(connection, str(row["scenario_id"]), now)
-        return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
-
-    @staticmethod
-    def _restore_scenario_status_connection(
-        connection: sqlite3.Connection,
-        scenario_id: str,
-        now: str,
-    ) -> str:
-        active = connection.execute(
-            """
-            SELECT status FROM queue_items
-            WHERE scenario_id=? AND deleted_at IS NULL
-              AND status IN ('starting', 'running', 'stopping')
-            ORDER BY started_at DESC, enqueued_at DESC LIMIT 1
-            """,
-            (scenario_id,),
-        ).fetchone()
-        if active:
-            status = str(active["status"])
-        else:
-            staged = connection.execute(
-                """
-                SELECT status FROM queue_items
-                WHERE scenario_id=? AND deleted_at IS NULL
-                  AND status IN ('waiting', 'queued')
-                ORDER BY queue_order, enqueued_at DESC LIMIT 1
-                """,
-                (scenario_id,),
-            ).fetchone()
-            if staged:
-                status = str(staged["status"])
-            else:
-                latest = connection.execute(
-                    """
-                    SELECT COALESCE(r.status, q.status) AS status
-                    FROM queue_items q
-                    LEFT JOIN simulation_runs r ON r.simulation_id=q.simulation_id
-                    WHERE q.scenario_id=?
-                      AND q.status IN ('completed', 'failed', 'interrupted', 'stopped', 'cancelled', 'canceled')
-                      AND (q.deleted_at IS NULL OR q.simulation_id IS NOT NULL)
-                    ORDER BY COALESCE(q.finished_at, q.enqueued_at) DESC, q.position DESC
-                    LIMIT 1
-                    """,
-                    (scenario_id,),
-                ).fetchone()
-                if latest:
-                    status = str(latest["status"])
-                else:
-                    row = connection.execute(
-                        "SELECT input_revision_id, archived FROM scenarios WHERE scenario_id=?",
-                        (scenario_id,),
-                    ).fetchone()
-                    status = "ready" if row and row["input_revision_id"] else "draft"
-        connection.execute(
-            "UPDATE scenarios SET status=?, updated_at=? WHERE scenario_id=?",
-            (status, now, scenario_id),
-        )
-        return status
-
-    def preview_queue_delete(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
-        normalized = self._normalize_queue_item_ids(queue_item_ids)
-        database = self.project_database(project_id)
-        with database.connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
-                tuple(normalized),
-            ).fetchall()
-            found = {str(row["queue_item_id"]): row for row in rows}
-            missing = [item_id for item_id in normalized if item_id not in found]
-            if missing:
-                raise WorkbenchError(
-                    "queue_item_not_found",
-                    "一个或多个队列项不存在或已移除。",
-                    status_code=404,
-                    details={"queue_item_ids": missing},
-                )
-            active = [
-                self._public_queue_item(project_id, row)
-                for row in rows
-                if row["status"] in {"starting", "running", "stopping"}
-            ]
-            removable = [
-                self._public_queue_item(project_id, row)
-                for row in rows
-                if row["status"] not in {"starting", "running", "stopping"}
-            ]
-        return {
-            "queue_item_ids": normalized,
-            "items": removable,
-            "active_items": active,
-            "can_delete": not active,
-            "preserves_results": True,
-        }
-
-    @staticmethod
-    def _normalize_queue_item_ids(queue_item_ids: list[str]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for item_id in queue_item_ids:
-            value = str(item_id or "").strip()
-            if value and value not in seen:
-                normalized.append(value)
-                seen.add(value)
-        if not normalized:
-            raise WorkbenchError("queue_item_ids_required", "请至少选择一个队列项。", status_code=422)
-        return normalized
-
-    def batch_delete_queue_items(self, project_id: str, queue_item_ids: list[str]) -> Dict[str, Any]:
-        normalized = self._normalize_queue_item_ids(queue_item_ids)
-        database = self.project_database(project_id)
-        now = utc_now()
-        with database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                f"SELECT * FROM queue_items WHERE queue_item_id IN ({','.join('?' for _ in normalized)}) AND deleted_at IS NULL",
-                tuple(normalized),
-            ).fetchall()
-            found = {str(row["queue_item_id"]): row for row in rows}
-            missing = [item_id for item_id in normalized if item_id not in found]
-            if missing:
-                raise WorkbenchError(
-                    "queue_item_not_found",
-                    "一个或多个队列项不存在或已移除。",
-                    status_code=404,
-                    details={"queue_item_ids": missing},
-                )
-            active = [
-                str(row["queue_item_id"])
-                for row in rows
-                if row["status"] in {"starting", "running", "stopping"}
-            ]
-            if active:
-                raise WorkbenchError(
-                    "queue_item_active",
-                    "活动计算不能删除，请先停止后再删除。",
-                    status_code=409,
-                    details={"active_queue_item_ids": active},
-                )
-            waiting_or_queued = [
-                str(row["queue_item_id"])
-                for row in rows
-                if row["status"] in {"waiting", "queued"}
-            ]
-            placeholders = ",".join("?" for _ in normalized)
+            ).rowcount
+            if updated != 1:
+                raise WorkbenchError("queue_item_not_cancelable", "队列项已被调度器接管。", status_code=409)
             connection.execute(
-                f"""
-                UPDATE queue_items
-                SET deleted_at=?,
-                    status=CASE WHEN status IN ('waiting', 'queued') THEN 'cancelled' ELSE status END,
-                    finished_at=CASE WHEN status IN ('waiting', 'queued') THEN COALESCE(finished_at, ?) ELSE finished_at END,
-                    summary=CASE WHEN status IN ('waiting', 'queued') THEN '已从队列移除' ELSE summary END,
-                    cancel_reason=CASE WHEN status IN ('waiting', 'queued') THEN 'queue_deleted' ELSE cancel_reason END
-                WHERE queue_item_id IN ({placeholders}) AND deleted_at IS NULL
-                """,
-                (now, now, *normalized),
+                "UPDATE scenarios SET status='ready', updated_at=? WHERE scenario_id=?",
+                (now, row["scenario_id"]),
             )
-            scenario_ids = sorted({str(row["scenario_id"]) for row in rows})
-            for scenario_id in scenario_ids:
-                self._restore_scenario_status_connection(connection, scenario_id, now)
-            self._normalize_waiting_queue_order_connection(connection)
-        return {
-            "deleted_ids": normalized,
-            "cancelled_ids": waiting_or_queued,
-            "preserved_result_count": sum(1 for row in rows if row["simulation_id"]),
-            "items": self.list_queue(project_id),
-        }
+        return self._public_queue_item(project_id, self._queue_row(project_id, queue_item_id))
 
     def _legacy_retry_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
         row = self._queue_row(project_id, queue_item_id)
@@ -3572,11 +5026,48 @@ class WorkbenchStore:
         row = self._queue_row(project_id, queue_item_id)
         if row["status"] not in {"cancelled", "failed", "interrupted", "stopped"}:
             raise WorkbenchError("queue_item_not_retryable", "Queue item cannot be retried in its current state.", status_code=409)
+        if (
+            "effective_config_json" not in row.keys()
+            or "compute_policy_resolution_json" not in row.keys()
+            or not json_loads(row["effective_config_json"], {})
+            or not json_loads(row["compute_policy_resolution_json"], {})
+        ):
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE queue_items
+                    SET cancel_reason='policy_snapshot_missing_after_upgrade',
+                        summary='缺少升级后的计算策略快照，请重新加入队列。'
+                    WHERE queue_item_id=?
+                    """,
+                    (queue_item_id,),
+                )
+            raise WorkbenchError(
+                "policy_snapshot_missing_after_upgrade",
+                "该旧队列项没有冻结的计算策略快照，请重新加入队列。",
+                status_code=409,
+            )
         return self.enqueue_scenario(
             project_id,
             str(row["scenario_id"]),
             retry_of=queue_item_id,
             snapshot_revision_id=row["input_revision_id"],
+            runtime_profile=row["runtime_profile"] if "runtime_profile" in row.keys() else None,
+            frozen_effective_config=json_loads(row["effective_config_json"], {})
+            if "effective_config_json" in row.keys() and row["effective_config_json"]
+            else None,
+            frozen_compute_policy_resolution=json_loads(row["compute_policy_resolution_json"], {})
+            if "compute_policy_resolution_json" in row.keys() and row["compute_policy_resolution_json"]
+            else None,
+            frozen_scenario_version=(
+                int(row["scenario_version"])
+                if "scenario_version" in row.keys() and row["scenario_version"] is not None
+                else None
+            ),
+            frozen_run_options=json_loads(row["run_options_json"], {})
+            if "run_options_json" in row.keys() and row["run_options_json"]
+            else None,
         )
 
     def recover_interrupted_runs(self) -> int:
@@ -3589,7 +5080,7 @@ class WorkbenchStore:
             database.ensure_schema()
             with database.connect() as connection:
                 queue_rows = connection.execute(
-                    "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE status IN ('starting', 'running', 'stopping')"
+                    "SELECT queue_item_id, scenario_id, simulation_id FROM queue_items WHERE deleted_at IS NULL AND status IN ('starting', 'running', 'stopping')"
                 ).fetchall()
                 for row in queue_rows:
                     connection.execute(
@@ -3624,7 +5115,7 @@ class WorkbenchStore:
                     FROM queue_items q
                     JOIN scenarios s ON s.scenario_id=q.scenario_id
                     WHERE q.status='queued' AND q.deleted_at IS NULL
-                    ORDER BY q.queue_order, q.enqueued_at, q.queue_item_id
+                    ORDER BY q.position, q.enqueued_at, q.queue_item_id
                     LIMIT 1
                     """
                 ).fetchone()
@@ -3632,7 +5123,7 @@ class WorkbenchStore:
                 candidate = dict(row)
                 candidate["project_id"] = project_id
                 candidate["project_root"] = project["root_path"]
-                candidate["runtime_profile"] = "cuda_production_default"
+                candidate["runtime_profile"] = str(row["runtime_profile"] or "cuda_production_default") if "runtime_profile" in row.keys() else "cuda_production_default"
                 candidates.append(candidate)
         candidates.sort(key=lambda item: (str(item["enqueued_at"]), str(item["queue_item_id"])))
         return candidates
@@ -3657,6 +5148,7 @@ class WorkbenchStore:
         "manning": "manningfil",
         "slope": "slofil",
         "thickness": "zfil",
+        "trigger": "triggerslide",
         "groundwater": "depfil",
         "infiltration": "rizerofil",
         "rainfall": "rifil",
@@ -3672,6 +5164,7 @@ class WorkbenchStore:
         "manningfil": "manningfil",
         "slofil": "slofil",
         "zfil": "zfil",
+        "triggerslide": "triggerslide",
         "depfil": "depfil",
         "rizerofil": "rizerofil",
         "rifil": "rifil",
@@ -3716,11 +5209,64 @@ class WorkbenchStore:
         scenario: sqlite3.Row | Dict[str, Any],
         output_dir: str,
         manifest: list[Dict[str, Any]],
+        runtime_profile: Optional[str] = None,
     ) -> Dict[str, Any]:
-        from api.services.structured_input_resolver import build_structured_rainfall_payload
+        from api.services.structured_input_resolver import (
+            _rainfall_is_active,
+            build_structured_rainfall_payload,
+        )
 
         scenario_dict = dict(scenario)
-        effective_parameters = json_loads(scenario_dict["effective_parameters_json"], {})
+        stored_effective = json_loads(scenario_dict.get("effective_parameters_json"), {})
+        frozen_effective = scenario_dict.pop("_frozen_effective_parameters", None)
+        frozen_resolution = scenario_dict.pop("_frozen_compute_policy_resolution", None)
+        frozen_run_options = scenario_dict.pop("_frozen_run_options", None)
+        if frozen_effective is None or frozen_resolution is None:
+            queue_row = self._queue_row(project_id, queue_item_id)
+            if "effective_config_json" in queue_row.keys() and queue_row["effective_config_json"]:
+                frozen_effective = json_loads(queue_row["effective_config_json"], {})
+            if "compute_policy_resolution_json" in queue_row.keys() and queue_row["compute_policy_resolution_json"]:
+                frozen_resolution = json_loads(queue_row["compute_policy_resolution_json"], {})
+        if scenario_dict.get("parameter_template_id") and (
+            not isinstance(frozen_effective, dict)
+            or not frozen_effective
+            or not isinstance(frozen_resolution, dict)
+            or not frozen_resolution
+        ):
+            raise WorkbenchError(
+                "policy_snapshot_missing_after_upgrade",
+                "该队列项没有冻结的计算策略快照，不能启动运行。",
+                status_code=409,
+            )
+        effective_parameters = (
+            dict(frozen_effective)
+            if isinstance(frozen_effective, dict) and frozen_effective
+            else stored_effective
+        )
+        compute_policy_resolution = (
+            dict(frozen_resolution)
+            if isinstance(frozen_resolution, dict)
+            else {}
+        )
+        profile_name = str(runtime_profile or "cuda_production_default")
+        if isinstance(frozen_run_options, dict):
+            run_options = dict(frozen_run_options)
+        else:
+            queue_row_for_options = self._queue_row(project_id, queue_item_id)
+            run_options = (
+                json_loads(queue_row_for_options["run_options_json"], {})
+                if "run_options_json" in queue_row_for_options.keys()
+                else {}
+            )
+        template_metadata: Dict[str, Any] = {}
+        if scenario_dict.get("parameter_template_id"):
+            database = self.project_database(project_id)
+            with database.connect() as connection:
+                template_metadata = self._parameter_template_metadata(
+                    connection,
+                    str(scenario_dict["parameter_template_id"]),
+                )
+        reference_case_owned = self._reference_case_owned(template_metadata)
         if scenario_dict.get("parameter_template_id"):
             active_manifest = [dict(entry) for entry in manifest if bool(entry.get("active", True))]
             if str(effective_parameters.get("manning.source") or "global").lower() in {"global", "global_manning", "global_initiation_manning"}:
@@ -3729,6 +5275,13 @@ class WorkbenchStore:
             dem = by_binding.get("dem.primary")
             soil = by_binding.get("zones.primary") or by_binding.get("soil.primary")
             boundary = by_binding.get("boundary.primary")
+            config = by_binding.get("legacy.config")
+            if reference_case_owned and not (config and config.get("blob_path")):
+                raise WorkbenchError(
+                    "reference_case_config_missing",
+                    "参考案例缺少冻结的 edda_in 配置，不能退回通用参数模板运行。",
+                    status_code=409,
+                )
             case_input_files = {}
             for entry in active_manifest:
                 family = str(entry.get("family") or "")
@@ -3740,10 +5293,18 @@ class WorkbenchStore:
             overrides = self._expand_dotted_values(effective_parameters)
             overrides.pop("rainfall", None)
             overrides.pop("manning", None)
-            overrides["structured_rainfall"] = build_structured_rainfall_payload(
-                effective_parameters,
-                active_manifest,
-            )
+            if _rainfall_is_active(effective_parameters):
+                try:
+                    overrides["structured_rainfall"] = build_structured_rainfall_payload(
+                        effective_parameters,
+                        active_manifest,
+                    )
+                except ValueError as exc:
+                    raise WorkbenchError(
+                        "scenario_configuration_invalid",
+                        str(exc),
+                        status_code=422,
+                    ) from exc
             return {
                 "project_id": project_id,
                 "project_root": str(project["root_path"]),
@@ -3751,19 +5312,33 @@ class WorkbenchStore:
                 "simulation_id": simulation_id,
                 "scenario_id": scenario_dict["scenario_id"],
                 "scenario_name": scenario_dict["name"],
-                "runtime_profile": "cuda_production_default",
+                "runtime_profile": profile_name,
+                "run_options": run_options,
                 "output_dir": output_dir,
                 "dem_file": str(dem["blob_path"]) if dem else None,
                 "rainfall_file": None,
                 "soil_zones_file": str(soil["blob_path"]) if soil else None,
                 "boundary_file": str(boundary["blob_path"]) if boundary else None,
-                "case_config_file": None,
-                "case_base_dir": None,
+                # Reference-owned imports must traverse the original edda_in
+                # mapper.  Their editable template is a UI projection, not a
+                # replacement for unexposed EDDA controls and numeric variants.
+                "case_config_file": str(config["blob_path"]) if reference_case_owned else None,
+                "case_base_dir": self._resolve_case_base_dir(project, active_manifest, config)
+                if reference_case_owned
+                else None,
+                "case_source_dir": str(Path(project["root_path"]) / ".reference-source")
+                if reference_case_owned
+                else None,
                 "case_input_files": case_input_files,
                 "overrides": overrides,
+                "effective_config": effective_parameters,
+                "compute_policy_resolution": compute_policy_resolution,
             }
         # Read-only compatibility adapter for pre-v3 revisions. Structured
         # scenarios above never collapse repeated families into one asset.
+        # Legacy scenarios still execute the queue's frozen effective values.
+        # Their stored scenario fields are editable history, not a replacement
+        # for the enqueue-time compute-policy snapshot.
         legacy_by_family = {str(entry["family"]): dict(entry) for entry in manifest}
         case_input_files = self._map_case_input_files(legacy_by_family)
         dem = legacy_by_family.get("dem")
@@ -3778,7 +5353,8 @@ class WorkbenchStore:
             "simulation_id": simulation_id,
             "scenario_id": scenario_dict["scenario_id"],
             "scenario_name": scenario_dict["name"],
-            "runtime_profile": "cuda_production_default",
+            "runtime_profile": profile_name,
+            "run_options": run_options,
             "output_dir": output_dir,
             "dem_file": str(dem["blob_path"]) if dem else None,
             "rainfall_file": str(rainfall["blob_path"]) if rainfall else None,
@@ -3788,6 +5364,8 @@ class WorkbenchStore:
             "case_base_dir": self._resolve_case_base_dir(project, manifest, config),
             "case_input_files": case_input_files,
             "overrides": self._expand_dotted_values(effective_parameters),
+            "effective_config": effective_parameters,
+            "compute_policy_resolution": compute_policy_resolution,
         }
 
     def claim_queue_item(self, project_id: str, queue_item_id: str) -> Dict[str, Any]:
@@ -3807,7 +5385,7 @@ class WorkbenchStore:
             connection.execute(
                 """
                 UPDATE queue_items SET status='starting', simulation_id=?, started_at=?, summary='准备运行'
-                WHERE queue_item_id=? AND status='queued'
+                WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL
                 """,
                 (simulation_id, now, queue_item_id),
             )
@@ -3850,6 +5428,13 @@ class WorkbenchStore:
 
     def update_run(self, project_id: str, simulation_id: str, values: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
+        normalized_values = dict(values)
+        if "error_details" in normalized_values:
+            normalized_values["error_details_json"] = json.dumps(
+                normalized_values.pop("error_details") or {},
+                ensure_ascii=False,
+                default=str,
+            )
         allowed = {
             "status",
             "progress",
@@ -3860,38 +5445,216 @@ class WorkbenchStore:
             "start_time",
             "end_time_actual",
             "error",
+            "error_code",
+            "error_details_json",
             "elapsed_seconds",
             "runtime_profile_json",
             "effective_config_json",
             "resource_summary_json",
             "terminal_log_json",
         }
-        fields = [(key, value) for key, value in values.items() if key in allowed]
+        fields = [(key, value) for key, value in normalized_values.items() if key in allowed]
         if not fields:
             return
         assignments = ", ".join(f"{key}=?" for key, _ in fields)
         params = [value for _, value in fields] + [simulation_id]
         with database.connect() as connection:
             connection.execute(f"UPDATE simulation_runs SET {assignments} WHERE simulation_id=?", params)
-            status = values.get("status")
+            status = normalized_values.get("status")
             if status in {"running", "starting", "stopping"}:
+                queue_assignments = ["status=?", "summary=?"]
+                queue_params: list[Any] = [
+                    status,
+                    "正在模拟中" if status == "running" else "正在停止" if status == "stopping" else "准备运行",
+                ]
+                if "progress" in normalized_values:
+                    queue_assignments.append("progress=?")
+                    queue_params.append(float(normalized_values["progress"] or 0))
+                queue_params.append(simulation_id)
                 connection.execute(
-                    "UPDATE queue_items SET status=?, progress=?, summary=? WHERE simulation_id=?",
-                    (
-                        status,
-                        float(values.get("progress") or 0),
-                        "正在模拟中" if status == "running" else "准备运行",
-                        simulation_id,
-                    ),
+                    f"UPDATE queue_items SET {', '.join(queue_assignments)} "
+                    "WHERE simulation_id=? AND deleted_at IS NULL "
+                    "AND status IN ('queued', 'starting', 'running', 'stopping')",
+                    queue_params,
                 )
-            elif "progress" in values:
+            elif "progress" in normalized_values:
                 connection.execute(
                     """
                     UPDATE queue_items SET progress=?
-                    WHERE simulation_id=? AND status IN ('starting', 'running', 'stopping')
+                    WHERE simulation_id=? AND deleted_at IS NULL
+                      AND status IN ('starting', 'running', 'stopping')
                     """,
-                    (float(values["progress"] or 0), simulation_id),
+                    (float(normalized_values["progress"] or 0), simulation_id),
                 )
+
+    def erosion_probe_suggestions(
+        self,
+        project_id: str,
+        scenario_id: str,
+        *,
+        top: int = 10,
+    ) -> Dict[str, Any]:
+        """Suggest cells from a manifest-indexed, input-compatible run only."""
+        import numpy as np
+
+        if type(top) is not int or not 1 <= top <= 32:
+            raise WorkbenchError("probe_suggestions_invalid", "Top-N 必须为 1 至 32 的整数。", status_code=422)
+        top_n = top
+        scenario = self._scenario_row(project_id, scenario_id)
+        input_revision_id = scenario["input_revision_id"]
+        semantic_key = "hydrology.dfs_erosion_depth_writer_variant"
+        target_semantics = self._public_scenario(project_id, scenario).get("effective_parameters", {}).get(semantic_key)
+        if not target_semantics:
+            raise WorkbenchError("probe_suggestions_unavailable", "当前侵蚀输出语义未知，不能选择兼容结果。", status_code=404)
+        if not input_revision_id:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "当前方案没有冻结输入版本，不能跨版本填充探针。",
+                status_code=404,
+            )
+        database = self.project_database(project_id)
+        with database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT simulation_id, input_revision_id, output_dir, end_time_actual, created_at, effective_config_json
+                FROM simulation_runs
+                WHERE input_revision_id=? AND status='completed'
+                ORDER BY COALESCE(end_time_actual, created_at) DESC, simulation_id DESC
+                """,
+                (input_revision_id,),
+            ).fetchall()
+        if not rows:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "没有同一输入版本且已完成的模拟结果可用于填充侵蚀探针格点。",
+                status_code=404,
+            )
+
+        from api.services.runtime_audit import _load_output_frame_events
+
+        selected: tuple[Any, Path, Dict[str, Any], Decimal] | None = None
+        for row in rows:
+            if json_loads(row["effective_config_json"], {}).get(semantic_key) != target_semantics:
+                continue
+            if not row["output_dir"]:
+                continue
+            output_dir = Path(str(row["output_dir"])).resolve()
+            manifest_path = output_dir / "output_manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            entries = manifest.get("result_files") if isinstance(manifest, dict) else None
+            if not isinstance(entries, list):
+                continue
+            event_evidence, events = _load_output_frame_events(output_dir)
+            if event_evidence.get("status") != "present":
+                continue
+            candidates: list[tuple[Decimal, Path, Dict[str, Any]]] = []
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("family") != "Erosion_depth":
+                    continue
+                relative_path = entry.get("relative_path")
+                if not isinstance(relative_path, str) or not relative_path:
+                    continue
+                # The product's erosion-depth comparison/probe contract is the
+                # EDDA-compatible text writer. Do not substitute a similarly
+                # named GeoTIFF or a foreign writer merely because it is newer.
+                writer = str(entry.get("writer") or "")
+                if not writer:
+                    writer = classify_result_writer(relative_path)
+                if writer != "taichi_edda_text":
+                    continue
+                event = events.get(relative_path.replace("\\", "/"))
+                if not event or event.get("writer") != writer or entry.get("frame_event_writer") != writer:
+                    continue
+                try:
+                    frame_time = Decimal(str(entry.get("frame_time_s")))
+                except InvalidOperation:
+                    continue
+                if not frame_time.is_finite() or frame_time < 0 or frame_time != Decimal(event["time_s"]):
+                    continue
+                candidate = (output_dir / relative_path).resolve()
+                try:
+                    candidate.relative_to(output_dir)
+                except ValueError:
+                    continue
+                if not candidate.is_file() or candidate.suffix.lower() not in {".tif", ".tiff", ".asc", ".txt"}:
+                    continue
+                candidates.append((frame_time, candidate, entry))
+            if candidates:
+                frame_time, raster_path, entry = max(candidates, key=lambda item: (item[0], item[1].name))
+                selected = (row, raster_path, entry, frame_time)
+                break
+        if selected is None:
+            raise WorkbenchError(
+                "probe_suggestions_unavailable",
+                "没有可由输出清单索引的同版本 Erosion_depth 栅格。",
+                status_code=404,
+            )
+        row, raster_path, entry, frame_time = selected
+        if entry.get("sha256") != hashlib.sha256(raster_path.read_bytes()).hexdigest():
+            raise WorkbenchError("probe_suggestions_unavailable", "侵蚀栅格内容与冻结输出清单不一致。", status_code=404)
+        if raster_path.suffix.lower() in {".tif", ".tiff"}:
+            import rasterio
+
+            with rasterio.open(raster_path) as src:
+                data = np.asarray(src.read(1), dtype=np.float64)
+                nodata = src.nodata
+        else:
+            from edda.io.dem_reader import read_ascii_grid
+
+            data, meta = read_ascii_grid(str(raster_path))
+            data = np.asarray(data, dtype=np.float64)
+            nodata = meta.get("NODATA_value", meta.get("nodata_value", -9999.0))
+            expected_shape = (int(meta.get("height", 0)), int(meta.get("width", 0)))
+            expected_count = expected_shape[0] * expected_shape[1]
+            if not expected_count or data.size != expected_count:
+                raise WorkbenchError(
+                    "probe_suggestions_unavailable",
+                    "输出清单中的 Erosion_depth 栅格尺寸与其 ASCII 头信息不一致。",
+                    status_code=404,
+                )
+            # np.loadtxt collapses a legal 1×N/N×1/1×1 grid. Restore only the
+            # exact header-declared row-major shape; never transpose, crop, or
+            # pad a malformed candidate.
+            data = data.reshape(expected_shape)
+        masked = np.array(data, copy=True)
+        if nodata is not None:
+            masked[masked == float(nodata)] = np.nan
+        masked[~np.isfinite(masked)] = np.nan
+        flat = masked.ravel()
+        if not np.any(np.isfinite(flat)):
+            return {
+                "simulation_id": row["simulation_id"],
+                "input_revision_id": row["input_revision_id"],
+                "source_file": str(entry.get("relative_path")),
+                "source_frame_s": frame_time,
+                "writer": str(entry.get("writer") or "taichi_edda_text"),
+                "probe_cells": [],
+                "top": top_n,
+            }
+        order = np.argsort(np.nan_to_num(flat, nan=-np.inf))[::-1]
+        cells: list[list[int]] = []
+        for index in order:
+            if len(cells) >= top_n:
+                break
+            value = flat[index]
+            if not np.isfinite(value) or value <= 0.0:
+                continue
+            row_i, col_i = divmod(int(index), masked.shape[1])
+            cells.append([int(row_i), int(col_i)])
+        return {
+            "simulation_id": row["simulation_id"],
+            "input_revision_id": row["input_revision_id"],
+            "source_file": str(entry.get("relative_path")),
+            "source_frame_s": frame_time,
+            "writer": str(entry.get("writer") or "taichi_edda_text"),
+            "probe_cells": cells,
+            "top": top_n,
+        }
 
     def finish_run(self, project_id: str, simulation_id: str, result: Dict[str, Any]) -> None:
         database = self.project_database(project_id)
@@ -3908,13 +5671,16 @@ class WorkbenchStore:
             connection.execute(
                 """
                 UPDATE simulation_runs SET status=?, progress=?, end_time_actual=?, error=?,
-                    resource_summary_json=?, elapsed_seconds=? WHERE simulation_id=?
+                    error_code=?, error_details_json=?, resource_summary_json=?,
+                    elapsed_seconds=? WHERE simulation_id=?
                 """,
                 (
                     status,
                     float(result.get("progress") if result.get("progress") is not None else (100.0 if status == "completed" else 0.0)),
                     now,
                     result.get("error"),
+                    result.get("error_code"),
+                    json.dumps(result.get("error_details") or {}, ensure_ascii=False, default=str),
                     json.dumps(result.get("resource_summary") or {}, ensure_ascii=False),
                     float(result.get("elapsed_seconds") or 0),
                     simulation_id,
@@ -3946,6 +5712,11 @@ class WorkbenchStore:
     @staticmethod
     def public_simulation(project_id: str, row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         data = dict(row)
+        resolution = json_loads(data.get("compute_policy_resolution_json"), {})
+        if not resolution:
+            from api.services.compute_policy_resolver import legacy_unrecorded_compute_policy_resolution
+
+            resolution = legacy_unrecorded_compute_policy_resolution()
         return {
             "simulation_id": data["simulation_id"],
             "project_id": project_id,
@@ -3960,8 +5731,13 @@ class WorkbenchStore:
             "start_time": data.get("start_time"),
             "end_time_actual": data.get("end_time_actual"),
             "error": data.get("error"),
+            "error_code": data.get("error_code"),
+            "error_details": json_loads(data.get("error_details_json"), {}),
             "elapsed_seconds": float(data["elapsed_seconds"]),
             "output_dir": data.get("output_dir"),
+            "run_options": json_loads(data.get("run_options_json"), {}),
+            "effective_config": json_loads(data.get("effective_config_json"), {}),
+            "compute_policy_resolution": resolution,
             "resource_summary": json_loads(data.get("resource_summary_json"), {}),
             "terminal_log": json_loads(data.get("terminal_log_json"), []),
         }
@@ -3979,7 +5755,6 @@ class WorkbenchStore:
             if not project["available"]:
                 continue
             database = ProjectDatabase(Path(project["root_path"]))
-            database.ensure_schema()
             with database.connect() as connection:
                 row = connection.execute(
                     "SELECT * FROM simulation_runs WHERE simulation_id=?", (simulation_id,)
@@ -4013,7 +5788,7 @@ def _legacy_claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: s
     now = utc_now()
     with database.connect() as connection:
         claim = connection.execute(
-            "UPDATE queue_items SET status='starting', started_at=?, summary=? WHERE queue_item_id=? AND status='queued'",
+            "UPDATE queue_items SET status='starting', started_at=?, summary=? WHERE queue_item_id=? AND status='queued' AND deleted_at IS NULL",
             (now, "Preparing run", queue_item_id),
         )
         if claim.rowcount == 0:
@@ -4076,18 +5851,64 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
         # run snapshot is present and deletion receives a 409 lock response.
         connection.execute("BEGIN IMMEDIATE")
         item = connection.execute(
-            "SELECT * FROM queue_items WHERE queue_item_id=?", (queue_item_id,)
+            "SELECT * FROM queue_items WHERE queue_item_id=? AND deleted_at IS NULL", (queue_item_id,)
         ).fetchone()
         if not item or item["status"] != "queued":
             raise WorkbenchError("queue_item_not_claimable", "Queue item is no longer queued.", status_code=409)
+        queue_effective = json_loads(item["effective_config_json"], {}) if "effective_config_json" in item.keys() else {}
+        queue_resolution = (
+            json_loads(item["compute_policy_resolution_json"], {})
+            if "compute_policy_resolution_json" in item.keys()
+            else {}
+        )
+        if not isinstance(queue_effective, dict) or not queue_effective or not isinstance(queue_resolution, dict) or not queue_resolution:
+            failure = WorkbenchError(
+                "policy_snapshot_missing_after_upgrade",
+                "该旧队列项没有冻结的计算策略快照，请重新入队。",
+                status_code=409,
+            )
+        elif str(queue_resolution.get("status") or "resolved") != "resolved":
+            issue = queue_resolution.get("blocking_issue") or {}
+            failure = WorkbenchError(
+                str(issue.get("code") or "compute_policy_resolution_blocked"),
+                str(issue.get("message") or "冻结的失稳源策略未通过运行预检。"),
+                status_code=422,
+                details=queue_resolution,
+            )
         scenario = connection.execute(
             "SELECT * FROM scenarios WHERE scenario_id=?", (item["scenario_id"],)
         ).fetchone()
-        if not scenario:
+        if failure is not None:
+            pass
+        elif not scenario:
             failure = WorkbenchError("scenario_not_found", "Scenario does not exist.", status_code=404)
         else:
-            revision_id = item["input_revision_id"]
-            if revision_id:
+            queued_version = item["scenario_version"]
+            current_version = scenario["version"]
+            revision_id = item["input_revision_id"] if "input_revision_id" in item.keys() else None
+            retry_of = item["retry_of"] if "retry_of" in item.keys() else None
+            # Frozen retries already carry an immutable input + config snapshot.
+            # A later live draft bump must not cancel that replay. First enqueue
+            # still compares scenario_version and cancels on draft change.
+            has_frozen_retry_snapshot = bool(
+                retry_of
+                and revision_id
+                and isinstance(queue_effective, dict)
+                and queue_effective
+            )
+            if (
+                not has_frozen_retry_snapshot
+                and queued_version is not None
+                and current_version is not None
+                and int(queued_version) != int(current_version)
+            ):
+                failure = WorkbenchError(
+                    "queue_item_draft_changed",
+                    "Draft changed while waiting; the queue item was cancelled.",
+                    status_code=409,
+                    details={"queued_version": queued_version, "current_version": current_version},
+                )
+            if failure is None and revision_id:
                 revision = connection.execute(
                     "SELECT * FROM input_revisions WHERE revision_id=?", (revision_id,)
                 ).fetchone()
@@ -4099,19 +5920,27 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                     )
                 else:
                     snapshot_manifest = json_loads(revision["manifest_json"], [])
-            elif item["scenario_version"] is not None and int(item["scenario_version"]) != int(scenario["version"] or 1):
+                    validation = validate_scenario_configuration(queue_effective, snapshot_manifest)
+                    if not validation["valid"]:
+                        failure = WorkbenchError(
+                            "scenario_configuration_invalid",
+                            "冻结参数或输入修订未通过运行预检。",
+                            status_code=422,
+                            details=validation,
+                        )
+            elif failure is None and item["scenario_version"] is not None and int(item["scenario_version"]) != int(scenario["version"] or 1):
                 failure = WorkbenchError(
                     "queue_item_draft_changed",
                     "Draft changed while waiting; the queue item was cancelled.",
                     status_code=409,
                     details={"queued_version": item["scenario_version"], "current_version": scenario["version"]},
                 )
-            else:
+            elif failure is None:
                 draft_bindings = self._bindings_for_draft_connection(connection, str(scenario["scenario_id"]))
                 try:
                     bindings, snapshot_manifest = self._resolve_binding_assets(connection, draft_bindings)
                     validation = validate_scenario_configuration(
-                        json_loads(scenario["effective_parameters_json"], {}),
+                        queue_effective,
                         snapshot_manifest,
                     )
                 except WorkbenchError as exc:
@@ -4143,6 +5972,7 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                 work_dir = database.scenario_dir(scenario_id)
                 output_dir = str(work_dir / "outputs" / simulation_id)
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
+                profile_name = str(item["runtime_profile"] or "cuda_production_default") if "runtime_profile" in item.keys() else "cuda_production_default"
                 connection.execute(
                     """
                     UPDATE queue_items
@@ -4156,9 +5986,10 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                     INSERT INTO simulation_runs(
                         simulation_id, scenario_id, input_revision_id, status, progress, current_time, end_time,
                         step_count, output_count, start_time, end_time_actual, error,
-                        elapsed_seconds, output_dir, runtime_profile_json,
-                        effective_config_json, resource_summary_json, terminal_log_json, created_at
-                    ) VALUES(?, ?, ?, 'starting', 0, 0, 0, 0, 0, ?, NULL, NULL, 0, ?, ?, ?, '{}', '[]', ?)
+                        elapsed_seconds, output_dir, runtime_profile_json, run_options_json,
+                        effective_config_json, compute_policy_resolution_json,
+                        resource_summary_json, terminal_log_json, created_at
+                    ) VALUES(?, ?, ?, 'starting', 0, 0, 0, 0, 0, ?, NULL, NULL, 0, ?, ?, ?, ?, ?, '{}', '[]', ?)
                     """,
                     (
                         simulation_id,
@@ -4166,8 +5997,10 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                         revision_id,
                         now,
                         output_dir,
-                        json.dumps({"name": "cuda_production_default"}),
-                        scenario["effective_parameters_json"],
+                        json.dumps({"name": profile_name}),
+                        item["run_options_json"] if "run_options_json" in item.keys() and item["run_options_json"] else "{}",
+                        json.dumps(queue_effective, ensure_ascii=False),
+                        json.dumps(queue_resolution, ensure_ascii=False),
                         now,
                     ),
                 )
@@ -4189,6 +6022,13 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                 )
                 payload_scenario = dict(scenario)
                 payload_scenario["input_revision_id"] = revision_id
+                payload_scenario["effective_parameters_json"] = json.dumps(queue_effective, ensure_ascii=False)
+                payload_scenario["_frozen_effective_parameters"] = queue_effective
+                payload_scenario["_frozen_compute_policy_resolution"] = queue_resolution
+                payload_scenario["_runtime_profile"] = profile_name
+                payload_scenario["_frozen_run_options"] = json_loads(
+                    item["run_options_json"], {}
+                ) if "run_options_json" in item.keys() and item["run_options_json"] else {}
         if failure is not None and item:
             connection.execute(
                 """
@@ -4199,7 +6039,13 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
                 (
                     now,
                     failure.message,
-                    "draft_changed" if failure.code == "queue_item_draft_changed" else "preflight_failed",
+                    (
+                        "draft_changed"
+                        if failure.code == "queue_item_draft_changed"
+                        else "policy_snapshot_missing_after_upgrade"
+                        if failure.code == "policy_snapshot_missing_after_upgrade"
+                        else "preflight_failed"
+                    ),
                     queue_item_id,
                 ),
             )
@@ -4226,6 +6072,7 @@ def _claim_queue_item_without_fk_race(self: WorkbenchStore, project_id: str, que
         scenario=payload_scenario,
         output_dir=output_dir,
         manifest=snapshot_manifest,
+        runtime_profile=str(payload_scenario.pop("_runtime_profile", None) or "cuda_production_default"),
     )
 
 

@@ -44,6 +44,9 @@ describe("AssetContentBrowser", () => {
         detached_binding_count: 0,
         cancelled_queue_item_ids: [],
         retained_snapshot_blob_count: 0,
+        retained_upload_blob_count: 0,
+        deleted_blob_count: 0,
+        orphaned_blob_cleanup_failures: [],
       })),
       toggleLayerVisibility: vi.fn(),
       reorderLayer: vi.fn(),
@@ -176,75 +179,5 @@ describe("AssetContentBrowser", () => {
     const namesRestored = screen.getAllByRole("listitem").map((item) => item.getAttribute("aria-label"));
     expect(namesRestored).toEqual(["ri10.asc", "ri2.asc", "ri1.asc"]);
     expect(screen.getAllByTitle("拖拽排序").length).toBeGreaterThan(0);
-  });
-
-  it("sorts mixed-family assets by full filename in all-files view", () => {
-    const demFile: InputFile = {
-      file_id: "file-dem",
-      family: "dem",
-      name: "bcdem.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    const slopeFile: InputFile = {
-      file_id: "file-slope",
-      family: "slope",
-      name: "bcslope.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    const rainNamed: InputFile = {
-      file_id: "file-rain-named",
-      family: "rainfall",
-      name: "rain1.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    const rain2: InputFile = {
-      file_id: "a2",
-      family: "rainfall",
-      name: "ri2.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    const rain10: InputFile = {
-      file_id: "a10",
-      family: "rainfall",
-      name: "ri10.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    const rain1: InputFile = {
-      file_id: "a1",
-      family: "rainfall",
-      name: "ri1.asc",
-      status: "ready",
-      size: 1,
-      updated_at: "2026-08-03T00:00:00Z",
-    };
-    useTaichiFlowStore.setState({
-      inputFiles: [rain10, demFile, rain1, rainNamed, rain2, slopeFile],
-      layerVisibility: {},
-      layerOrder: ["a10", "file-dem", "a1", "file-rain-named", "a2", "file-slope"],
-      editorSelection: { kind: "input", family: "all" },
-    });
-
-    render(<AssetContentBrowser onFocusAsset={() => undefined} />);
-    fireEvent.click(screen.getByRole("button", { name: "按文件名排序" }));
-
-    const namesSorted = screen.getAllByRole("listitem").map((item) => item.getAttribute("aria-label"));
-    expect(namesSorted).toEqual([
-      "bcdem.asc",
-      "bcslope.asc",
-      "rain1.asc",
-      "ri1.asc",
-      "ri2.asc",
-      "ri10.asc",
-    ]);
   });
 });

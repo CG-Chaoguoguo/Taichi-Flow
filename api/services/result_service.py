@@ -151,6 +151,7 @@ def result_metadata(store: WorkbenchStore, project_id: str, simulation_id: str) 
         "parameter_audit.json",
         "parameter_catalog.json",
         "runmode_capabilities.json",
+        "numerical_diagnostics.json",
         "output_manifest.json",
     ):
         path = output_dir / name
@@ -161,9 +162,8 @@ def result_metadata(store: WorkbenchStore, project_id: str, simulation_id: str) 
                 payload[name.removesuffix(".json")] = None
     simulation = store.public_simulation(project_id, store.simulation_row(project_id, simulation_id))
     payload["simulation"] = simulation
-    payload["effective_parameters"] = json_loads(
-        store._scenario_row(project_id, simulation["scenario_id"])["effective_parameters_json"], {}
-    )
+    frozen = simulation.get("effective_config")
+    payload["effective_parameters"] = dict(frozen) if isinstance(frozen, dict) else {}
     return payload
 
 
@@ -239,7 +239,9 @@ def run_export_job(store: WorkbenchStore, project_id: str, export_id: str) -> Di
     _set_export_job(store, project_id, export_id, status="running", error=None)
     try:
         output_dir = simulation_output_dir(store, project_id, job["simulation_id"])
-        scenario = store._scenario_row(project_id, job["scenario_id"])
+        simulation = store.public_simulation(
+            project_id, store.simulation_row(project_id, job["simulation_id"])
+        )
         options = job["options"]
         selected_families = {str(value) for value in options.get("families", []) if value}
         selected_names = {str(value).replace("\\", "/") for value in options.get("filenames", []) if value}
@@ -253,7 +255,8 @@ def run_export_job(store: WorkbenchStore, project_id: str, export_id: str) -> Di
                 continue
             files.append((path, f"results/{taichi_result_name(relative)}"))
 
-        params = json_loads(scenario["effective_parameters_json"], {})
+        frozen = simulation.get("effective_config")
+        params = dict(frozen) if isinstance(frozen, dict) else {}
         params_json = output_dir / "_export_effective_parameters.json"
         params_csv = output_dir / "_export_effective_parameters.csv"
         params_json.write_text(json.dumps(params, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

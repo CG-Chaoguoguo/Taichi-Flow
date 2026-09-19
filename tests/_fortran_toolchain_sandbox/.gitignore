@@ -1,0 +1,29 @@
+# Keep scripts, docs, patches, and tiny placeholders trackable.
+/generated/*
+!/generated/.gitkeep
+/logs/*
+!/logs/.gitkeep
+/toolchain/*
+!/toolchain/.gitkeep
+/work/*
+!/work/.gitkeep
+
+# Never commit local toolchains, copied cases, installers, or build products.
+*.exe
+*.dll
+*.obj
+*.mod
+*.pdb
+*.lib
+*.exp
+*.ilk
+*.suo
+*.user
+*.zip
+*.7z
+*.tar
+*.gz
+*.msi
+*.log
+*.tmp
+*.bak

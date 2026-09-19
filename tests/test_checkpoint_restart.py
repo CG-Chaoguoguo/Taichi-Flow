@@ -1,3 +1,5 @@
+import csv
+import json
 import sys
 from pathlib import Path
 
@@ -155,6 +157,25 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     solver_a.time_stepper.t_current = 4.0
     solver_a.time_stepper.dt_current = 0.25
     solver_a.fortran_tempdt = 0.75
+    solver_a.numerical_dt_history = [0.5, 0.25]
+    solver_a.numerical_reject_reasons = {"cfl": 2}
+    solver_a.numerical_reject_examples = {"cfl": {"t_start_s": 3.5}}
+    solver_a.numerical_max_abs_relative_error = 0.0125
+    solver_a.numerical_volume_violation_count = 1
+    solver_a.numerical_dt_min_hits = 3
+    solver_a.numerical_nonfinite_counts = {"volume_relative_error": 1}
+    solver_a.numerical_observe_count = 4
+    solver_a.native_volume_budget_records = [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    solver_a._output_frame_events = [
+        {
+            "event_index": 0,
+            "time_s": "4",
+            "writer": "taichi_edda_text",
+            "relative_paths": ["Flow_depth_Taichi_4.0.txt"],
+        },
+    ]
 
     expected_manning = solver_a.rheology.manning.to_numpy().copy()
     expected_manning_ori = solver_a.rheology.manning_ori.to_numpy().copy()
@@ -165,8 +186,14 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     expected_v_pred = solver_a.shallow_water.v_pred.to_numpy().copy()
     expected_v_prev = solver_a.shallow_water.v_prev.to_numpy().copy()
     expected_rikzero = solver_a.dfs_dynamic_wave.initial_rikzero_field.copy()
+    expected_rhodepo = solver_a.fields.rhodepo.to_numpy().copy()
 
     solver_a.save_state(str(checkpoint))
+    # Simulate the field key emitted before rhodepo became a persistent field.
+    with np.load(checkpoint, allow_pickle=False) as payload:
+        legacy_payload = {key: payload[key] for key in payload.files if key != "fields__rhodepo"}
+        legacy_payload["fields__rhodepo_temp"] = payload["fields__rhodepo"]
+    np.savez_compressed(checkpoint, **legacy_payload)
 
     config_b = _build_config(dem_file, output_b)
     solver_b = EDDASolver(config_b)
@@ -184,6 +211,81 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     np.testing.assert_allclose(solver_b.shallow_water.v_prev.to_numpy(), expected_v_prev)
     np.testing.assert_allclose(solver_b.shallow_water.manning.to_numpy(), expected_manning)
     np.testing.assert_allclose(solver_b.dfs_dynamic_wave.initial_rikzero_field, expected_rikzero)
+    np.testing.assert_allclose(solver_b.fields.rhodepo.to_numpy(), expected_rhodepo)
     assert solver_b.time_stepper.t_current == 4.0
     assert solver_b.time_stepper.dt_current == 0.25
     assert solver_b.fortran_tempdt == 0.75
+    assert solver_b.numerical_dt_history == [0.5, 0.25]
+    assert solver_b.numerical_reject_reasons == {"cfl": 2}
+    assert solver_b.numerical_reject_examples == {"cfl": {"t_start_s": 3.5}}
+    assert solver_b.numerical_max_abs_relative_error == 0.0125
+    assert solver_b.numerical_volume_violation_count == 1
+    assert solver_b.numerical_dt_min_hits == 3
+    assert solver_b.numerical_nonfinite_counts == {"volume_relative_error": 1}
+    assert solver_b.numerical_observe_count == 4
+    assert solver_b.native_volume_budget_records == [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    assert solver_b._output_frame_events == [
+        {
+            "event_index": 0,
+            "time_s": "4",
+            "writer": "taichi_edda_text",
+            "relative_paths": ["Flow_depth_Taichi_4.0.txt"],
+        },
+    ]
+
+
+def test_checkpoint_rejects_conflicting_legacy_and_current_deposition_fields() -> None:
+    checkpoint = {
+        "fields__rhodepo": np.asarray([[1.0, 2.0]]),
+        "fields__rhodepo_temp": np.asarray([[1.0, 3.0]]),
+    }
+
+    try:
+        EDDASolver._validate_checkpoint_field_aliases(checkpoint)
+    except ValueError as exc:
+        assert "conflicting fields__rhodepo" in str(exc)
+    else:
+        raise AssertionError("conflicting renamed checkpoint fields must be rejected")
+
+
+def test_checkpoint_keeps_pre_restart_sidecars_after_next_write(tmp_path):
+    dem_file = tmp_path / "tiny.asc"
+    output_dir = tmp_path / "same-dir"
+    checkpoint = tmp_path / "restart_state.npz"
+    _write_ascii_dem(dem_file)
+
+    config_a = _build_config(dem_file, output_dir)
+    solver_a = EDDASolver(config_a)
+    solver_a.initialize()
+    solver_a.native_volume_budget_records = [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    solver_a.write_native_volume_budget_csv()
+    solver_a._record_output_frame_event(4.0, ["Flow_depth_Taichi_4.0.txt"])
+    solver_a.save_state(str(checkpoint))
+
+    config_b = _build_config(dem_file, output_dir)
+    solver_b = EDDASolver(config_b)
+    solver_b.initialize()
+    assert solver_b.native_volume_budget_records == []
+    assert solver_b._output_frame_events == []
+    solver_b.load_state(str(checkpoint))
+
+    solver_b.native_volume_budget_records.append(
+        {"t_output_s": 8.0, "accepted_stage": True, "rainfall_m3": 2.0, "residual_m3": 0.1},
+    )
+    solver_b.write_native_volume_budget_csv()
+    solver_b._record_output_frame_event(8.0, ["Flow_depth_Taichi_8.0.txt"])
+
+    budget_path = output_dir / "diagnostics" / "native_volume_budget.csv"
+    with budget_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["t_output_s"] for row in rows] == ["4.0", "8.0"]
+    assert rows[0]["rainfall_m3"] == "1.5"
+
+    payload = json.loads((output_dir / "output_frame_events.json").read_text(encoding="utf-8"))
+    assert [event["time_s"] for event in payload["events"]] == ["4", "8"]
+    assert payload["events"][0]["relative_paths"] == ["Flow_depth_Taichi_4.0.txt"]
+    assert payload["events"][1]["relative_paths"] == ["Flow_depth_Taichi_8.0.txt"]

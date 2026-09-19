@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 
-from tests.comparison.run_paired_erosion_gate_diagnostic import _write_sfmiu_absubar_decomposition_artifacts
+from tests.support.erosion_decomposition import _write_sfmiu_absubar_decomposition_artifacts
 from tests.test_erosion_rate_fortran_formula import build_two_cell_erosion_solver
 
 
@@ -23,6 +23,7 @@ def test_sfmiu_absubar_decomposition_exposes_fortran_velocity_candidates():
     assert set(variants) == {
         "A_active_current_sfmiu",
         "B_absubar_fortran_fvpredi2_candidate",
+        "B2_absubar_fortran_preflux_velocity_state",
         "C_absubar_accepted_velocity_only",
         "D_absubar_candidate_velocity_only",
         "E_miudebris_exact_fortran_branch",
@@ -66,6 +67,7 @@ def test_sfmiu_absubar_variant_artifact_writes_matrix(tmp_path):
     assert {row["variant"] for row in rows} == {
         "A_active_current_sfmiu",
         "B_absubar_fortran_fvpredi2_candidate",
+        "B2_absubar_fortran_preflux_velocity_state",
         "C_absubar_accepted_velocity_only",
         "D_absubar_candidate_velocity_only",
         "E_miudebris_exact_fortran_branch",

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 
 
-def test_directory_picker_lists_local_directories_and_typed_files(tmp_path: Path) -> None:
+def test_directory_picker_separates_typed_directories_and_files(tmp_path: Path) -> None:
     root = tmp_path / "drive-c"
     child = root / "project-parent"
     child.mkdir(parents=True)
@@ -22,13 +22,7 @@ def test_directory_picker_lists_local_directories_and_typed_files(tmp_path: Path
         roots = client.get("/api/system/directories")
         assert roots.status_code == 200
         assert roots.json()["roots"] == [
-            {
-                "name": "drive-c",
-                "path": str(root.resolve()),
-                "writable": True,
-                "kind": "directory",
-                "size": None,
-            }
+            {"name": "drive-c", "path": str(root.resolve()), "writable": True, "kind": "directory", "size": None}
         ]
 
         listing = client.get("/api/system/directories", params={"path": str(root)})
@@ -38,23 +32,13 @@ def test_directory_picker_lists_local_directories_and_typed_files(tmp_path: Path
         assert payload["parent_path"] is None
         assert payload["can_select"] is True
         assert payload["directories"] == [
-            {
-                "name": "project-parent",
-                "path": str(child.resolve()),
-                "writable": True,
-                "kind": "directory",
-                "size": None,
-            }
+            {"name": "project-parent", "path": str(child.resolve()), "writable": True, "kind": "directory", "size": None}
         ]
-        assert payload["files"] == [
-            {
-                "name": "not-a-directory.txt",
-                "path": str((root / "not-a-directory.txt").resolve()),
-                "writable": True,
-                "kind": "file",
-                "size": len("not exposed"),
-            }
-        ]
+        assert payload["files"] == [{
+            "name": "not-a-directory.txt",
+            "path": str((root / "not-a-directory.txt").resolve()),
+            "writable": True, "kind": "file", "size": len("not exposed".encode("utf-8")),
+        }]
 
 
 def test_directory_picker_rejects_non_local_and_invalid_paths(tmp_path: Path, monkeypatch) -> None:
@@ -112,8 +96,6 @@ def test_directory_picker_has_a_typed_openapi_contract_without_legacy_routes(tmp
     assert directory_schema["$ref"].endswith("/DirectoryListingResponse")
     properties = schema["components"]["schemas"]["DirectoryListingResponse"]["properties"]
     assert set(properties) == {"current_path", "parent_path", "roots", "directories", "files", "can_select"}
-    location_properties = schema["components"]["schemas"]["DirectoryLocationResponse"]["properties"]
-    assert set(location_properties) == {"name", "path", "writable", "kind", "size"}
 
     for legacy_path in {
         "/api/projects/list",

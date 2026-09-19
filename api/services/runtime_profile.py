@@ -1,4 +1,4 @@
-"""Typed runtime profiles for Taichi Flow service runs."""
+"""Typed runtime profiles for Taichi-Flow service runs."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -34,10 +34,10 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
         class_name="parity",
         default_backend="cuda",
         description=(
-            "EDDA-Taichi CUDA candidate parity profile. This mirrors the "
-            "environment gates used by tools/run_cuda_candidate_case.py so "
-            "frontend-driven Taichi Flow runs can be compared against the "
-            "EDDA-Taichi backend harness without changing solver equations."
+            "EDDA-compatible CUDA candidate parity profile. This mirrors the "
+            "environment gates used by the local candidate validation harness "
+            "so frontend-driven Taichi-Flow runs can be compared against the "
+            "original-EDDA compatibility path without changing solver equations."
         ),
         promoted_defaults=[
             "taichi_cuda_backend",
@@ -76,7 +76,7 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfile] = {
         class_name="production",
         default_backend="cuda",
         description=(
-            "Default Taichi Flow runtime. CUDA is selected by default; only "
+            "Default Taichi-Flow runtime. CUDA is selected by default; only "
             "evidence-gated production behavior is enabled. Candidate and "
             "diagnostic mutation chains remain inactive."
         ),
@@ -167,7 +167,7 @@ def apply_profile_environment(
     """
     Apply profile environment values and return the previous values.
 
-    This intentionally sets only Taichi Flow profile variables and neutral
+    This intentionally sets only Taichi-Flow profile variables and neutral
     progress-bar behavior. It does not enable legacy experimental gates.
     """
     import os
@@ -195,8 +195,36 @@ def restore_profile_environment(
             target[key] = value
 
 
+USER_SELECTABLE_RUNTIME_PROFILES = ("cuda_production_default", "compat_default_off")
+
+USER_RUNTIME_PROFILE_META: Dict[str, Dict[str, str]] = {
+    "cuda_production_default": {
+        "label_zh": "CUDA 加速",
+        "description_zh": "使用 GPU 运行生产求解器（默认）。仅影响本次入队任务。",
+    },
+    "compat_default_off": {
+        "label_zh": "CPU 兼容",
+        "description_zh": "使用 CPU 运行，适合无 GPU 环境或回归验证。仅影响本次入队任务。",
+    },
+}
+
+
+def resolve_user_runtime_profile(name: Optional[str]) -> RuntimeProfile:
+    requested = (name or DEFAULT_RUNTIME_PROFILE).strip() or DEFAULT_RUNTIME_PROFILE
+    if requested not in USER_SELECTABLE_RUNTIME_PROFILES:
+        raise ValueError(f"Unsupported user runtime_profile: {requested}")
+    return resolve_runtime_profile(requested)
+
+
 def runtime_profiles_catalog() -> Dict[str, Any]:
     return {
         "default_profile": DEFAULT_RUNTIME_PROFILE,
         "profiles": {name: profile.to_dict() for name, profile in RUNTIME_PROFILES.items()},
+        "user_selectable": [
+            {
+                **RUNTIME_PROFILES[name].to_dict(),
+                **USER_RUNTIME_PROFILE_META[name],
+            }
+            for name in USER_SELECTABLE_RUNTIME_PROFILES
+        ],
     }

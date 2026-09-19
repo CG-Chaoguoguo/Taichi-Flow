@@ -1,10 +1,8 @@
 # ================================================================
-#  EDDA-Taichi 模拟配置文件
+#  Taichi-Flow 模拟配置文件
 # ================================================================
 #  使用方法: 修改本文件中的参数和文件路径，然后运行
-#    python run.py
-#  或
-#    python run.py --config config.yaml
+#    python -m edda.solver.edda_solver config.yaml
 # ================================================================
 
 
@@ -13,27 +11,16 @@
 # ================================================================
 
 # [必须] DEM地形文件
-#   格式: GeoTIFF (.tif)
+#   格式: ESRI ASCII Grid (.asc) 或 GeoTIFF (.tif)
 #   要求: 带坐标参考系(CRS)，裁剪区域外设为NoData
-dem_file: "tests/data/DEM.tif"
+dem_file: "examples/data/dev_tiny_dem.asc"
 
 # [必须] 降雨数据
+rainfall_file: "examples/data/dev_rainfall.csv"
 rainfall:
-  # 降雨输入模式:
-  #   spatial_tif_series - 空间降雨TIF序列（推荐，每个文件一个时间步）
-  #   single_file        - 单个文件（CSV或TXT，均匀降雨）
-  mode: "spatial_tif_series"
-
-  # --- spatial_tif_series 模式 ---
-  # 降雨TIF文件所在目录
-  directory: "tests/data"
-  # 文件匹配模式（按文件名排序确定时间顺序）
-  file_pattern: "caiyun_precip_*.tif"
-  # 相邻文件之间的时间间隔（小时）
-  time_step_hours: 1.0
-
-  # --- single_file 模式 ---
-  # file: "tests/data/rainfall.csv"
+  # 可复现的最小示例使用 CSV；空间 GeoTIFF 序列可按需替换此段。
+  mode: "single_file"
+  file: "examples/data/dev_rainfall.csv"
 
 # [可选] 边界条件文件
 #   格式: Shapefile (.shp) 或 GeoTIFF (.tif)

@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from api.routes import cases, parameters, realtime, results_v2, workbench
+from api.routes import cases, parameters, realtime, results_v2, settings, workbench
 from api.services.runmode_capabilities import build_runmode_capabilities
 from api.services.directory_picker import DirectoryPickerService
 from api.services.scheduler import (
@@ -36,7 +36,18 @@ logger = logging.getLogger(__name__)
 SERVICE_ID = "taichi-flow-api"
 API_CONTRACT_VERSION = 1
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CHECKOUT_ID = sha256(os.path.normcase(str(PROJECT_ROOT)).encode("utf-8")).hexdigest()[:16]
+# Development checkouts identify themselves by their normalized root.  A
+# portable bundle must keep one stable identity while its drive letter moves,
+# so the launcher may provide an explicit manifest-derived id.
+CHECKOUT_ID = os.environ.get("TAICHI_FLOW_CHECKOUT_ID") or sha256(
+    os.path.normcase(str(PROJECT_ROOT)).encode("utf-8")
+).hexdigest()[:16]
+BUILD_ID = os.environ.get("TAICHI_FLOW_BUILD_ID", "")
+DISTRIBUTION_MODE = os.environ.get("TAICHI_FLOW_DISTRIBUTION_MODE", "development")
+# The desktop launcher supplies this value for newly created API processes so a
+# reused Vite proxy can be compared with the exact API instance it targets.
+# Empty is intentionally tolerated for services started by older entry points.
+API_INSTANCE_ID = os.environ.get("TAICHI_FLOW_API_INSTANCE_ID", "")
 
 
 def _allowed_origins() -> list[str]:
@@ -206,7 +217,21 @@ def create_app(
     @application.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request.state.request_id = request.headers.get("x-request-id") or str(uuid4())
-        response = await call_next(request)
+        if request.url.path.startswith(("/api/projects", "/api/cases", "/api/parameters")):
+            from contextlib import AsyncExitStack
+            parts = request.url.path.strip("/").split("/")
+            project_id = parts[2] if len(parts) >= 3 and parts[1] == "projects" and parts[2] not in {"import"} else None
+            catalog_operation = not project_id or (len(parts) == 3 and request.method == "DELETE")
+            async with AsyncExitStack() as locks:
+                # Catalog operations always acquire before a project lock;
+                # ordinary project requests need not block unrelated projects.
+                if catalog_operation:
+                    await locks.enter_async_context(coordinator.project_lifecycle_lock)
+                if project_id:
+                    await locks.enter_async_context(coordinator.project_lock(project_id))
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers["x-request-id"] = request.state.request_id
         return response
 
@@ -243,6 +268,7 @@ def create_app(
     application.include_router(realtime.router, tags=["realtime"])
     application.include_router(cases.router, prefix="/api/cases", tags=["cases"])
     application.include_router(parameters.router, prefix="/api/parameters", tags=["parameters"])
+    application.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
     @application.get("/api/system/directories", tags=["system"], response_model=DirectoryListingResponse)
     async def system_directories(request: Request, path: Optional[str] = None):
@@ -266,6 +292,11 @@ def create_app(
             "service_id": SERVICE_ID,
             "api_contract_version": API_CONTRACT_VERSION,
             "checkout_id": CHECKOUT_ID,
+            "api_instance_id": API_INSTANCE_ID,
+            "distribution_mode": DISTRIBUTION_MODE,
+            "build_id": BUILD_ID,
+            "runtime_python": os.environ.get("TAICHI_FLOW_RUNTIME_PYTHON", ""),
+            "runtime_taichi": os.environ.get("TAICHI_FLOW_RUNTIME_TAICHI", ""),
             "active_simulations": coordinator.active_count if scheduler_enabled else 0,
             "state_dir": str(store.state_dir),
             "scheduler_enabled": scheduler_enabled,

@@ -1,5 +1,5 @@
 """
-Integration tests for EDDA-Taichi system.
+Integration tests for Taichi-Flow.
 """
 import pytest
 import numpy as np
@@ -95,11 +95,12 @@ class TestAPIIntegration:
 
     def test_client_example_structure(self):
         """Test API client example structure."""
-        from examples.api_client_example import EDDAClient
+        from examples.api_client_example import TaichiFlowClient
 
-        client = EDDAClient("http://localhost:8000")
-        assert client.base_url == "http://localhost:8000"
-        assert client.api_url == "http://localhost:8000/api"
+        client = TaichiFlowClient("http://localhost:8000")
+        assert str(client.client.base_url).rstrip("/") == "http://localhost:8000"
+        assert client.client.base_url.path == "/"
+        client.close()
 
 
 class TestFrontendIntegration:

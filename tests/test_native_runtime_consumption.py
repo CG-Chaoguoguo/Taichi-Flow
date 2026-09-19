@@ -221,7 +221,10 @@ def test_real_solver_consumes_inflow_sidecar_when_original_branch_is_active(tmp_
 
     configured = solver.inflow_hydrograph_config["configured_preview"][0]
     solver.dfs_dynamic_wave.set_current_time(0.0)
-    step_info = solver.dfs_dynamic_wave.step(1.0)
+    # The fixture's first inflow pulse has a CFL limit below one second.
+    # This test verifies sidecar consumption, so use a stable candidate
+    # step instead of accidentally asserting against the reject mechanism.
+    step_info = solver.dfs_dynamic_wave.step(0.05)
 
     assert step_info["accepted"] is True
     assert solver.fields.tempinflowh.to_numpy().sum() > 0.0
@@ -506,7 +509,8 @@ def test_real_solver_loads_original_precomputed_unsfin_schedule_artifacts(tmp_pa
     manifest = {entry["family"]: entry for entry in runtime_input_manifest["inputs"]}
 
     assert registry["selected_source"] == "precomputed_unsfin_schedule"
-    assert registry["schedule_provider"] == "original_tfail_artifacts"
+    assert registry["schedule_provider"] == "uploaded_schedule"
+    assert registry["schedule_provider_detail"] == "original_tfail_artifacts"
     assert registry["schedule_loaded"] is True
     assert registry["runtime_equivalent_implemented"] is True
     assert registry["runtime_active"] is True

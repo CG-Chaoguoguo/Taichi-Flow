@@ -1,5 +1,5 @@
 """
-Infinite slope stability analysis for EDDA simulation.
+Infinite slope stability analysis for Taichi-Flow simulations.
 
 This module implements infinite slope stability analysis to calculate
 the factor of safety based on pore water pressure and determine

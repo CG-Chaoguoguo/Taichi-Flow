@@ -3,7 +3,8 @@
 ## Local setup
 
 Use a Python environment that contains Taichi and run commands from the
-repository root. `TAICHI_FLOW_PYTHON` may point to an explicit interpreter:
+repository root. Node.js 22.12+ is required by Electron 43.2.0.
+`TAICHI_FLOW_PYTHON` may point to an explicit interpreter:
 
 ```powershell
 $env:TAICHI_FLOW_PYTHON = "C:\\path\\to\\python.exe"
@@ -12,6 +13,16 @@ cd frontend\\taichi-flow
 npm ci
 npm run dev -- --host 127.0.0.1 --port 3000
 ```
+
+The managed entry point is the independent desktop workbench:
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+Use `.\scripts\start-dev.ps1 -Browser` for an explicit browser window, or
+`.\scripts\start-dev.ps1 -ServicesOnly` (with `-NoBrowser` as a compatibility
+alias) when only FastAPI and Vite should remain running.
 
 `TAICHI_FLOW_STATE_DIR` selects an isolated catalog for tests. Set
 `TAICHI_FLOW_MAX_CONCURRENT_PROJECTS=2` (the default) when exercising scheduler
@@ -40,7 +51,7 @@ structure and `data-qoder-*` attributes. API calls live in
 `src/stores/taichiFlowStore.ts`. Components must render loading, empty, error,
 and disconnected states from real responses rather than mock records.
 Project-scoped navigation must remain natively disabled until an active project
-exists, and every project route must also be wrapped by `ProjectRouteGuard`.
+exists, and every project route must also be wrapped by `EditorRouteGuard`.
 Desktop-only directory access is exposed through
 `taichi-flow:select-directory`; renderer code receives only the typed preload
 bridge and never Electron or Node primitives.
@@ -52,9 +63,13 @@ python -m pytest tests\\test_workbench_domain_api.py tests\\test_workbench_sched
 cd frontend\\taichi-flow
 npm test
 npm run build
-node --test desktop\\directoryPicker.test.cjs
+npm run test:desktop
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\\..\\scripts\\desktop-dev\\Test-DesktopDevLauncher.ps1
 ```
 
-Keep generated evidence under ignored local `artifacts/diagnostics/` paths.
-Commit only maintained tests and durable documentation; do not commit execution
-logs, simulation outputs, local state databases, or one-off diagnostic scripts.
+The historical `agentlog.md` is local-only and is intentionally not part of a
+clean checkout. Keep case-specific audit reports, handoffs, and screenshots
+under the local-only `docs/audit/` directory, and raw results under `artifacts/`.
+Neither directory is distributed with the repository. Keep reusable contracts,
+architecture decisions, tool source, and regression tests tracked; do not use
+local audit reports as mandatory runtime or test inputs.

@@ -39,7 +39,9 @@ def _write_precomputed_artifacts(case_dir: Path, tfail: np.ndarray) -> None:
     _write_ascii_grid(case_dir / "precomputed_unsfin_tfail.txt", tfail)
     _write_ascii_grid(case_dir / "precomputed_unsfin_fdepth.txt", np.array([[0.2, 0.0], [0.0, 0.4]], dtype=np.float64))
     (case_dir / "precomputed_unsfin_meta.json").write_text(
-        json.dumps({"provider": "synthetic_test"}),
+        # The arrays are synthetic, but the metadata must still exercise the
+        # same explicit provenance contract as a real precomputed sidecar.
+        json.dumps({"provider": "production_native_unsfin", "shape_kind": "ascii_grid"}),
         encoding="utf-8",
     )
 

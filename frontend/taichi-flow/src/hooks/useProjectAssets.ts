@@ -164,9 +164,20 @@ export function useProjectAssets({ selectedFamily, focusedAssetId = null, readOn
       setSelectedFileId((current) => (current && result.deleted_ids.includes(current) ? null : current));
       setDeletePreview(null);
       exitSelection();
+      const deletionSummary = `已删除 ${result.deleted_ids.length} 个文件，解除 ${result.detached_binding_count} 处草稿绑定，取消 ${result.cancelled_queue_item_ids.length} 个等待任务。`;
+      if (result.orphaned_blob_cleanup_failures.length) {
+        const failedFiles = result.orphaned_blob_cleanup_failures
+          .map((failure) => failure.path.split(/[\\/]/).pop() || failure.sha256)
+          .join("、");
+        addToast({
+          type: "warning",
+          message: `${deletionSummary} ${result.orphaned_blob_cleanup_failures.length} 个内容文件未回收：${failedFiles}。`,
+        });
+        return;
+      }
       addToast({
         type: "success",
-        message: `已删除 ${result.deleted_ids.length} 个文件，解除 ${result.detached_binding_count} 处草稿绑定，取消 ${result.cancelled_queue_item_ids.length} 个等待任务。`,
+        message: deletionSummary,
       });
     } catch (error) {
       addToast({ type: "error", message: error instanceof Error ? error.message : "删除文件失败" });

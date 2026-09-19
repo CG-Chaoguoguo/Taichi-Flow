@@ -1,5 +1,5 @@
 """
-Deposition model for EDDA simulation.
+Deposition model for Taichi-Flow simulations.
 
 Implements sediment deposition following the original EDDA formulation (dfs.F90:400-428)
 with velocity-based deposition criteria, density conservation, and erodible layer tracking.

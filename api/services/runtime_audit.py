@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -9,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from edda.config.sim_config import SimulationConfig
 from api.services.result_files import (
     classify_result_family as _shared_classify_result_family,
+    classify_result_writer as _shared_classify_result_writer,
     is_result_file as _shared_is_result_file,
     taichi_result_name,
 )
@@ -18,13 +21,16 @@ METADATA_FILENAMES = {
     "effective_config.json",
     "input_source_registry.json",
     "job_metadata.json",
-    "output_manifest.json",
+    "output_frame_events.json",
     "parameter_audit.json",
+    "numerical_diagnostics.json",
     "request_payload.json",
     "runmode_capabilities.json",
     "runtime_input_manifest.json",
     "runtime_provenance.json",
 }
+
+OUTPUT_FRAME_EVENTS_SCHEMA = "fix3-output-frame-events-v1"
 
 REFERENCE_RESULT_PREFIXES = (
     "flow_depth_",
@@ -69,6 +75,93 @@ NONINVENTORY_REFERENCE_ARTIFACTS = {
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _normalize_event_relative_path(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("frame event relative path must be a non-empty string")
+    path = Path(raw.replace("\\", "/"))
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"frame event path must remain under output root: {raw!r}")
+    return path.as_posix()
+
+
+def _load_output_frame_events(output_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Load solver-recorded physical output times, failing closed on ambiguity."""
+    path = output_dir / "output_frame_events.json"
+    evidence: dict[str, Any] = {
+        "path": str(path),
+        "status": "missing",
+        "schema_version": None,
+        "event_count": 0,
+        "errors": [],
+    }
+    if not path.is_file():
+        return evidence, {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        evidence.update(status="invalid", errors=[f"cannot read output frame events: {exc}"])
+        return evidence, {}
+    if not isinstance(payload, dict):
+        evidence.update(status="invalid", errors=["output frame events payload must be an object"])
+        return evidence, {}
+    evidence["schema_version"] = payload.get("schema_version")
+    if payload.get("schema_version") != OUTPUT_FRAME_EVENTS_SCHEMA:
+        evidence.update(status="invalid", errors=["unexpected output frame event schema version"])
+        return evidence, {}
+    events = payload.get("events")
+    if not isinstance(events, list):
+        evidence.update(status="invalid", errors=["output frame events must be a list"])
+        return evidence, {}
+
+    index: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for position, event in enumerate(events):
+        if not isinstance(event, dict):
+            errors.append(f"event {position} must be an object")
+            continue
+        raw_time = event.get("time_s")
+        try:
+            time_s = Decimal(str(raw_time))
+        except (InvalidOperation, ValueError):
+            errors.append(f"event {position} has an invalid physical time")
+            continue
+        if not time_s.is_finite() or time_s < 0:
+            errors.append(f"event {position} has a non-finite or negative physical time")
+            continue
+        paths = event.get("relative_paths")
+        if not isinstance(paths, list) or not paths:
+            errors.append(f"event {position} must list one or more output paths")
+            continue
+        for raw_path in paths:
+            try:
+                relative_path = _normalize_event_relative_path(raw_path)
+            except ValueError as exc:
+                errors.append(f"event {position}: {exc}")
+                continue
+            if relative_path in index:
+                errors.append(f"duplicate output path in frame events: {relative_path}")
+                continue
+            index[relative_path] = {
+                "event_index": event.get("event_index", position),
+                "time_s": format(time_s, "f"),
+                "writer": event.get("writer"),
+            }
+    evidence.update(event_count=len(events), errors=errors)
+    if errors:
+        evidence["status"] = "invalid"
+        return evidence, {}
+    evidence["status"] = "present"
+    return evidence, index
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -153,6 +246,7 @@ def build_output_manifest(
     result_files: List[Dict[str, Any]] = []
     other_files: List[Dict[str, Any]] = []
     result_family_summary: Dict[str, int] = {}
+    frame_event_evidence, frame_event_index = _load_output_frame_events(output_dir)
 
     if output_dir.exists():
         for path in sorted(item for item in output_dir.rglob("*") if item.is_file()):
@@ -161,6 +255,7 @@ def build_output_manifest(
                 "relative_path": relative_path,
                 "size_bytes": path.stat().st_size,
                 "suffix": path.suffix.lower(),
+                "sha256": _sha256_file(path),
             }
             if path.name in METADATA_FILENAMES:
                 metadata_files.append(entry)
@@ -169,7 +264,13 @@ def build_output_manifest(
             elif _is_result_file(path, relative_path):
                 family = _classify_result_family(relative_path)
                 entry["family"] = family
+                entry["writer"] = _shared_classify_result_writer(relative_path)
                 entry["download_filename"] = taichi_result_name(relative_path)
+                event = frame_event_index.get(relative_path)
+                if event is not None:
+                    entry["frame_time_s"] = event["time_s"]
+                    entry["frame_event_index"] = event["event_index"]
+                    entry["frame_event_writer"] = event["writer"]
                 result_files.append(entry)
                 result_family_summary[family] = result_family_summary.get(family, 0) + 1
             else:
@@ -185,8 +286,16 @@ def build_output_manifest(
         *(entry["relative_path"] for entry in other_files),
     ]
     reference_output_parity = _build_reference_output_parity(all_relative_paths, reference_output_expectations)
+    observed_result_paths = {entry["relative_path"] for entry in result_files}
+    declared_frame_paths = set(frame_event_index)
+    frame_event_evidence["declared_file_count"] = len(declared_frame_paths)
+    frame_event_evidence["declared_paths_missing_from_output"] = sorted(declared_frame_paths - observed_result_paths)
+    frame_event_evidence["result_files_with_recorded_time"] = sum(
+        1 for entry in result_files if entry.get("frame_time_s") is not None
+    )
 
     manifest = {
+        "schema_version": "output-manifest-v2",
         "generated_at": _timestamp(),
         "output_dir": str(output_dir),
         "expected_metadata_files": expected_metadata_files,
@@ -195,6 +304,7 @@ def build_output_manifest(
         "generated_input_files": generated_input_files,
         "result_files": result_files,
         "result_family_summary": result_family_summary,
+        "frame_event_evidence": frame_event_evidence,
         "other_files": other_files,
         "counts": {
             "metadata_files": len(metadata_files),
@@ -500,6 +610,66 @@ def build_parameter_audit(
                 _source_registry_parameter_entry(
                     "dfs_face_flux_variant",
                     input_source_registry.get("dfs_face_flux_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_dry_face_velocity_variant",
+                    input_source_registry.get("dfs_dry_face_velocity_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_artivis_variant",
+                    input_source_registry.get("dfs_artivis_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_absubar_variant",
+                    input_source_registry.get("dfs_absubar_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_flow_velocity_writer_variant",
+                    input_source_registry.get("dfs_flow_velocity_writer_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_erosion_depth_writer_variant",
+                    input_source_registry.get("dfs_erosion_depth_writer_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_sfdf_classify_cv_variant",
+                    input_source_registry.get("dfs_sfdf_classify_cv_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_cvlimit_variant",
+                    input_source_registry.get("dfs_cvlimit_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_erodph_dt_variant",
+                    input_source_registry.get("dfs_erodph_dt_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_barrier_flux_variant",
+                    input_source_registry.get("dfs_barrier_flux_variant"),
+                    consumed=True,
+                    output_evidence=outputs,
+                ),
+                _source_registry_parameter_entry(
+                    "dfs_commit_cv_eps_variant",
+                    input_source_registry.get("dfs_commit_cv_eps_variant"),
                     consumed=True,
                     output_evidence=outputs,
                 ),

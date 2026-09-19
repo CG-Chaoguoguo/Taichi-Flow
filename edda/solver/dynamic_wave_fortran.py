@@ -46,6 +46,8 @@ class FortranDynamicWaveWorkspace:
         self.fields = fields
         self.nx = fields.nx
         self.ny = fields.ny
+        # Host-side compile-time string consumed by ti.static branches.
+        self.dfs_cvlimit_variant = "tanslo_cycle_cvstar_clamp_bj"
 
     @staticmethod
     def direction_name(direction: int) -> str:
@@ -70,16 +72,20 @@ class FortranDynamicWaveWorkspace:
             self.fields.tempele[i, j] = 0.0
             self.fields.tempfsh_flow[i, j] = 0.0
             self.fields.tempfsrho_flow[i, j] = 0.0
-            self.fields.fhpredi[i, j] = 0.0
-            self.fields.frhopredi[i, j] = 0.0
+            # `fhpredi`/`frhopredi` are NOT reset per attempt in dfs.F90: the
+            # main loop only zeroes `fvpredi/qq/qqmass/...` (:170-186).  The
+            # barrier deposition branch (:468-469) therefore reads the previous
+            # attempt's `fhpredi(i)` before :570 overwrites it.  Keep the stale
+            # value; `_merge_source_terms` rewrites both before the face loop.
             self.fields.fhpredi2[i, j] = 0.0
             self.fields.frhopredi2[i, j] = 0.0
             self.fields.qtnet_fortran[i, j] = 0.0
             self.fields.qmassnet_fortran[i, j] = 0.0
             self.fields.absubar_temp[i, j] = 0.0
             self.fields.tau_temp[i, j] = 0.0
-            self.fields.rhodepo_temp[i, j] = 0.0
-            self.fields.temp_erodible_thickness[i, j] = self.fields.erodible_thickness[i, j]
+            # `rhodepo` and `tempinierodithick` are persistent dfs.F90 state
+            # (dfs.F90:113/:128 initialise them once; :174 `rhodepo=rhoero`
+            # is commented out).  Never re-seed them here.
             self.fields.temp_depo_thickness[i, j] = self.fields.depo_thickness[i, j]
 
         for i, j, d in self.fields.fv_fortran:
@@ -136,7 +142,11 @@ class FortranDynamicWaveWorkspace:
                 continue
 
             hi = self.fields.h[i, j] + self.fields.z_bed[i, j]
-            max_grad = -1.0e20
+            # `tanslodir` / `tanslo` are DOUBLE PRECISION in the Chamoli
+            # source.  A bare Python literal makes this Taichi local f32 even
+            # when the field state is f64, which loses the first dynamic-slope
+            # divergence before the value reaches `tanslo_fortran`.
+            max_grad = ti.cast(-1.0e20, ti.f64)
             has_missing_neighbor = 0
 
             for d in ti.static(range(8)):
@@ -156,6 +166,27 @@ class FortranDynamicWaveWorkspace:
 
             if has_missing_neighbor == 1 and max_grad < 0.0:
                 max_grad = 0.0
+
+            if ti.static(self.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"):
+                # Chamoli dfs.F90:207-212 sets slo=atan(maxval(tanslodir)), then
+                # :358-371 recomputes cvlimit from tan(slo) every step with
+                # clamp `<0 or >1 → cvstar` and always rewrites rholimit.
+                self.fields.tanslo_fortran[i, j] = max_grad
+                phi_rad = self.fields.phi_field[i, j] * FORTRAN_DEG2RAD
+                tan_phi = ti.tan(phi_rad)
+                # ti.atan is unavailable on some Taichi builds; atan2(y,1)==atan(y).
+                tan_slo = ti.tan(ti.atan2(max_grad, 1.0))
+                denominator = (rho_sediment - rho_water) * (tan_phi - tan_slo)
+                cvlimit = cvstar
+                if denominator != 0.0:
+                    cvlimit = rho_water * tan_slo / denominator
+                    if cvlimit < DFS_CVLIMIT_BREAK:
+                        cvlimit = DFS_CVLIMIT_QUADRATIC_COEFF * cvlimit * cvlimit
+                    if cvlimit < 0.0 or cvlimit > 1.0:
+                        cvlimit = cvstar
+                self.fields.cvlimit_temp[i, j] = cvlimit
+                self.fields.rholimit_temp[i, j] = cvlimit * (rho_sediment - rho_water) + rho_water
+                continue
 
             if max_grad < 0.0:
                 self.fields.tanslo_fortran[i, j] = max_grad
@@ -193,11 +224,10 @@ class FortranDynamicWaveWorkspace:
         """
         Experimental literal port of the supplied `dfs.F90` `tanslodir` behavior.
 
-        The source declares `tanslodir(maxdirection)` once and never clears it
-        inside the main-cell loop. Missing-neighbor directions therefore keep
-        the previous cell's value, and the array also persists across accepted
-        steps. This kernel serializes the row-major traversal and reproduces
-        that carry-over literally.
+        This is retained only for historical ablation. The active Chamoli
+        source explicitly executes ``tanslodir=0.`` inside the main-cell loop
+        before traversing its directions, so no cross-cell carry is part of
+        the original semantics. Do not use this helper for production parity.
         """
         ti.loop_config(serialize=True)
         for linear in range(self.nx * self.ny):
@@ -226,6 +256,22 @@ class FortranDynamicWaveWorkspace:
                     max_grad = carry[d]
 
             if max_grad < 0.0:
+                if ti.static(self.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"):
+                    self.fields.tanslo_fortran[i, j] = max_grad
+                    phi_rad = self.fields.phi_field[i, j] * FORTRAN_DEG2RAD
+                    tan_phi = ti.tan(phi_rad)
+                    tan_slo = ti.tan(ti.atan2(max_grad, 1.0))
+                    denominator = (rho_sediment - rho_water) * (tan_phi - tan_slo)
+                    cvlimit = cvstar
+                    if denominator != 0.0:
+                        cvlimit = rho_water * tan_slo / denominator
+                        if cvlimit < DFS_CVLIMIT_BREAK:
+                            cvlimit = DFS_CVLIMIT_QUADRATIC_COEFF * cvlimit * cvlimit
+                        if cvlimit < 0.0 or cvlimit > 1.0:
+                            cvlimit = cvstar
+                    self.fields.cvlimit_temp[i, j] = cvlimit
+                    self.fields.rholimit_temp[i, j] = cvlimit * (rho_sediment - rho_water) + rho_water
+                    continue
                 self.fields.tanslo_fortran[i, j] = max_grad
                 self.fields.cvlimit_temp[i, j] = 0.0
                 continue
@@ -242,8 +288,12 @@ class FortranDynamicWaveWorkspace:
                 cvlimit = rho_water * tan_slo / denominator
                 if cvlimit < DFS_CVLIMIT_BREAK:
                     cvlimit = DFS_CVLIMIT_QUADRATIC_COEFF * cvlimit * cvlimit
-                if cvlimit < 0.0 or cvlimit > cvstar:
-                    cvlimit = cvstar
+                if ti.static(self.dfs_cvlimit_variant == "tan_slo_unit_clamp_chamoli"):
+                    if cvlimit < 0.0 or cvlimit > 1.0:
+                        cvlimit = cvstar
+                else:
+                    if cvlimit < 0.0 or cvlimit > cvstar:
+                        cvlimit = cvstar
 
             self.fields.cvlimit_temp[i, j] = cvlimit
             self.fields.rholimit_temp[i, j] = cvlimit * (rho_sediment - rho_water) + rho_water

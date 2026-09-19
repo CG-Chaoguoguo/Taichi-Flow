@@ -1,12 +1,17 @@
 # Backend Acceptance Criteria
 
-Last updated: 2026-04-18
-Stage: S0 baseline freeze
+Last updated: 2026-09-03
+Stage: S0 historical baseline
+
+> This file is retained as a historical acceptance record. The original
+> alignment matrix was a local planning artifact and is not shipped with a
+> clean checkout. Current production entry is the project input-revision →
+> scenario → queue flow described in `docs/api_reference.md`.
 
 ## Purpose
 
-This document defines the acceptance thresholds used by
-[docs/backend_alignment_matrix.md](backend_alignment_matrix.md).
+This document defines the acceptance thresholds used by the historical S0
+review and by the current evidence-gated runtime catalog.
 
 These definitions are intentionally strict. They exist to stop the project from
 mislabeling:
@@ -35,7 +40,7 @@ A capability family may be labeled `F` only if **all** conditions below are met:
 
 1. **Production API reachable**
    - the family can be entered through the production backend path centered on
-     `POST /simulation/start -> SimulationConfig`;
+     project input revisions, scenarios, and queue submission;
    - it does not depend on alignment helpers or test-only builders.
 
 2. **Input source is formalized**
@@ -168,7 +173,7 @@ Frontend exposure is derived from backend acceptance level:
 - `M`: do not expose;
 - `O`: exclude from the active parity backlog.
 
-Detailed frontend guidance is frozen in
+Detailed frontend guidance is retained in
 [docs/frontend_exposure_gate.md](frontend_exposure_gate.md).
 
 ## S0 Baseline Consequence
