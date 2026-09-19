@@ -3250,6 +3250,19 @@ class EDDASolver:
             return
         field.from_numpy(np.asarray(array))
 
+    @staticmethod
+    def _checkpoint_mapping_records(raw: Any, name: str) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ValueError(f"{name} must be a list")
+        records: list[dict[str, Any]] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"{name}[{index}] must be an object")
+            records.append(dict(item))
+        return records
+
     def save_state(self, output_file: str) -> None:
         """
         Save a full restart checkpoint for research-grade windowed reruns.
@@ -3326,6 +3339,8 @@ class EDDASolver:
             "dt_min_hits": int(self.numerical_dt_min_hits),
             "nonfinite_counts": dict(self.numerical_nonfinite_counts),
             "observe_count": int(self.numerical_observe_count),
+            "native_volume_budget_records": list(getattr(self, "native_volume_budget_records", []) or []),
+            "output_frame_events": list(getattr(self, "_output_frame_events", []) or []),
         }, ensure_ascii=False, default=str))
 
         np.savez_compressed(output_path, **arrays)
@@ -3424,6 +3439,15 @@ class EDDASolver:
                     self.numerical_nonfinite_counts = {str(key): int(value) for key, value in dict(diagnostics.get("nonfinite_counts") or {}).items()}
                     self.numerical_observe_count = int(diagnostics.get("observe_count", 0))
                     self.numerical_diagnostics_coverage = str(diagnostics.get("coverage") or "full_run")
+                    # Optional keys: older v1 checkpoints omit frame histories.
+                    self.native_volume_budget_records = self._checkpoint_mapping_records(
+                        diagnostics.get("native_volume_budget_records"),
+                        "native_volume_budget_records",
+                    )
+                    self._output_frame_events = self._checkpoint_mapping_records(
+                        diagnostics.get("output_frame_events"),
+                        "output_frame_events",
+                    )
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise ValueError(f"Invalid numerical diagnostics checkpoint: {exc}") from exc
             else:
@@ -3431,6 +3455,8 @@ class EDDASolver:
                 # Continue safely, but never present resumed-only diagnostics
                 # as totals for the restored step counters.
                 self.numerical_diagnostics_coverage = "resumed_segment"
+                self.native_volume_budget_records = []
+                self._output_frame_events = []
 
         if restored_flow_connectivity:
             mark_changed = getattr(self.fields, "mark_flow_connectivity_changed", None)

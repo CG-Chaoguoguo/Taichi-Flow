@@ -1,3 +1,5 @@
+import csv
+import json
 import sys
 from pathlib import Path
 
@@ -163,6 +165,17 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     solver_a.numerical_dt_min_hits = 3
     solver_a.numerical_nonfinite_counts = {"volume_relative_error": 1}
     solver_a.numerical_observe_count = 4
+    solver_a.native_volume_budget_records = [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    solver_a._output_frame_events = [
+        {
+            "event_index": 0,
+            "time_s": "4",
+            "writer": "taichi_edda_text",
+            "relative_paths": ["Flow_depth_Taichi_4.0.txt"],
+        },
+    ]
 
     expected_manning = solver_a.rheology.manning.to_numpy().copy()
     expected_manning_ori = solver_a.rheology.manning_ori.to_numpy().copy()
@@ -203,3 +216,55 @@ def test_checkpoint_restores_auxiliary_solver_state(tmp_path):
     assert solver_b.numerical_dt_min_hits == 3
     assert solver_b.numerical_nonfinite_counts == {"volume_relative_error": 1}
     assert solver_b.numerical_observe_count == 4
+    assert solver_b.native_volume_budget_records == [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    assert solver_b._output_frame_events == [
+        {
+            "event_index": 0,
+            "time_s": "4",
+            "writer": "taichi_edda_text",
+            "relative_paths": ["Flow_depth_Taichi_4.0.txt"],
+        },
+    ]
+
+
+def test_checkpoint_keeps_pre_restart_sidecars_after_next_write(tmp_path):
+    dem_file = tmp_path / "tiny.asc"
+    output_dir = tmp_path / "same-dir"
+    checkpoint = tmp_path / "restart_state.npz"
+    _write_ascii_dem(dem_file)
+
+    config_a = _build_config(dem_file, output_dir)
+    solver_a = EDDASolver(config_a)
+    solver_a.initialize()
+    solver_a.native_volume_budget_records = [
+        {"t_output_s": 4.0, "accepted_stage": True, "rainfall_m3": 1.5, "residual_m3": 0.25},
+    ]
+    solver_a.write_native_volume_budget_csv()
+    solver_a._record_output_frame_event(4.0, ["Flow_depth_Taichi_4.0.txt"])
+    solver_a.save_state(str(checkpoint))
+
+    config_b = _build_config(dem_file, output_dir)
+    solver_b = EDDASolver(config_b)
+    solver_b.initialize()
+    assert solver_b.native_volume_budget_records == []
+    assert solver_b._output_frame_events == []
+    solver_b.load_state(str(checkpoint))
+
+    solver_b.native_volume_budget_records.append(
+        {"t_output_s": 8.0, "accepted_stage": True, "rainfall_m3": 2.0, "residual_m3": 0.1},
+    )
+    solver_b.write_native_volume_budget_csv()
+    solver_b._record_output_frame_event(8.0, ["Flow_depth_Taichi_8.0.txt"])
+
+    budget_path = output_dir / "diagnostics" / "native_volume_budget.csv"
+    with budget_path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["t_output_s"] for row in rows] == ["4.0", "8.0"]
+    assert rows[0]["rainfall_m3"] == "1.5"
+
+    payload = json.loads((output_dir / "output_frame_events.json").read_text(encoding="utf-8"))
+    assert [event["time_s"] for event in payload["events"]] == ["4", "8"]
+    assert payload["events"][0]["relative_paths"] == ["Flow_depth_Taichi_4.0.txt"]
+    assert payload["events"][1]["relative_paths"] == ["Flow_depth_Taichi_8.0.txt"]
